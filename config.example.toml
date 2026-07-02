@@ -1,0 +1,31 @@
+# Cortex config. Live copy: ~/.config/marrow/cortex.toml (override path via CORTEX_CONFIG env)
+# Missing file / missing keys -> defaults below apply (tolerant load).
+
+[core]
+timezone = "Australia/Melbourne"
+
+[paths]
+# Empty = use the default paths listed in comments.
+# Default: ~/.config/marrow/marrow.db
+marrow_db = ""
+# Default: ~/Library/Application Support/Knowledge/knowledgeC.db
+knowledgec_db = ""
+# iOS Shortcuts geofence log, appended by an "arrived/left" automation.
+# Lines look like "HH:MM event text"; no default, must be set to enable.
+geofence_file = ""
+# Health export JSON (iOS Shortcut nightly dump). No default, must be set to enable.
+health_export = ""
+
+[knowledgec]
+# knowledgeC.db ZSTREAMNAME to read app-usage rows from.
+stream_name = "/app/usage"
+
+[knowledgec.categories]
+# bundle_id = category. Anything not listed here falls under "default" below.
+default = "uncategorized"
+
+[geofence]
+enabled = false
+
+[health]
+enabled = false
