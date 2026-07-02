@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.venv/
+venv/
+
+# macOS
+.DS_Store
+
+# Data lives outside the repo
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Logs
+logs/
+*.log
+
+# Backup dumps
+backup/
+*.bak
+
+# Local dev artefacts
+*.swp
+*.swo
+.vscode/
+.idea/
+*.tmp
+
+.claude/worktrees/
+.claude/
+.codex/
+.worktrees/
+.mcp.json
+config.toml
+
+# Runtime locks
+*.lock
