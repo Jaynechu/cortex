@@ -15,6 +15,8 @@ DEFAULT_MARROW_DB = Path.home() / ".config" / "marrow" / "marrow.db"
 DEFAULT_KNOWLEDGEC_DB = (
     Path.home() / "Library" / "Application Support" / "Knowledge" / "knowledgeC.db"
 )
+DEFAULT_DAY_LOG = Path.home() / ".config" / "marrow" / "day_log.md"
+DEFAULT_DAY_LOG_ARCHIVE_DIR = Path.home() / ".config" / "marrow" / "day_log_archive"
 
 _DEFAULTS: dict[str, Any] = {
     "core": {"timezone": "Australia/Melbourne"},
@@ -23,6 +25,8 @@ _DEFAULTS: dict[str, Any] = {
         "knowledgec_db": "",
         "geofence_file": "",
         "health_export": "",
+        "day_log": "",
+        "day_log_archive_dir": "",
     },
     "knowledgec": {"stream_name": "/app/usage"},
     "knowledgec.categories": {"default": "uncategorized"},
@@ -91,3 +95,13 @@ def geofence_file_path(cfg: dict) -> Path | None:
 def health_export_path(cfg: dict) -> Path | None:
     raw = cfg["paths"].get("health_export") or ""
     return Path(raw).expanduser() if raw else None
+
+
+def day_log_path(cfg: dict) -> Path:
+    raw = cfg["paths"].get("day_log") or ""
+    return Path(raw).expanduser() if raw else DEFAULT_DAY_LOG
+
+
+def day_log_archive_dir(cfg: dict) -> Path:
+    raw = cfg["paths"].get("day_log_archive_dir") or ""
+    return Path(raw).expanduser() if raw else DEFAULT_DAY_LOG_ARCHIVE_DIR
