@@ -5,6 +5,7 @@ on a missing config file.
 """
 from __future__ import annotations
 
+import copy
 import os
 import tomllib
 from pathlib import Path
@@ -17,6 +18,8 @@ DEFAULT_KNOWLEDGEC_DB = (
 )
 DEFAULT_DAY_LOG = Path.home() / ".config" / "marrow" / "day_log.md"
 DEFAULT_DAY_LOG_ARCHIVE_DIR = Path.home() / ".config" / "marrow" / "day_log_archive"
+DEFAULT_AFFECT_FLAG = Path.home() / ".config" / "marrow" / "cortex" / "affect_flag.json"
+DEFAULT_SELF_SCHEDULE = Path.home() / ".config" / "marrow" / "cortex" / "self_schedule.json"
 
 _DEFAULTS: dict[str, Any] = {
     "core": {"timezone": "Australia/Melbourne"},
@@ -27,12 +30,58 @@ _DEFAULTS: dict[str, Any] = {
         "health_export": "",
         "day_log": "",
         "day_log_archive_dir": "",
+        "affect_flag_file": "",
+        "self_schedule_file": "",
     },
     "knowledgec": {"stream_name": "/app/usage"},
     "knowledgec.categories": {"default": "uncategorized"},
     "geofence": {"enabled": False},
     "health": {"enabled": False},
+    # launchd tick cadence (seconds). Baked into plists at install time.
+    "tick": {"collect_interval_sec": 1800, "pacemaker_interval_sec": 300},
+    # Pacemaker integration knobs (numbers the integration layer computes with).
+    "pacemaker": {
+        "dry_run": True,
+        "active_window_min": 5,
+        "at_home_default": True,
+        "cal_busy_default": False,
+        "token_meter": {"daily_budget_tokens": 0, "window_hours": 24},
+    },
+    # Pure-pacemaker config (consumed by pacemaker.* modules as top-level keys).
+    "desire": {
+        "attachment": {
+            "base_rate_per_min": 0.002,
+            "decay_rate_per_min": 0.0005,
+            "busy_multiplier": 0.0,
+            "home_free_multiplier": 2.0,
+            "gap_threshold_min": 180,
+        },
+        "curiosity": {"base_rate_per_min": 0.001, "decay_rate_per_min": 0.0005},
+        "worry": {"base_rate_per_min": 0.0, "decay_rate_per_min": 0.001},
+        "duty": {"base_rate_per_min": 0.001, "decay_rate_per_min": 0.0005},
+    },
+    "gates": {
+        "cooldown_min": 45,
+        "daily_message_cap": 12,
+        "fatigue_windows": [{"start": "23:30", "end": "07:00"}],
+        "token_budget_min_reserve": 0.1,
+    },
+    "triggers": {
+        "desire_thresholds": {"attachment": 0.8, "curiosity": 0.8, "worry": 0.7, "duty": 0.8},
+        "floor_interval_min": 60,
+        "floor_jitter_min": 10,
+    },
+    "expect_reply": {
+        "check_interval_min": 30,
+        "worry_increment": 0.05,
+        "tone_levels": ["neutral", "concerned", "worried", "anxious"],
+    },
 }
+
+_SECTIONS = (
+    "core", "paths", "knowledgec", "geofence", "health",
+    "tick", "pacemaker", "desire", "gates", "triggers", "expect_reply",
+)
 
 
 def _config_path() -> Path:
@@ -58,14 +107,8 @@ def load(path: Path | None = None) -> dict[str, Any]:
         with cfg_path.open("rb") as f:
             loaded = tomllib.load(f)
 
-    cfg = {
-        "core": dict(_DEFAULTS["core"]),
-        "paths": dict(_DEFAULTS["paths"]),
-        "knowledgec": dict(_DEFAULTS["knowledgec"]),
-        "geofence": dict(_DEFAULTS["geofence"]),
-        "health": dict(_DEFAULTS["health"]),
-    }
-    for section in ("core", "paths", "knowledgec", "geofence", "health"):
+    cfg = {section: copy.deepcopy(_DEFAULTS[section]) for section in _SECTIONS}
+    for section in _SECTIONS:
         if section in loaded:
             cfg[section] = _merge(cfg[section], loaded[section])
 
@@ -105,3 +148,13 @@ def day_log_path(cfg: dict) -> Path:
 def day_log_archive_dir(cfg: dict) -> Path:
     raw = cfg["paths"].get("day_log_archive_dir") or ""
     return Path(raw).expanduser() if raw else DEFAULT_DAY_LOG_ARCHIVE_DIR
+
+
+def affect_flag_path(cfg: dict) -> Path:
+    raw = cfg["paths"].get("affect_flag_file") or ""
+    return Path(raw).expanduser() if raw else DEFAULT_AFFECT_FLAG
+
+
+def self_schedule_path(cfg: dict) -> Path:
+    raw = cfg["paths"].get("self_schedule_file") or ""
+    return Path(raw).expanduser() if raw else DEFAULT_SELF_SCHEDULE

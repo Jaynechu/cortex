@@ -15,6 +15,10 @@ knowledgec_db = ""
 geofence_file = ""
 # Health export JSON (iOS Shortcut nightly dump). No default, must be set to enable.
 health_export = ""
+# Pacemaker affect-flag file (JSON dict written by A1/upset lane). Default: ~/.config/marrow/cortex/affect_flag.json
+affect_flag_file = ""
+# Pacemaker self-schedule queue (JSON list of {due_at}). Default: ~/.config/marrow/cortex/self_schedule.json
+self_schedule_file = ""
 
 [knowledgec]
 # knowledgeC.db ZSTREAMNAME to read app-usage rows from.
@@ -29,3 +33,56 @@ enabled = false
 
 [health]
 enabled = false
+
+# launchd tick cadence (seconds). Baked into the plists at `python -m cortex.install`.
+[tick]
+collect_interval_sec = 1800    # collectors ~30min
+pacemaker_interval_sec = 300   # pacemaker evaluation ~5min
+
+# Integration layer knobs (numbers the integration computes and hands the pure pacemaker).
+[pacemaker]
+dry_run = true                 # log-only; flip to false only once outbound (C5) lands
+active_window_min = 5          # activity within this many min => she is in a live session
+at_home_default = true         # until geofence-derived location is wired in
+cal_busy_default = false       # until calendar busy state is wired in
+
+[pacemaker.token_meter]
+daily_budget_tokens = 0        # 0 = no budget cap (gate no-op); set to cap the rolling window
+window_hours = 24
+
+# Desire accrual/decay per dimension (per-minute rates, clamped [0,1]).
+[desire.attachment]
+base_rate_per_min = 0.002
+decay_rate_per_min = 0.0005
+busy_multiplier = 0.0          # cal-busy => no accrual
+home_free_multiplier = 2.0     # home + free + long gap => faster
+gap_threshold_min = 180
+[desire.curiosity]
+base_rate_per_min = 0.001
+decay_rate_per_min = 0.0005
+[desire.worry]
+base_rate_per_min = 0.0
+decay_rate_per_min = 0.001
+[desire.duty]
+base_rate_per_min = 0.001
+decay_rate_per_min = 0.0005
+
+[gates]
+cooldown_min = 45
+daily_message_cap = 12
+fatigue_windows = [{ start = "23:30", end = "07:00" }]
+token_budget_min_reserve = 0.1
+
+[triggers]
+floor_interval_min = 60
+floor_jitter_min = 10
+[triggers.desire_thresholds]
+attachment = 0.8
+curiosity = 0.8
+worry = 0.7
+duty = 0.8
+
+[expect_reply]
+check_interval_min = 30
+worry_increment = 0.05
+tone_levels = ["neutral", "concerned", "worried", "anxious"]

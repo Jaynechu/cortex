@@ -65,6 +65,22 @@ CREATE TABLE IF NOT EXISTS ct_collector_log (
     ok INTEGER NOT NULL,
     error TEXT
 );
+
+CREATE TABLE IF NOT EXISTS ct_wake_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts TEXT NOT NULL,
+    wake INTEGER NOT NULL,
+    dry_run INTEGER NOT NULL,
+    reasons TEXT,
+    gated_by TEXT,
+    explanation TEXT
+);
+
+CREATE TABLE IF NOT EXISTS ct_pacemaker_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    state TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 
