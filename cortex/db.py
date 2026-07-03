@@ -1,6 +1,8 @@
 """SQLite connection + schema for cortex own tables (ct_ prefix) on the
-shared marrow DB. WAL mode assumed already set by marrow. All timestamps
-are timezone-aware UTC ISO-8601 strings, never naive datetime.now().
+shared marrow DB (~/.config/marrow/marrow.db). Journal mode is owned by
+marrow (DELETE convention, see marrow/storage.py) — cortex must never set
+journal_mode itself. All timestamps are timezone-aware UTC ISO-8601
+strings, never naive datetime.now().
 """
 from __future__ import annotations
 
@@ -95,7 +97,7 @@ def connect(cfg: dict) -> sqlite3.Connection:
 
 def connect_path(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path))
-    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA busy_timeout=30000")
     conn.row_factory = sqlite3.Row
     migrate(conn)
     return conn
