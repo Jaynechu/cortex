@@ -64,6 +64,8 @@ def _state_to_json(state: PacemakerState) -> str:
         },
         "next_floor_due_at": _iso(state.next_floor_due_at),
         "last_wake_at": _iso(state.last_wake_at),
+        "cortex_session_id": state.cortex_session_id,
+        "cortex_session_date": state.cortex_session_date,
     })
 
 
@@ -84,6 +86,8 @@ def _state_from_json(text: str) -> PacemakerState:
         ),
         next_floor_due_at=_parse_dt(o.get("next_floor_due_at")),
         last_wake_at=_parse_dt(o.get("last_wake_at")),
+        cortex_session_id=o.get("cortex_session_id"),
+        cortex_session_date=o.get("cortex_session_date"),
     )
 
 

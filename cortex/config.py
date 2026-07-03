@@ -20,6 +20,9 @@ DEFAULT_DAY_LOG = Path.home() / ".config" / "marrow" / "day_log.md"
 DEFAULT_DAY_LOG_ARCHIVE_DIR = Path.home() / ".config" / "marrow" / "day_log_archive"
 DEFAULT_AFFECT_FLAG = Path.home() / ".config" / "marrow" / "cortex" / "affect_flag.json"
 DEFAULT_SELF_SCHEDULE = Path.home() / ".config" / "marrow" / "cortex" / "self_schedule.json"
+DEFAULT_CORTEX_HOME = Path.home() / ".config" / "marrow" / "cortex"
+DEFAULT_NY_DB_PAGES = Path.home() / "Desktop" / "NY" / "db-pages"
+DEFAULT_MARROW_REPO = Path.home() / "CC-Lab" / "marrow"
 
 _DEFAULTS: dict[str, Any] = {
     "core": {"timezone": "Australia/Melbourne"},
@@ -32,6 +35,15 @@ _DEFAULTS: dict[str, Any] = {
         "day_log_archive_dir": "",
         "affect_flag_file": "",
         "self_schedule_file": "",
+        "cortex_home": "",
+        "wishlist_file": "",
+        "ny_db_pages": "",
+    },
+    # marrow repo invocation for the wake call (separate venv/deps, C3).
+    "marrow": {
+        "repo_dir": str(DEFAULT_MARROW_REPO),
+        "venv_python": str(DEFAULT_MARROW_REPO / ".venv" / "bin" / "python"),
+        "call_timeout_s": 320,
     },
     "knowledgec": {"stream_name": "/app/usage"},
     "knowledgec.categories": {"default": "uncategorized"},
@@ -80,7 +92,7 @@ _DEFAULTS: dict[str, Any] = {
 
 _SECTIONS = (
     "core", "paths", "knowledgec", "geofence", "health",
-    "tick", "pacemaker", "desire", "gates", "triggers", "expect_reply",
+    "tick", "pacemaker", "desire", "gates", "triggers", "expect_reply", "marrow",
 )
 
 
@@ -158,3 +170,21 @@ def affect_flag_path(cfg: dict) -> Path:
 def self_schedule_path(cfg: dict) -> Path:
     raw = cfg["paths"].get("self_schedule_file") or ""
     return Path(raw).expanduser() if raw else DEFAULT_SELF_SCHEDULE
+
+
+def cortex_home(cfg: dict) -> Path:
+    """cwd for the resumed full-env marrow cortex session (Decided 07-03 pm)."""
+    raw = cfg["paths"].get("cortex_home") or ""
+    return Path(raw).expanduser() if raw else DEFAULT_CORTEX_HOME
+
+
+def wishlist_path(cfg: dict) -> Path:
+    """Pure append-only md, fixed path (Decided 07-03 eve). Mirrors marrow's
+    own [cortex].wishlist_path default ('' -> <home>/wishlist.md)."""
+    raw = cfg["paths"].get("wishlist_file") or ""
+    return Path(raw).expanduser() if raw else cortex_home(cfg) / "wishlist.md"
+
+
+def ny_db_pages_dir(cfg: dict) -> Path:
+    raw = cfg["paths"].get("ny_db_pages") or ""
+    return Path(raw).expanduser() if raw else DEFAULT_NY_DB_PAGES

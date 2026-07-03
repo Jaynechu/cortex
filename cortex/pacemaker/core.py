@@ -27,6 +27,10 @@ class PacemakerState:
     expect_reply: ExpectReplyState = ExpectReplyState()
     next_floor_due_at: datetime | None = None
     last_wake_at: datetime | None = None
+    # Cortex session resume (C3, Decided daily rebirth). Opaque to tick() —
+    # only the wake caller (cortex.wake) reads/writes these.
+    cortex_session_id: str | None = None
+    cortex_session_date: str | None = None
 
 
 def _render_explanation(now: datetime, reasons: list, gated: list) -> str:
@@ -89,6 +93,8 @@ def tick(
         expect_reply=new_expect_reply,
         next_floor_due_at=new_next_floor_due_at,
         last_wake_at=new_last_wake_at,
+        cortex_session_id=state.cortex_session_id,
+        cortex_session_date=state.cortex_session_date,
     )
 
     decision = {

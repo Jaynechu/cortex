@@ -19,6 +19,18 @@ health_export = ""
 affect_flag_file = ""
 # Pacemaker self-schedule queue (JSON list of {due_at}). Default: ~/.config/marrow/cortex/self_schedule.json
 self_schedule_file = ""
+# Cortex session cwd (own CLAUDE.md lives here). Default: ~/.config/marrow/cortex
+cortex_home = ""
+# Wishlist md, pure append-only, symlinked into NY. Default: <cortex_home>/wishlist.md
+wishlist_file = ""
+# NY db-pages dir day_log.md + wishlist.md get symlinked into.
+ny_db_pages = ""
+
+# marrow repo invocation for the wake call (separate venv/deps from cortex).
+[marrow]
+repo_dir = "~/CC-Lab/marrow"
+venv_python = "~/CC-Lab/marrow/.venv/bin/python"
+call_timeout_s = 320
 
 [knowledgec]
 # knowledgeC.db ZSTREAMNAME to read app-usage rows from.
