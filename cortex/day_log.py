@@ -1,33 +1,51 @@
-"""day_log.md renderer + updater: three zones per Frame (day-throwaway
-derived view, history lives in DB, one file per day, archived at rebirth).
+"""day_log.md renderer + updater: v2 zones (Decided 07-03 eve, frozen at C3).
 
-Zone Status  — render-only snapshot, rewritten every update().
-Zone Timeline — today's session_digests life_lines, read-only display; the
-  existing marrow reconcile machinery owns edits, this module never writes
-  timeline content back to the DB.
-Zone Notes — cortex free text; everything after the Notes marker is carried
-  over byte-for-byte on re-render, so her edits are never clobbered.
+Zone First    — cortex-written 3-5 action lines, preserved byte-for-byte on
+  re-render (like Notes); cortex overwrites it herself during a wake.
+Zone Status   — render-only snapshot, rewritten every update().
+Zone Today    — one time axis: geofence auto rows + tl rows (events
+  role='tl'), re-sorted by their leading HH:mm so a late tl write self-heals.
+  Pure DB->render, one-way (no reconcile — Decided 07-03 eve HARD). Calendar
+  rows are not wired yet (schedule.py ownership moves here at C6) — omitted,
+  not faked.
+Zone Reminders — placeholder until a reminder collector exists (tail block).
+Zone Track    — placeholder until category-bucket config + sleep inference
+  land; screentime/geofence data exists but bucket definitions do not.
+Zone Stellan's Notes — cortex free text; everything after the marker is
+  carried over byte-for-byte on re-render, so her edits are never clobbered.
 
 Zone boundaries are stable HTML comment markers so the file survives
 round-trips even if the surrounding prose changes.
 """
 from __future__ import annotations
 
+import re
 import shutil
 import sqlite3
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+FIRST_START = "<!-- cortex:first:start -->"
+FIRST_END = "<!-- cortex:first:end -->"
 STATUS_START = "<!-- cortex:status:start -->"
 STATUS_END = "<!-- cortex:status:end -->"
-TIMELINE_START = "<!-- cortex:timeline:start -->"
-TIMELINE_END = "<!-- cortex:timeline:end -->"
+TODAY_START = "<!-- cortex:today:start -->"
+TODAY_END = "<!-- cortex:today:end -->"
+REMINDERS_START = "<!-- cortex:reminders:start -->"
+REMINDERS_END = "<!-- cortex:reminders:end -->"
+TRACK_START = "<!-- cortex:track:start -->"
+TRACK_END = "<!-- cortex:track:end -->"
 NOTES_START = "<!-- cortex:notes:start -->"
 
+DEFAULT_FIRST_BODY = "## First\n(pending first wake)"
 DEFAULT_STATUS_BODY = "## Status\n(pending first update)"
-DEFAULT_TIMELINE_BODY = "## Timeline\n(no entries yet today)"
-DEFAULT_NOTES_BODY = "## Notes\n"
+DEFAULT_TODAY_BODY = "## Today\n(no rows yet today)"
+DEFAULT_REMINDERS_BODY = "## Reminders\n(no reminder data collected yet)"
+DEFAULT_TRACK_BODY = "## Track\n(pending category-bucket + sleep inference wiring)"
+DEFAULT_NOTES_BODY = "## Stellan's Notes\n"
+
+_HM_PREFIX = re.compile(r"^(\d{2}:\d{2})")
 
 
 def _tz(cfg: dict) -> ZoneInfo:
@@ -87,19 +105,72 @@ def render_status(conn: sqlite3.Connection, cfg: dict, now: datetime) -> str:
     return "\n".join(lines)
 
 
-def render_timeline(conn: sqlite3.Connection, now: datetime) -> str:
-    date = now.date().isoformat()
+def _sort_key(line: str) -> str:
+    m = _HM_PREFIX.match(line)
+    return m.group(1) if m else "99:99"
+
+
+def _geofence_rows_today(conn: sqlite3.Connection, date: str) -> list[str]:
+    try:
+        rows = conn.execute(
+            "SELECT time, event FROM ct_geofence WHERE date = ? ORDER BY time", (date,)
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    return [f"{row['time']} [{row['event']}]" for row in rows]
+
+
+def _tl_rows_today(conn: sqlite3.Connection, date: str, tz: ZoneInfo) -> list[str]:
+    """tl rows = events role='tl' (A2r): content holds only 【label】body,
+    the HH:mm-HH:mm range lives in ts_start/ts_end — rebuild the display
+    line here. One-way DB->render (no reconcile — Decided 07-03 eve HARD;
+    reconcile-first ordering is a C4 concern)."""
     rows = conn.execute(
-        "SELECT life_lines FROM session_digests "
-        "WHERE date = ? AND life_lines IS NOT NULL AND life_lines != '' "
-        "ORDER BY ts ASC",
-        (date,),
+        "SELECT ts_start, ts_end, content FROM events WHERE role = 'tl' "
+        "AND ts_start LIKE ? ORDER BY ts_start ASC",
+        (f"{date}%",),
     ).fetchall()
-    if not rows:
-        return DEFAULT_TIMELINE_BODY
-    lines = ["## Timeline"]
-    lines.extend(row["life_lines"] for row in rows)
-    return "\n".join(lines)
+    lines = []
+    for row in rows:
+        start_hm = _local_hm(row["ts_start"], tz)
+        stamp = f"{start_hm}-{_local_hm(row['ts_end'], tz)}" if row["ts_end"] else start_hm
+        lines.append(f"{stamp} {row['content']}")
+    return lines
+
+
+def render_today(conn: sqlite3.Connection, cfg: dict, now: datetime) -> str:
+    date = now.date().isoformat()
+    tz = _tz(cfg)
+    lines = _geofence_rows_today(conn, date) + _tl_rows_today(conn, date, tz)
+    lines.sort(key=_sort_key)
+    body = "\n".join(lines) if lines else "(no rows yet today)"
+    return "## Today\n" + body
+
+
+def render_reminders(conn: sqlite3.Connection, cfg: dict, now: datetime) -> str:
+    """No reminder collector exists yet (rem automation = tail block, her
+    rules first). Honest placeholder until due/overdue/done wiring lands."""
+    return DEFAULT_REMINDERS_BODY
+
+
+def render_track(conn: sqlite3.Connection, cfg: dict, now: datetime) -> str:
+    """Screentime (ct_category_usage) and geofence data exist, but the
+    Focus G/U/O/Code bucket mapping and sleep inference are undefined —
+    honest placeholder rather than fabricated numbers."""
+    return DEFAULT_TRACK_BODY
+
+
+def _extract_bounded(existing_text: str | None, start: str, end: str, default_body: str) -> str:
+    """Return the text between start/end markers verbatim, or default_body
+    if absent (new file / corrupted markers)."""
+    if not existing_text:
+        return default_body
+    s = existing_text.find(start)
+    e = existing_text.find(end)
+    if s == -1 or e == -1 or e < s:
+        return default_body
+    body = existing_text[s + len(start): e].strip("\n")
+    return body or default_body
 
 
 def _split_notes(existing_text: str | None) -> str:
@@ -117,19 +188,33 @@ def _split_notes(existing_text: str | None) -> str:
 def render_day_log(
     conn: sqlite3.Connection, cfg: dict, now: datetime, existing_text: str | None = None
 ) -> str:
-    """Assemble the full file: Status + Timeline rebuilt fresh, Notes carried
-    over verbatim from existing_text (or a fresh default block)."""
+    """Assemble the full file: First carried over verbatim (cortex's own
+    writing), Status/Today/Reminders/Track rebuilt fresh, Notes carried over
+    verbatim from existing_text (or fresh defaults)."""
     date = now.date().isoformat()
+    first_body = _extract_bounded(existing_text, FIRST_START, FIRST_END, DEFAULT_FIRST_BODY)
     head_lines = [
         date,
+        "",
+        FIRST_START,
+        first_body,
+        FIRST_END,
         "",
         STATUS_START,
         render_status(conn, cfg, now),
         STATUS_END,
         "",
-        TIMELINE_START,
-        render_timeline(conn, now),
-        TIMELINE_END,
+        TODAY_START,
+        render_today(conn, cfg, now),
+        TODAY_END,
+        "",
+        REMINDERS_START,
+        render_reminders(conn, cfg, now),
+        REMINDERS_END,
+        "",
+        TRACK_START,
+        render_track(conn, cfg, now),
+        TRACK_END,
         "",
     ]
     head = "\n".join(head_lines) + "\n"
@@ -138,8 +223,8 @@ def render_day_log(
 
 
 def update(path: Path, conn: sqlite3.Connection, cfg: dict, now: datetime) -> None:
-    """Re-read the file (if present) for Notes preservation, rebuild Status
-    and Timeline, and write the result back."""
+    """Re-read the file (if present) for First/Notes preservation, rebuild
+    Status/Today/Reminders/Track, and write the result back."""
     existing_text = path.read_text() if path.exists() else None
     text = render_day_log(conn, cfg, now, existing_text)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -152,13 +237,25 @@ def new_day(path: Path, date: str) -> None:
     head_lines = [
         date,
         "",
+        FIRST_START,
+        DEFAULT_FIRST_BODY,
+        FIRST_END,
+        "",
         STATUS_START,
         DEFAULT_STATUS_BODY,
         STATUS_END,
         "",
-        TIMELINE_START,
-        DEFAULT_TIMELINE_BODY,
-        TIMELINE_END,
+        TODAY_START,
+        DEFAULT_TODAY_BODY,
+        TODAY_END,
+        "",
+        REMINDERS_START,
+        DEFAULT_REMINDERS_BODY,
+        REMINDERS_END,
+        "",
+        TRACK_START,
+        DEFAULT_TRACK_BODY,
+        TRACK_END,
         "",
     ]
     text = "\n".join(head_lines) + "\n" + NOTES_START + "\n" + DEFAULT_NOTES_BODY
