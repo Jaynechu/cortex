@@ -43,7 +43,9 @@ _DEFAULTS: dict[str, Any] = {
     "marrow": {
         "repo_dir": str(DEFAULT_MARROW_REPO),
         "venv_python": str(DEFAULT_MARROW_REPO / ".venv" / "bin" / "python"),
-        "call_timeout_s": 320,
+        # Inner claude-call budget (s), passed down to marrow; the outer
+        # subprocess kill = this + margin. Must match marrow's own default.
+        "call_timeout_s": 600,
     },
     "knowledgec": {"stream_name": "/app/usage"},
     "knowledgec.categories": {"default": "uncategorized"},

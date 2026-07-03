@@ -30,7 +30,10 @@ ny_db_pages = ""
 [marrow]
 repo_dir = "~/CC-Lab/marrow"
 venv_python = "~/CC-Lab/marrow/.venv/bin/python"
-call_timeout_s = 320
+# Inner claude-call budget (seconds), passed down to marrow's cortex runner.
+# The outer subprocess kill is derived (this + a small margin), so the inner
+# timeout always fires first. Keep in sync with marrow [llm.claude_cli_cortex].
+call_timeout_s = 600
 
 [knowledgec]
 # knowledgeC.db ZSTREAMNAME to read app-usage rows from.

@@ -22,7 +22,7 @@ from __future__ import annotations
 import re
 import shutil
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -57,10 +57,25 @@ def _local_hm(ts_iso: str, tz: ZoneInfo) -> str:
     return dt.astimezone(tz).strftime("%H:%M")
 
 
-def _last_seen_line(conn: sqlite3.Connection, date: str, tz: ZoneInfo) -> str:
+def _utc_day_bounds(now: datetime, tz: ZoneInfo) -> tuple[str, str]:
+    """[start, end) UTC 'Z' bounds for the local calendar day containing `now`.
+    DB timestamps (ct_activity.ts, events.ts_start) are stored UTC; the local
+    Melbourne day maps to a UTC window, so a naive local-date prefix match
+    (ts LIKE 'YYYY-MM-DD%') would misfile the pre-10:00 rows whose UTC date is
+    still the previous day. Both columns share the '...SSZ' fixed format, so
+    string range comparison against these bounds is exact."""
+    start_local = now.astimezone(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+    start_utc = start_local.astimezone(timezone.utc)
+    end_utc = start_utc + timedelta(days=1)
+    fmt = "%Y-%m-%dT%H:%M:%SZ"
+    return start_utc.strftime(fmt), end_utc.strftime(fmt)
+
+
+def _last_seen_line(conn: sqlite3.Connection, now: datetime, tz: ZoneInfo) -> str:
+    start, end = _utc_day_bounds(now, tz)
     row = conn.execute(
-        "SELECT ts, channel FROM ct_activity WHERE ts LIKE ? ORDER BY ts DESC LIMIT 1",
-        (f"{date}%",),
+        "SELECT ts, channel FROM ct_activity WHERE ts >= ? AND ts < ? ORDER BY ts DESC LIMIT 1",
+        (start, end),
     ).fetchone()
     if row is None:
         return "no activity today"
@@ -98,7 +113,7 @@ def render_status(conn: sqlite3.Connection, cfg: dict, now: datetime) -> str:
     tz = _tz(cfg)
     lines = [
         "## Status",
-        f"Last seen: {_last_seen_line(conn, date, tz)}",
+        f"Last seen: {_last_seen_line(conn, now, tz)}",
         f"Usage today: {_usage_line(conn, date)}",
         "Collectors: " + " · ".join(_collector_lines(conn)),
     ]
@@ -120,15 +135,17 @@ def _geofence_rows_today(conn: sqlite3.Connection, date: str) -> list[str]:
     return [f"{row['time']} [{row['event']}]" for row in rows]
 
 
-def _tl_rows_today(conn: sqlite3.Connection, date: str, tz: ZoneInfo) -> list[str]:
+def _tl_rows_today(conn: sqlite3.Connection, now: datetime, tz: ZoneInfo) -> list[str]:
     """tl rows = events role='tl' (A2r): content holds only 【label】body,
     the HH:mm-HH:mm range lives in ts_start/ts_end — rebuild the display
     line here. One-way DB->render (no reconcile — Decided 07-03 eve HARD;
-    reconcile-first ordering is a C4 concern)."""
+    reconcile-first ordering is a C4 concern). ts_start is UTC, so filter on
+    the local-day UTC window rather than a local-date prefix."""
+    start, end = _utc_day_bounds(now, tz)
     rows = conn.execute(
         "SELECT ts_start, ts_end, content FROM events WHERE role = 'tl' "
-        "AND ts_start LIKE ? ORDER BY ts_start ASC",
-        (f"{date}%",),
+        "AND ts_start >= ? AND ts_start < ? ORDER BY ts_start ASC",
+        (start, end),
     ).fetchall()
     lines = []
     for row in rows:
@@ -141,7 +158,7 @@ def _tl_rows_today(conn: sqlite3.Connection, date: str, tz: ZoneInfo) -> list[st
 def render_today(conn: sqlite3.Connection, cfg: dict, now: datetime) -> str:
     date = now.date().isoformat()
     tz = _tz(cfg)
-    lines = _geofence_rows_today(conn, date) + _tl_rows_today(conn, date, tz)
+    lines = _geofence_rows_today(conn, date) + _tl_rows_today(conn, now, tz)
     lines.sort(key=_sort_key)
     body = "\n".join(lines) if lines else "(no rows yet today)"
     return "## Today\n" + body
@@ -272,5 +289,12 @@ def archive(path: Path, archive_dir: Path) -> Path:
     first_line = text.splitlines()[0].strip() if text.strip() else "unknown"
     archive_dir.mkdir(parents=True, exist_ok=True)
     dest = archive_dir / f"{first_line}.md"
+    if dest.exists():
+        # Never clobber an existing archive: a same-day re-archive (e.g. a
+        # failed wake retry) must not overwrite the real data with a blank
+        # shell. Fall back to the next free -N suffix.
+        i = 2
+        while (dest := archive_dir / f"{first_line}-{i}.md").exists():
+            i += 1
     shutil.move(str(path), str(dest))
     return dest

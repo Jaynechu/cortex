@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import subprocess
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -114,6 +116,62 @@ def test_run_wake_creates_ny_symlinks(marrow_conn, wcfg):
     assert (ny / "day_log.md").is_symlink()
     assert (ny / "wishlist.md").is_symlink()
     assert (ny / "wishlist.md").resolve() == Path(wcfg["paths"]["wishlist_file"]).resolve()
+
+
+class FailCaller:
+    def __call__(self, prompt, cwd, resume_sid, cfg):
+        raise wake.WakeError("boom")
+
+
+def test_failed_wake_persists_rollover_and_preserves_archive(marrow_conn, wcfg):
+    """A failed wake on a new day must still record the daily rollover so a
+    retry does not re-archive; and the real archive from day 1 must never be
+    clobbered by a blank shell (the 07-03 first-wake data-loss bug)."""
+    good = FakeCaller(session_id="sid-day1")
+    wake.run_wake(marrow_conn, wcfg, DECISION, now=DAY1, caller=good)
+    day1_content = Path(wcfg["paths"]["day_log"]).read_text()
+
+    # Day 2 first attempt: rebirth archives day1 + new_day, then caller fails.
+    with pytest.raises(wake.WakeError):
+        wake.run_wake(marrow_conn, wcfg, DECISION, now=DAY2, caller=FailCaller())
+
+    archive_dir = Path(wcfg["paths"]["day_log_archive_dir"])
+    archived = archive_dir / "2026-07-03.md"
+    assert archived.exists()
+    assert archived.read_text() == day1_content
+
+    from cortex.pacemaker import integration
+    st = integration.load_state(marrow_conn)
+    assert st.cortex_session_date == "2026-07-04"  # rollover persisted despite failure
+    assert st.cortex_session_id is None
+
+    # Day 2 retry: rebirth already recorded -> no re-archive, no clobber.
+    good2 = FakeCaller(session_id="sid-day2")
+    wake.run_wake(marrow_conn, wcfg, DECISION, now=DAY2 + timedelta(minutes=5), caller=good2)
+    assert archived.read_text() == day1_content
+    assert not (archive_dir / "2026-07-04.md").exists()
+    assert integration.load_state(marrow_conn).cortex_session_id == "sid-day2"
+
+
+def test_call_marrow_cortex_outer_timeout_derives_from_inner(monkeypatch, wcfg):
+    """Outer subprocess kill = inner budget + margin; inner budget is passed
+    down to marrow so the two layers share one config value."""
+    cfg = dict(wcfg)
+    cfg["marrow"] = {**wcfg["marrow"], "call_timeout_s": 100,
+                     "repo_dir": "/repo", "venv_python": "/py"}
+    captured = {}
+
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        captured["timeout"] = kw["timeout"]
+        raise subprocess.TimeoutExpired(cmd, kw["timeout"])
+
+    monkeypatch.setattr(wake.subprocess, "run", fake_run)
+    with pytest.raises(wake.WakeError, match="130s"):
+        wake.call_marrow_cortex("prompt", "/cwd", None, cfg)
+
+    assert captured["timeout"] == 130
+    assert captured["cmd"][-1] == "100"  # inner budget handed to marrow script
 
 
 def test_main_print_bulletin_no_marrow_call(monkeypatch, marrow_conn, wcfg, capsys):

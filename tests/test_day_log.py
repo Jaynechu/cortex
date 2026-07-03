@@ -61,8 +61,8 @@ def test_render_today_merges_and_sorts_geofence_and_tl_rows(marrow_conn, base_cf
     marrow_conn.execute(
         "INSERT INTO events (session_id, timestamp, role, content, ts_start, ts_end) "
         "VALUES (?, ?, ?, ?, ?, ?)",
-        ("s1", "2026-07-02T23:00:00Z", "tl", "not today",
-         "2026-07-02T22:00:00Z", "2026-07-02T22:10:00Z"),
+        ("s1", "2026-07-02T10:00:00Z", "tl", "not today",
+         "2026-07-02T10:00:00Z", "2026-07-02T10:10:00Z"),
     )
     marrow_conn.commit()
 
@@ -174,3 +174,38 @@ def test_archive_missing_file_raises(tmp_path):
         assert False, "expected FileNotFoundError"
     except FileNotFoundError:
         pass
+
+
+def test_archive_does_not_clobber_existing_same_day(tmp_path):
+    """A second same-day archive (e.g. a failed-wake retry) must preserve the
+    first archived file instead of overwriting it with a blank shell."""
+    archive_dir = tmp_path / "archive"
+    path = tmp_path / "day_log.md"
+
+    day_log.new_day(path, "2026-07-03")
+    path.write_text("2026-07-03\nREAL DATA\n")
+    first = day_log.archive(path, archive_dir)
+    assert first == archive_dir / "2026-07-03.md"
+
+    day_log.new_day(path, "2026-07-03")  # blank shell, same L1 date
+    second = day_log.archive(path, archive_dir)
+
+    assert second == archive_dir / "2026-07-03-2.md"
+    assert "REAL DATA" in first.read_text()  # original untouched
+
+
+def test_render_today_includes_early_local_morning_across_utc_boundary(marrow_conn, base_cfg):
+    """ts_start is UTC; a 06:00 Melbourne (local 07-03) row lands on UTC
+    2026-07-02 — a local-date prefix match would wrongly drop it."""
+    make_events_table(marrow_conn)
+    marrow_conn.execute(
+        "INSERT INTO events (session_id, timestamp, role, content, ts_start, ts_end) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        ("s1", "2026-07-02T20:00:00Z", "tl", "【专注·3】dawn",
+         "2026-07-02T20:00:00Z", "2026-07-02T20:30:00Z"),
+    )
+    marrow_conn.commit()
+
+    text = day_log.render_today(marrow_conn, base_cfg, NOW)  # NOW = local 07-03
+    assert "dawn" in text
+    assert "06:00-06:30" in text
