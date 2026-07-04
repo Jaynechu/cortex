@@ -110,3 +110,9 @@ duty = 0.8
 check_interval_min = 30
 worry_increment = 0.05
 tone_levels = ["neutral", "concerned", "worried", "anxious"]
+
+# Wake bulletin knobs (battery gauge + forced conversation replay).
+[bulletin]
+max_chars = 2000            # hard cap on the whole rendered bulletin text
+replay_pairs = 3             # trailing user/assistant pairs force-appended
+replay_pair_chars = 240      # per-message truncation inside a replayed pair

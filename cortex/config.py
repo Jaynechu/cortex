@@ -95,12 +95,22 @@ _DEFAULTS: dict[str, Any] = {
         "worry_increment": 0.05,
         "tone_levels": ["neutral", "concerned", "worried", "anxious"],
     },
+    # Wake bulletin knobs (07-04: battery gauge + forced replay).
+    "bulletin": {
+        # Hard cap on the whole rendered bulletin text.
+        "max_chars": 2000,
+        # How many trailing user/assistant conversation pairs to force-append
+        # (Decided 07-04: never rely on cortex self-serve recall queries).
+        "replay_pairs": 3,
+        # Per-message truncation inside a replayed pair, keeps total bounded.
+        "replay_pair_chars": 240,
+    },
 }
 
 _SECTIONS = (
     "core", "paths", "knowledgec", "geofence", "health",
     "tick", "pacemaker", "desire", "gates", "triggers", "expect_reply", "marrow",
-    "wake",
+    "wake", "bulletin",
 )
 
 

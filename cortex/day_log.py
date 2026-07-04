@@ -3,14 +3,22 @@
 Zone First    — cortex-written 3-5 action lines, preserved byte-for-byte on
   re-render (like Notes); cortex overwrites it herself during a wake.
 Zone Status   — render-only snapshot, rewritten every update().
-Zone Today    — one time axis: geofence auto rows + tl rows (events
-  role='tl'), re-sorted by their leading HH:mm so a late tl write self-heals.
-  Pure DB->render, one-way (no reconcile — Decided 07-03 eve HARD). Calendar
-  rows are not wired yet (schedule.py ownership moves here at C6) — omitted,
-  not faked.
-Zone Reminders — placeholder until a reminder collector exists (tail block).
+Zone Flow     — (display title, was "Today") one time axis: geofence auto
+  rows + tl rows (events role='tl'), re-sorted by their leading HH:mm so a
+  late tl write self-heals. Pure DB->render, one-way (no reconcile — Decided
+  07-03 eve HARD). Calendar rows are not wired yet (schedule.py ownership
+  moves here at C6) — omitted, not faked.
+Zone Tasks    — (display title, was "Reminders") task pool, not nag
+  triggers — coax only. Placeholder until a reminder collector exists (tail
+  block).
 Zone Track    — placeholder until category-bucket config + sleep inference
   land; screentime/geofence data exists but bucket definitions do not.
+
+Renames (07-04 Decided): Today->Flow, Reminders->Tasks are DISPLAY TITLE
+ONLY — the HTML-comment zone marker IDs below (TODAY_START/END,
+REMINDERS_START/END) and the python constant names are unchanged on
+purpose, so existing day_log.md files and any marker-based reader survive
+the rename untouched.
 Zone Stellan's Notes — cortex free text; everything after the marker is
   carried over byte-for-byte on re-render, so her edits are never clobbered.
 
@@ -40,8 +48,12 @@ NOTES_START = "<!-- cortex:notes:start -->"
 
 DEFAULT_FIRST_BODY = "## First\n(pending first wake)"
 DEFAULT_STATUS_BODY = "## Status\n(pending first update)"
-DEFAULT_TODAY_BODY = "## Today\n(no rows yet today)"
-DEFAULT_REMINDERS_BODY = "## Reminders\n(no reminder data collected yet)"
+DEFAULT_TODAY_BODY = "## Flow\n(no rows yet today)"
+DEFAULT_REMINDERS_BODY = (
+    "## Tasks\n"
+    "task pool, not nag triggers — coax only\n"
+    "(no reminder data collected yet)"
+)
 DEFAULT_TRACK_BODY = "## Track\n(pending category-bucket + sleep inference wiring)"
 DEFAULT_NOTES_BODY = "## Stellan's Notes\n"
 
@@ -161,12 +173,14 @@ def render_today(conn: sqlite3.Connection, cfg: dict, now: datetime) -> str:
     lines = _geofence_rows_today(conn, date) + _tl_rows_today(conn, now, tz)
     lines.sort(key=_sort_key)
     body = "\n".join(lines) if lines else "(no rows yet today)"
-    return "## Today\n" + body
+    return "## Flow\n" + body
 
 
 def render_reminders(conn: sqlite3.Connection, cfg: dict, now: datetime) -> str:
-    """No reminder collector exists yet (rem automation = tail block, her
-    rules first). Honest placeholder until due/overdue/done wiring lands."""
+    """Tasks zone (display title, was Reminders) — task pool, not nag
+    triggers, coax only. No reminder collector exists yet (rem automation =
+    tail block, her rules first). Honest placeholder until due/overdue/done
+    wiring lands."""
     return DEFAULT_REMINDERS_BODY
 
 

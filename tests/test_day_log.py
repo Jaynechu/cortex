@@ -69,7 +69,7 @@ def test_render_today_merges_and_sorts_geofence_and_tl_rows(marrow_conn, base_cf
     text = day_log.render_today(marrow_conn, base_cfg, NOW)
     lines = text.splitlines()
 
-    assert lines[0] == "## Today"
+    assert lines[0] == "## Flow"
     assert lines[1] == "09:00 [home]"
     assert lines[2] == "13:00-13:10 【专注·3】first"
     assert "not today" not in text
@@ -84,6 +84,8 @@ def test_render_today_empty_placeholder(marrow_conn, base_cfg):
 def test_render_reminders_placeholder(marrow_conn, base_cfg):
     text = day_log.render_reminders(marrow_conn, base_cfg, NOW)
     assert text == day_log.DEFAULT_REMINDERS_BODY
+    assert text.startswith("## Tasks")
+    assert "task pool, not nag triggers" in text
 
 
 def test_render_track_placeholder(marrow_conn, base_cfg):

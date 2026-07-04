@@ -1,10 +1,22 @@
-"""Collector tick entry point (launchd, ~30min). Runs every collector once."""
+"""Collector tick entry point (launchd, ~30min). Runs every collector once,
+then re-renders day_log.md so it stays fresh between wakes."""
 from __future__ import annotations
 
 import sys
+from datetime import datetime, timezone
 
-from cortex import config, db
+from cortex import config, day_log, db
 from cortex.collectors import run_all
+
+
+def _render_day_log(conn, cfg: dict) -> None:
+    """Re-render Status/Flow/Tasks/Track between wakes. Tolerant: day_log.md
+    missing -> skip quietly (wake owns creation/archive lifecycle; the tick
+    path never creates or archives it)."""
+    path = config.day_log_path(cfg)
+    if not path.exists():
+        return
+    day_log.update(path, conn, cfg, datetime.now(timezone.utc))
 
 
 def main() -> int:
@@ -12,6 +24,7 @@ def main() -> int:
     conn = db.connect(cfg)
     try:
         results = run_all(conn, cfg)
+        _render_day_log(conn, cfg)
     finally:
         conn.close()
     ok = all(results.values())

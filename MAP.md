@@ -132,7 +132,10 @@ Pure decision core, no I/O, no wall-clock reads — `now` and `rng` always injec
 - After the call: `new_state.cortex_session_id = result.get("session_id") or
   resume_sid` (falls back to the sid it resumed if the call didn't return a fresh
   one), `cortex_session_date = today`, saved. Then `day_log.update` re-renders
-  Status/Today/Reminders/Track from current DB state.
+  Status/Flow/Tasks/Track from current DB state. `collect_tick.py:main` also
+  calls `day_log.update` after each collector run (07-04) — file stays fresh
+  between wakes, not wake-only; skips quietly if day_log.md doesn't exist yet
+  (wake still owns creation/archive).
 - `wake.py:main` — manual CLI entry: `--print-bulletin` (assemble + print only, no
   marrow call) or `--force` (bypass pacemaker gates, synthetic wake decision).
 - Marrow-side runner: `marrow/llm.py:LLMClient.call_cortex` → `_run_claude_cortex` —
@@ -153,12 +156,15 @@ Six zones bounded by stable HTML-comment markers so the file survives round-trip
   local-day UTC-window bounded — see below), top usage category today
   (`ct_category_usage`), collector health (`ct_collector_log`, latest row per
   source).
-- **Today** — one time axis: geofence rows (`ct_geofence`, `HH:MM [event]`) +
+- **Flow** (display title, was Today; marker IDs unchanged — `TODAY_START/END`)
+  — one time axis: geofence rows (`ct_geofence`, `HH:MM [event]`) +
   self-authored tl rows (`events WHERE role='tl'`, A2r), re-sorted by leading
   `HH:mm` (`_sort_key`) so a late tl write self-heals into position. Pure
   DB→render, one-way — no reconcile (Decided 07-03 eve HARD). Calendar rows not
   wired yet (schedule.py ownership moves here at C6) — omitted honestly, not faked.
-- **Reminders**, **Track** — honest placeholders (`DEFAULT_REMINDERS_BODY`,
+- **Tasks** (display title, was Reminders; marker IDs unchanged —
+  `REMINDERS_START/END`) — subnote "task pool, not nag triggers — coax only".
+  **Track** — honest placeholders (`DEFAULT_REMINDERS_BODY`,
   `DEFAULT_TRACK_BODY`) until a reminder collector and category-bucket/sleep
   inference config exist (tail block).
 - **Stellan's Notes** — cortex free text; everything after the marker carried over
@@ -176,11 +182,26 @@ Six zones bounded by stable HTML-comment markers so the file survives round-trip
 
 - `gather` — thin DB read for `now`'s local date: last `ct_activity` row, top
   `ct_category_usage` row, `events` count today, folds in caller-supplied facts
-  (pacemaker `decision`, `cal_next_3h` — not wired, `expect_reply_state`).
+  (pacemaker `decision`, `cal_next_3h` — not wired, `expect_reply_state`). Also
+  reads `ct_rate_limit` (kv table, marrow-side writer) and the last N
+  user/assistant `events` pairs (07-04).
 - `render` — pure (no I/O): `Now:` / `Trigger:` (decision explanation or trigger
   facts or "none") / `Last activity:` / `Calendar (3h): none` (honest — schedule.py
-  ownership transfers at C6) / `Usage today:` / `Counts:` / `Expect-reply:`. Hard
-  cap `MAX_CHARS` = 1000.
+  ownership transfers at C6) / `Usage today:` / `Budget:` (07-04, battery gauge)
+  / `Counts:` / `Expect-reply:` / forced replay section. Hard cap `MAX_CHARS`
+  default 2000, config `[bulletin].max_chars` overridable.
+- **Budget gauge** (07-04) — `_rate_limit_kv` reads `ct_rate_limit` (flat
+  key/value/updated_at, owned by a marrow-side writer parsing
+  `rate_limit_event` off the cortex stream — not yet landed at write time of
+  this reader). Key contract assumed here (`five_hour_pct`/`five_hour_reset_at`,
+  `seven_day_pct`/`seven_day_reset_at`, `window_tokens`) — reconcile against
+  the real writer once it ships. Table/keys missing → honest "Budget: no data".
+- **Forced replay** (07-04) — `_replay_pairs` reads the last
+  `[bulletin].replay_pairs` (default 3) user/assistant `events` pairs (role
+  'tl' and non-conversation rows excluded — tool calls already stripped by
+  marrow's `transcript.clean` before archiving). Per-message truncated to
+  `[bulletin].replay_pair_chars` (default 240). Decided 07-04: never rely on
+  cortex self-serve recall queries for this.
 
 ## 7. Symlinks, config, install (`cortex/symlinks.py`, `config.py`, `install.py`)
 
@@ -206,17 +227,19 @@ Six zones bounded by stable HTML-comment markers so the file survives round-trip
 
 ## 8. Status
 
-- 111 tests passing (`.venv/bin/python -m pytest -q`, 2026-07-03) — collectors,
+- 122 tests passing (`.venv/bin/python -m pytest -q`, 2026-07-04) — collectors,
   pacemaker core/gates/desire/triggers/expect-reply, integration layer (synthetic
   `audit_log` fixtures), day_log v2 zones, wake runner (`caller` injectable so tests
-  never spawn a real claude process), bulletin.
+  never spawn a real claude process), bulletin (incl. budget gauge + replay).
 - Shipped: C1 collectors, C2 pacemaker core + integration wiring, C3 bulletin +
-  day_log v2 + wake runner + symlinks + timeout unification.
+  day_log v2 + wake runner + symlinks + timeout unification, C4 Block1 (Flow/Tasks
+  renames, tick-path render, bulletin budget gauge + forced replay).
 - Not yet wired: event-sourced triggers (`context["events"]` always `[]`),
   `cal_busy`/`at_home` from real geofence/calendar data (config defaults only),
-  expect-reply `start()` call site (no outbound exists), Reminders/Track zones,
+  expect-reply `start()` call site (no outbound exists), Tasks/Track zone data,
   reminder collector, goals-driven Track rendering (goals table lives in marrow,
-  C1 said "Track renderer reads goals" — not yet read from cortex side).
+  C1 said "Track renderer reads goals" — not yet read from cortex side). Budget
+  gauge key contract (`ct_rate_limit`) unverified against the real marrow writer.
 - Health/geofence collectors are feature-flagged off by default
   (`config[health].enabled` / `config[geofence].enabled` = false) — no export
   shape/file exists yet to point them at.
