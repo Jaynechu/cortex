@@ -25,6 +25,9 @@ cortex_home = ""
 wishlist_file = ""
 # NY db-pages dir day_log.md + wishlist.md get symlinked into.
 ny_db_pages = ""
+# Wake-latency probe log (cortex stage marks + marrow stream-event marks).
+# Default: ~/.config/marrow/logs/wake_timing.log
+wake_timing_log = ""
 
 # marrow repo invocation for the wake call (separate venv/deps from cortex).
 [marrow]
@@ -34,6 +37,12 @@ venv_python = "~/CC-Lab/marrow/.venv/bin/python"
 # The outer subprocess kill is derived (this + a small margin), so the inner
 # timeout always fires first. Keep in sync with marrow [llm.claude_cli_cortex].
 call_timeout_s = 600
+
+# Per-wake safety valve. Cap the tokens one wake may spend; a mid-stream breach
+# (or the call_timeout_s wall clock above) terminates the session and rebirths a
+# fresh one on the next wake. 0 disables the token cap.
+[wake]
+token_cap = 150000
 
 [knowledgec]
 # knowledgeC.db ZSTREAMNAME to read app-usage rows from.

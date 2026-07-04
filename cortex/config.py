@@ -23,6 +23,7 @@ DEFAULT_SELF_SCHEDULE = Path.home() / ".config" / "marrow" / "cortex" / "self_sc
 DEFAULT_CORTEX_HOME = Path.home() / ".config" / "marrow" / "cortex"
 DEFAULT_NY_DB_PAGES = Path.home() / "Desktop" / "NY" / "db-pages"
 DEFAULT_MARROW_REPO = Path.home() / "CC-Lab" / "marrow"
+DEFAULT_WAKE_TIMING_LOG = Path.home() / ".config" / "marrow" / "logs" / "wake_timing.log"
 
 _DEFAULTS: dict[str, Any] = {
     "core": {"timezone": "Australia/Melbourne"},
@@ -38,7 +39,11 @@ _DEFAULTS: dict[str, Any] = {
         "cortex_home": "",
         "wishlist_file": "",
         "ny_db_pages": "",
+        "wake_timing_log": "",
     },
+    # Per-wake safety valve: cap tokens spent in one wake; breach or the marrow
+    # wall-clock timeout (marrow.call_timeout_s) rebirths a fresh session.
+    "wake": {"token_cap": 150_000},
     # marrow repo invocation for the wake call (separate venv/deps, C3).
     "marrow": {
         "repo_dir": str(DEFAULT_MARROW_REPO),
@@ -95,6 +100,7 @@ _DEFAULTS: dict[str, Any] = {
 _SECTIONS = (
     "core", "paths", "knowledgec", "geofence", "health",
     "tick", "pacemaker", "desire", "gates", "triggers", "expect_reply", "marrow",
+    "wake",
 )
 
 
@@ -190,3 +196,10 @@ def wishlist_path(cfg: dict) -> Path:
 def ny_db_pages_dir(cfg: dict) -> Path:
     raw = cfg["paths"].get("ny_db_pages") or ""
     return Path(raw).expanduser() if raw else DEFAULT_NY_DB_PAGES
+
+
+def wake_timing_log_path(cfg: dict) -> Path:
+    """Shared wake-latency probe log (cortex marks + marrow stream-event marks).
+    Default: ~/.config/marrow/logs/wake_timing.log."""
+    raw = cfg["paths"].get("wake_timing_log") or ""
+    return Path(raw).expanduser() if raw else DEFAULT_WAKE_TIMING_LOG

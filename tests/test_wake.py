@@ -34,8 +34,10 @@ def wcfg(base_cfg, tmp_path):
         "cortex_home": str(tmp_path / "cortex_home"),
         "wishlist_file": str(tmp_path / "cortex_home" / "wishlist.md"),
         "ny_db_pages": str(tmp_path / "ny"),
+        "wake_timing_log": str(tmp_path / "wake_timing.log"),
     }
     cfg["marrow"] = {"repo_dir": "", "venv_python": "", "call_timeout_s": 5}
+    cfg["wake"] = {"token_cap": 150_000}
     return cfg
 
 
@@ -171,7 +173,46 @@ def test_call_marrow_cortex_outer_timeout_derives_from_inner(monkeypatch, wcfg):
         wake.call_marrow_cortex("prompt", "/cwd", None, cfg)
 
     assert captured["timeout"] == 130
-    assert captured["cmd"][-1] == "100"  # inner budget handed to marrow script
+    assert captured["cmd"][-2] == "100"  # inner budget handed to marrow script
+    assert captured["cmd"][-1] == "150000"  # per-wake token cap handed down
+
+
+class CapCaller:
+    """Simulates a marrow wake that tripped the per-wake token cap mid-stream."""
+    def __init__(self):
+        self.calls = []
+
+    def __call__(self, prompt, cwd, resume_sid, cfg):
+        self.calls.append({"resume_sid": resume_sid})
+        return {"text": "", "session_id": None, "capped": True,
+                "total_tokens": 160000}
+
+
+def test_token_cap_breach_forces_fresh_no_rearchive(marrow_conn, wcfg):
+    """A mid-wake token-cap breach drops the resume sid (fresh session next
+    wake) but keeps date=today so the same day's log is never re-archived."""
+    from cortex.pacemaker import integration
+
+    good = FakeCaller(session_id="sid-1")
+    wake.run_wake(marrow_conn, wcfg, DECISION, now=DAY1, caller=good)
+
+    later = DAY1 + timedelta(hours=1)
+    cap = CapCaller()
+    res = wake.run_wake(marrow_conn, wcfg, DECISION, now=later, caller=cap)
+    assert res["capped"] is True
+    assert cap.calls[0]["resume_sid"] == "sid-1"  # resumed before the breach
+
+    st = integration.load_state(marrow_conn)
+    assert st.cortex_session_id is None            # fresh session next wake
+    assert st.cortex_session_date == "2026-07-03"  # same day -> no re-archive
+
+    # Third wake same day: fresh (resume None), still no archive of day1.
+    good2 = FakeCaller(session_id="sid-3")
+    wake.run_wake(marrow_conn, wcfg, DECISION,
+                  now=later + timedelta(hours=1), caller=good2)
+    assert good2.calls[0]["resume_sid"] is None
+    assert integration.load_state(marrow_conn).cortex_session_id == "sid-3"
+    assert not (Path(wcfg["paths"]["day_log_archive_dir"]) / "2026-07-03.md").exists()
 
 
 def test_main_print_bulletin_no_marrow_call(monkeypatch, marrow_conn, wcfg, capsys):

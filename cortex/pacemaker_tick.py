@@ -4,6 +4,7 @@ calls the real cortex session (C3 wake runner)."""
 from __future__ import annotations
 
 import sys
+import time
 
 from cortex import config, db
 from cortex.pacemaker import integration
@@ -14,10 +15,12 @@ def main() -> int:
     cfg = config.load()
     conn = db.connect(cfg)
     try:
+        t_tick = time.monotonic()
         decision = integration.run_tick(conn, cfg)
+        t_gate = time.monotonic()
         dry_run = bool(cfg["pacemaker"].get("dry_run", True))
         if decision["wake"] and not dry_run:
-            run_wake(conn, cfg, decision)
+            run_wake(conn, cfg, decision, tick_started=t_tick, gate_done=t_gate)
     finally:
         conn.close()
     print(f"{db.utcnow_iso()} {decision['explanation']}", flush=True)

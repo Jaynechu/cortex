@@ -15,12 +15,14 @@ import os
 import subprocess
 import sys
 import sqlite3
+import time
 from dataclasses import replace
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from cortex import bulletin, config, day_log, db, symlinks
 from cortex.pacemaker import integration
+from cortex.timing import WakeTimer
 
 # Seconds added to the inner marrow claude-call budget (marrow.call_timeout_s)
 # to derive the outer subprocess kill deadline. The inner threading.Timer must
@@ -39,7 +41,8 @@ _MARROW_CALL_SCRIPT = (
     "prompt = sys.stdin.read()\n"
     "client = LLMClient()\n"
     "result = client.call_cortex(prompt, cwd=sys.argv[2], "
-    "resume_sid=(sys.argv[3] or None), timeout=int(sys.argv[4]))\n"
+    "resume_sid=(sys.argv[3] or None), timeout=int(sys.argv[4]), "
+    "max_tokens=int(sys.argv[5]))\n"
     "print(json.dumps(result))\n"
 )
 
@@ -70,11 +73,14 @@ def call_marrow_cortex(prompt: str, cwd: str, resume_sid: str | None, cfg: dict)
     # kill is derived (inner + margin) so it never fires before the inner one.
     inner_timeout = int(mcfg.get("call_timeout_s", 600))
     outer_timeout = inner_timeout + _OUTER_TIMEOUT_MARGIN_S
+    token_cap = int(cfg.get("wake", {}).get("token_cap", 150_000))
+    # CORTEX_WAKE_ID / CORTEX_WAKE_TIMING_LOG (set by run_wake) ride os.environ
+    # into the marrow subprocess so its stream-event marks share this wake.
     env = {**os.environ, "PATH": _PATH_ENV + ":" + os.environ.get("PATH", "")}
     try:
         proc = subprocess.run(
             [python, "-c", _MARROW_CALL_SCRIPT, repo_dir, cwd,
-             resume_sid or "", str(inner_timeout)],
+             resume_sid or "", str(inner_timeout), str(token_cap)],
             input=prompt, capture_output=True, text=True, timeout=outer_timeout, env=env,
         )
     except subprocess.TimeoutExpired as e:
@@ -87,19 +93,56 @@ def call_marrow_cortex(prompt: str, cwd: str, resume_sid: str | None, cfg: dict)
         raise WakeError(f"marrow call_cortex returned unparseable output: {proc.stdout[:500]}") from e
 
 
+def _audit_wake(conn: sqlite3.Connection, wake_id: str, summary: str) -> None:
+    """Best-effort one-line audit of a wake outcome (token-cap breach /
+    failure). audit_log lives on the shared marrow DB; swallow if absent."""
+    try:
+        conn.execute(
+            "INSERT INTO audit_log (target_table, action, summary) VALUES (?, ?, ?)",
+            ("ct_wake_log", "cortex_wake", f"wake={wake_id} {summary}"),
+        )
+        conn.commit()
+    except Exception:
+        pass
+
+
+def _force_fresh_next(conn: sqlite3.Connection, state, today: str) -> None:
+    """Next wake starts a fresh marrow session (drop resume sid) without
+    re-archiving today's log (keep date=today). Used on token-cap breach and
+    marrow call failure/timeout so a broken/oversized session is never resumed."""
+    integration.save_state(
+        conn, replace(state, cortex_session_id=None, cortex_session_date=today))
+
+
 def run_wake(
     conn: sqlite3.Connection,
     cfg: dict,
     decision: dict,
     now: datetime | None = None,
     caller=call_marrow_cortex,
+    tick_started: float | None = None,
+    gate_done: float | None = None,
 ) -> dict:
     """Full wake pipeline against real data. `caller` is injectable so tests
-    never spawn a real claude process. Returns the caller's result dict."""
+    never spawn a real claude process. Returns the caller's result dict.
+    `tick_started`/`gate_done` are monotonic anchors from pacemaker_tick so the
+    latency probe covers tick fire -> gate eval -> the wake chain."""
     now = now or _now(cfg)
     today = now.date().isoformat()
 
+    wake_id = f"{now.strftime('%Y%m%dT%H%M%S')}-{os.getpid()}"
+    timing_path = config.wake_timing_log_path(cfg)
+    origin = tick_started if tick_started is not None else time.monotonic()
+    timer = WakeTimer(timing_path, wake_id, origin=origin)
+    if tick_started is not None:
+        timer.mark("tick_fire", at=tick_started)
+    if gate_done is not None:
+        timer.mark("gate_eval", at=gate_done)
+    os.environ["CORTEX_WAKE_ID"] = wake_id
+    os.environ["CORTEX_WAKE_TIMING_LOG"] = str(timing_path)
+
     symlinks.ensure_all(cfg)
+    timer.mark("symlinks")
 
     state = integration.load_state(conn)
     rebirth = state.cortex_session_date != today
@@ -119,11 +162,31 @@ def run_wake(
         resume_sid = None
     elif not path.exists():
         day_log.new_day(path, today)
+    timer.mark("rebirth" if rebirth else "resume")
 
     bulletin_text = assemble_bulletin(conn, cfg, now, decision=decision)
     home = str(config.cortex_home(cfg))
+    timer.mark("bulletin")
 
-    result = caller(bulletin_text, home, resume_sid, cfg)
+    timer.mark("spawn_marrow")
+    try:
+        result = caller(bulletin_text, home, resume_sid, cfg)
+    except WakeError as e:
+        _force_fresh_next(conn, state, today)
+        _audit_wake(conn, wake_id, f"wake_failed: {str(e)[:180]}")
+        timer.mark("marrow_failed")
+        raise
+    timer.mark("marrow_returned")
+
+    if result.get("capped"):
+        _force_fresh_next(conn, state, today)
+        _audit_wake(conn, wake_id,
+                    f"token_cap breach total={result.get('total_tokens')} -> rebirth")
+        timer.mark("capped")
+        day_log.update(path, conn, cfg, now)
+        timer.mark("day_log")
+        timer.mark("wake_complete")
+        return result
 
     new_state = replace(
         state,
@@ -133,6 +196,8 @@ def run_wake(
     integration.save_state(conn, new_state)
 
     day_log.update(path, conn, cfg, now)
+    timer.mark("day_log")
+    timer.mark("wake_complete")
     return result
 
 
