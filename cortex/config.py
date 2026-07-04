@@ -57,7 +57,12 @@ _DEFAULTS: dict[str, Any] = {
     "geofence": {"enabled": False},
     "health": {"enabled": False},
     # launchd tick cadence (seconds). Baked into plists at install time.
-    "tick": {"collect_interval_sec": 1800, "pacemaker_interval_sec": 300},
+    "tick": {
+        "collect_interval_sec": 1800,
+        "pacemaker_interval_sec": 300,
+        # OAuth usage % snapshot (marrow subprocess) each collect tick.
+        "usage_snapshot": True,
+    },
     # Pacemaker integration knobs (numbers the integration layer computes with).
     "pacemaker": {
         "dry_run": True,
