@@ -6,8 +6,8 @@ session, not here).
 Expected config shape (config["triggers"]):
     {
         "desire_thresholds": {"attachment": 0.8, "curiosity": 0.7, ...},
-        "floor_interval_min": 60,
-        "floor_jitter_min": 10,   # +/- jitter applied on reschedule
+        "floor_min_min": 10,   # uniform draw lower bound (minutes)
+        "floor_max_min": 55,   # uniform draw upper bound (minutes)
     }
 
 Expected context keys used here:
@@ -106,12 +106,11 @@ def evaluate(
 
 
 def reschedule_floor(now: datetime, config: dict, rng: random.Random) -> datetime:
-    """Compute the next floor due time with jitter. Call only when the floor
-    trigger has fired, so jitter is drawn once per firing (deterministic
-    given the same rng state)."""
+    """Draw the next floor due time, uniform in [floor_min_min, floor_max_min]
+    from `now`. Callers pass lie-down time as `now` on the wake path (C-wm:
+    floor clocks from lie-down, not wake); gated firings redraw from tick time
+    so a blocked floor doesn't re-fire every tick."""
     trig_config = config.get("triggers", {})
-    interval_min = trig_config.get("floor_interval_min", 60)
-    jitter_min = trig_config.get("floor_jitter_min", 0)
-
-    jitter = rng.uniform(-jitter_min, jitter_min) if jitter_min else 0.0
-    return now + timedelta(minutes=interval_min + jitter)
+    lo = trig_config.get("floor_min_min", 10)
+    hi = trig_config.get("floor_max_min", 55)
+    return now + timedelta(minutes=rng.uniform(lo, hi))

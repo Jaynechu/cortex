@@ -93,14 +93,23 @@ base_rate_per_min = 0.001
 decay_rate_per_min = 0.0005
 
 [gates]
-cooldown_min = 45
+cooldown_min_min = 15          # post-wake cooldown draw, minutes (uniform lo)
+cooldown_max_min = 20          # uniform hi
+wake_stale_min = 30            # in-progress wake presumed crashed after this
 daily_message_cap = 12
-fatigue_windows = [{ start = "23:30", end = "07:00" }]
 token_budget_min_reserve = 0.1
 
+# Night mode (replaces fatigue windows): desire/floor/expect_reply wakes
+# capped per night; self_scheduled + rule triggers pierce. Static window
+# until sleep data lands (then dynamic).
+[gates.night]
+start = "00:00"
+end = "06:00"
+cap = 1
+
 [triggers]
-floor_interval_min = 60
-floor_jitter_min = 10
+floor_min_min = 10             # floor wake draw from lie-down, minutes (uniform lo)
+floor_max_min = 55             # uniform hi
 [triggers.desire_thresholds]
 attachment = 0.8
 curiosity = 0.8

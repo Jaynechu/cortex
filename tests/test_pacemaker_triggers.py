@@ -12,8 +12,8 @@ def base_config():
     return {
         "triggers": {
             "desire_thresholds": {"attachment": 0.8, "curiosity": 0.7},
-            "floor_interval_min": 60,
-            "floor_jitter_min": 10,
+            "floor_min_min": 10,
+            "floor_max_min": 55,
         }
     }
 
@@ -77,12 +77,12 @@ def test_floor_trigger_silent_when_not_due():
     assert not any(r.kind == "floor" for r in reasons)
 
 
-def test_reschedule_floor_within_jitter_bounds():
+def test_reschedule_floor_within_uniform_bounds():
     rng = random.Random(42)
     config = base_config()
     next_due = reschedule_floor(NOW, config, rng)
     delta_min = (next_due - NOW).total_seconds() / 60.0
-    assert 50.0 <= delta_min <= 70.0  # 60 +/- 10
+    assert 10.0 <= delta_min <= 55.0
 
 
 def test_reschedule_floor_deterministic_with_seeded_rng():
@@ -92,8 +92,16 @@ def test_reschedule_floor_deterministic_with_seeded_rng():
     assert first == second
 
 
-def test_reschedule_floor_no_jitter_config():
-    config = {"triggers": {"floor_interval_min": 60, "floor_jitter_min": 0}}
+def test_reschedule_floor_defaults_when_config_missing():
+    config = {"triggers": {}}
     rng = random.Random(1)
     next_due = reschedule_floor(NOW, config, rng)
-    assert next_due == NOW + timedelta(minutes=60)
+    delta_min = (next_due - NOW).total_seconds() / 60.0
+    assert 10.0 <= delta_min <= 55.0  # falls back to default 10/55 bounds
+
+
+def test_reschedule_floor_fixed_bounds_when_equal():
+    config = {"triggers": {"floor_min_min": 30, "floor_max_min": 30}}
+    rng = random.Random(1)
+    next_due = reschedule_floor(NOW, config, rng)
+    assert next_due == NOW + timedelta(minutes=30)

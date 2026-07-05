@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from cortex import config, db
-from cortex.pacemaker import integration
+from cortex.pacemaker import gates, integration
 from cortex.pacemaker.core import PacemakerState
 from cortex.pacemaker.desire import DesireState
 from cortex.pacemaker.expect_reply import ExpectReplyState
@@ -86,6 +86,10 @@ def test_state_round_trip(conn):
                                       checks_done=2, tone_level=1),
         next_floor_due_at=now + timedelta(minutes=60),
         last_wake_at=now,
+        last_lie_down_at=now - timedelta(minutes=1),
+        cooldown_until=now + timedelta(minutes=15),
+        night_cap_key="2026-07-04",
+        night_wake_count=1,
     )
     integration.save_state(conn, state)
     loaded = integration.load_state(conn)
@@ -94,10 +98,64 @@ def test_state_round_trip(conn):
     assert loaded.expect_reply.checks_done == 2
     assert loaded.next_floor_due_at == state.next_floor_due_at
     assert loaded.last_wake_at == state.last_wake_at
+    assert loaded.last_lie_down_at == state.last_lie_down_at
+    assert loaded.cooldown_until == state.cooldown_until
+    assert loaded.night_cap_key == "2026-07-04"
+    assert loaded.night_wake_count == 1
 
 
 def test_load_state_empty_default(conn):
     assert integration.load_state(conn) == PacemakerState()
+
+
+def test_load_state_old_json_without_new_fields_still_loads(conn):
+    now = datetime.now(MEL)
+    old_json = json.dumps({
+        "desire": {"attachment": 0.1, "curiosity": 0.0, "worry": 0.0, "duty": 0.0,
+                   "last_tick_at": now.isoformat()},
+        "expect_reply": {"pending": False, "sent_at": None, "last_check_at": None,
+                         "checks_done": 0, "tone_level": 0},
+        "next_floor_due_at": None,
+        "last_wake_at": None,
+    })
+    conn.execute(
+        "INSERT INTO ct_pacemaker_state (id, state, updated_at) VALUES (1, ?, ?)",
+        (old_json, db.utcnow_iso()),
+    )
+    conn.commit()
+    state = integration.load_state(conn)
+    assert state.desire.attachment == pytest.approx(0.1)
+    assert state.last_lie_down_at is None
+    assert state.cooldown_until is None
+    assert state.night_cap_key is None
+    assert state.night_wake_count == 0
+
+
+# --- lie_down ---------------------------------------------------------------
+
+def test_lie_down_sets_floor_and_cooldown_ranges_and_preserves_other_fields(conn, cfg):
+    now = datetime(2026, 7, 4, 10, 0, tzinfo=MEL)
+    prior = PacemakerState(
+        desire=DesireState(attachment=0.4, curiosity=0.1, worry=0.2, duty=0.3, last_tick_at=now),
+        last_wake_at=now,
+        cortex_session_id="sid-1",
+        cortex_session_date="2026-07-04",
+    )
+    integration.save_state(conn, prior)
+
+    integration.lie_down(conn, cfg, now=now, rng=random.Random(1))
+
+    state = integration.load_state(conn)
+    assert state.last_lie_down_at == now
+    floor_delta_min = (state.next_floor_due_at - now).total_seconds() / 60.0
+    assert 10.0 <= floor_delta_min <= 55.0
+    cooldown_delta_min = (state.cooldown_until - now).total_seconds() / 60.0
+    assert 15.0 <= cooldown_delta_min <= 20.0
+    # other fields untouched
+    assert state.desire.attachment == pytest.approx(0.4)
+    assert state.last_wake_at == now
+    assert state.cortex_session_id == "sid-1"
+    assert state.cortex_session_date == "2026-07-04"
 
 
 # --- context builder -------------------------------------------------------
@@ -138,7 +196,7 @@ def test_build_context_reads_flag_and_schedule_files(conn, cfg, tmp_path):
 # --- run_tick orchestration ------------------------------------------------
 
 def test_first_tick_fires_floor_and_persists(conn, cfg):
-    now = datetime(2026, 7, 4, 10, 0, tzinfo=MEL)  # outside fatigue window
+    now = datetime(2026, 7, 4, 10, 0, tzinfo=MEL)  # outside night window
     rng = random.Random(1)
     decision = integration.run_tick(conn, cfg, now=now, rng=rng)
     assert decision["wake"] is True
@@ -154,15 +212,24 @@ def test_first_tick_fires_floor_and_persists(conn, cfg):
 def test_second_tick_resumes_and_cools_down(conn, cfg):
     now1 = datetime(2026, 7, 4, 10, 0, tzinfo=MEL)
     integration.run_tick(conn, cfg, now=now1, rng=random.Random(1))
-    # 5 min later: floor not due, cooldown (45min) blocks any wake
+    # 5 min later: floor not due yet, and no lie_down has happened -> the
+    # cooldown gate's wake-in-progress guard blocks any wake.
     now2 = now1 + timedelta(minutes=5)
     decision = integration.run_tick(conn, cfg, now=now2, rng=random.Random(1))
     assert decision["wake"] is False
+    assert any(g.name == "cooldown" for g in decision["gated_by"])
     assert conn.execute("SELECT COUNT(*) AS n FROM ct_wake_log").fetchone()["n"] == 2
 
 
-def test_fatigue_window_gates_wake(conn, cfg):
-    now = datetime(2026, 7, 4, 2, 0, tzinfo=MEL)  # inside 23:30-07:00 window
+def test_night_mode_gates_wake_once_cap_reached(conn, cfg):
+    now = datetime(2026, 7, 4, 2, 0, tzinfo=MEL)  # inside default 00:00-06:00 window
+    night_key = gates.night_key(cfg, now)
+    state = PacemakerState(
+        next_floor_due_at=now - timedelta(minutes=1),  # force a floor trigger
+        night_cap_key=night_key,
+        night_wake_count=1,  # cap (default 1) already reached
+    )
+    integration.save_state(conn, state)
     decision = integration.run_tick(conn, cfg, now=now, rng=random.Random(1))
     assert decision["wake"] is False
-    assert any(g.name == "fatigue-window" for g in decision["gated_by"])
+    assert any(g.name == "night-mode" for g in decision["gated_by"])

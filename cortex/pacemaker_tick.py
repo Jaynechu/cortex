@@ -19,8 +19,14 @@ def main() -> int:
         decision = integration.run_tick(conn, cfg)
         t_gate = time.monotonic()
         dry_run = bool(cfg["pacemaker"].get("dry_run", True))
-        if decision["wake"] and not dry_run:
-            run_wake(conn, cfg, decision, tick_started=t_tick, gate_done=t_gate)
+        if decision["wake"]:
+            try:
+                if not dry_run:
+                    run_wake(conn, cfg, decision, tick_started=t_tick, gate_done=t_gate)
+            finally:
+                # Lie down even on wake failure — floor + cooldown clocks
+                # start here (C-wm), and the in-progress guard must release.
+                integration.lie_down(conn, cfg)
     finally:
         conn.close()
     print(f"{db.utcnow_iso()} {decision['explanation']}", flush=True)

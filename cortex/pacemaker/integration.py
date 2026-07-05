@@ -9,6 +9,7 @@ outbound exists yet (C5), so a wake decision is only recorded.
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import random
 import re
@@ -64,6 +65,10 @@ def _state_to_json(state: PacemakerState) -> str:
         },
         "next_floor_due_at": _iso(state.next_floor_due_at),
         "last_wake_at": _iso(state.last_wake_at),
+        "last_lie_down_at": _iso(state.last_lie_down_at),
+        "cooldown_until": _iso(state.cooldown_until),
+        "night_cap_key": state.night_cap_key,
+        "night_wake_count": state.night_wake_count,
         "cortex_session_id": state.cortex_session_id,
         "cortex_session_date": state.cortex_session_date,
     })
@@ -86,6 +91,10 @@ def _state_from_json(text: str) -> PacemakerState:
         ),
         next_floor_due_at=_parse_dt(o.get("next_floor_due_at")),
         last_wake_at=_parse_dt(o.get("last_wake_at")),
+        last_lie_down_at=_parse_dt(o.get("last_lie_down_at")),
+        cooldown_until=_parse_dt(o.get("cooldown_until")),
+        night_cap_key=o.get("night_cap_key"),
+        night_wake_count=o.get("night_wake_count", 0),
         cortex_session_id=o.get("cortex_session_id"),
         cortex_session_date=o.get("cortex_session_date"),
     )
@@ -203,6 +212,30 @@ def write_wake_log(conn: sqlite3.Connection, decision: dict, now: datetime, dry_
          1 if dry_run else 0, reasons, gated, decision["explanation"]),
     )
     conn.commit()
+
+
+def lie_down(conn: sqlite3.Connection, cfg: dict, now: datetime | None = None,
+             rng: random.Random | None = None) -> None:
+    """Mark wake end (C-wm): floor clock restarts from lie-down (uniform
+    10-55min draw) and the 15-20min cooldown is drawn here. Called by the
+    tick entry point after a wake finishes — including on wake failure, so a
+    crashed wake can't wedge the wake-in-progress guard."""
+    from cortex.pacemaker.triggers import reschedule_floor
+
+    now = now or _now(cfg)
+    rng = rng or random.Random()
+    gates_cfg = cfg.get("gates", {})
+    lo = gates_cfg.get("cooldown_min_min", 15)
+    hi = gates_cfg.get("cooldown_max_min", 20)
+
+    state = load_state(conn)
+    new_state = dataclasses.replace(
+        state,
+        next_floor_due_at=reschedule_floor(now, cfg, rng),
+        last_lie_down_at=now,
+        cooldown_until=now + timedelta(minutes=rng.uniform(lo, hi)),
+    )
+    save_state(conn, new_state)
 
 
 def run_tick(conn: sqlite3.Connection, cfg: dict, now: datetime | None = None,

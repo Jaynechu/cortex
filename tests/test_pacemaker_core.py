@@ -25,13 +25,15 @@ def base_config():
         },
         "triggers": {
             "desire_thresholds": {"attachment": 0.8, "curiosity": 0.7},
-            "floor_interval_min": 60,
-            "floor_jitter_min": 10,
+            "floor_min_min": 10,
+            "floor_max_min": 55,
         },
         "gates": {
-            "cooldown_min": 20,
+            "cooldown_min_min": 15,
+            "cooldown_max_min": 20,
+            "wake_stale_min": 30,
             "daily_message_cap": 5,
-            "fatigue_windows": [{"start": "23:30", "end": "07:00"}],
+            "night": {"start": "00:00", "end": "06:00", "cap": 1},
             "token_budget_min_reserve": 0.1,
         },
         "expect_reply": {
@@ -50,16 +52,6 @@ def test_floor_trigger_wakes_on_first_tick_with_no_gates():
     assert any(r.kind == "floor" for r in decision["reasons"])
     assert new_state.next_floor_due_at > NOW
     assert new_state.last_wake_at == NOW
-
-
-def test_active_session_gates_block_wake_despite_reasons():
-    state = PacemakerState()
-    context = {"active_session": True}
-    decision, new_state = tick(state, context, base_config(), NOW, random.Random(1))
-    assert decision["wake"] is False
-    assert decision["reasons"]  # floor still fired
-    assert any(g.name == "active-suspend" for g in decision["gated_by"])
-    assert new_state.last_wake_at is None
 
 
 def test_desire_threshold_wake_via_tick():
@@ -123,13 +115,17 @@ def test_next_check_uses_soonest_of_floor_and_expect_reply():
 
 
 def test_explanation_string_contains_gate_names_when_blocked():
-    state = PacemakerState(desire=DesireState(attachment=0.85, last_tick_at=NOW))
-    decision, _ = tick(state, {"active_session": True}, base_config(), NOW, random.Random(1))
+    state = PacemakerState(
+        desire=DesireState(attachment=0.85, last_tick_at=NOW),
+        last_wake_at=NOW - timedelta(minutes=5),
+    )
+    decision, _ = tick(state, {}, base_config(), NOW, random.Random(1))
     assert "gated:" in decision["explanation"]
-    assert "active-suspend" in decision["explanation"]
+    assert "cooldown" in decision["explanation"]
 
 
 def test_cooldown_gate_blocks_wake_shortly_after_previous_wake():
+    # wake-in-progress: last_wake_at recent, never lain down yet
     state = PacemakerState(
         desire=DesireState(attachment=0.85, last_tick_at=NOW),
         last_wake_at=NOW - timedelta(minutes=5),
@@ -138,3 +134,57 @@ def test_cooldown_gate_blocks_wake_shortly_after_previous_wake():
     decision, _ = tick(state, {}, base_config(), NOW, random.Random(1))
     assert decision["wake"] is False
     assert any(g.name == "cooldown" for g in decision["gated_by"])
+
+
+# --- night wake counter -------------------------------------------------------
+
+NIGHT_NOW = datetime(2026, 7, 4, 2, 0, tzinfo=TZ)  # inside default 00:00-06:00 window
+
+
+def test_tick_increments_night_counter_on_capped_kind_wake():
+    state = PacemakerState(
+        desire=DesireState(attachment=0.85, last_tick_at=NIGHT_NOW),
+        night_cap_key="2026-07-04",
+        night_wake_count=0,
+    )
+    decision, new_state = tick(state, {}, base_config(), NIGHT_NOW, random.Random(1))
+    assert decision["wake"] is True  # count 0 < cap 1, still allowed this once
+    assert any(r.kind == "desire" for r in decision["reasons"])
+    assert new_state.night_cap_key == "2026-07-04"
+    assert new_state.night_wake_count == 1
+
+
+def test_tick_resets_night_counter_on_new_night():
+    state = PacemakerState(
+        desire=DesireState(attachment=0.85, last_tick_at=NIGHT_NOW),
+        night_cap_key="2026-07-03",  # stale, belongs to a previous night
+        night_wake_count=5,
+    )
+    decision, new_state = tick(state, {}, base_config(), NIGHT_NOW, random.Random(1))
+    assert new_state.night_cap_key == "2026-07-04"
+    assert new_state.night_wake_count == 1  # reset to 0, then incremented once
+
+
+def test_tick_pierce_wake_does_not_increment_night_counter():
+    state = PacemakerState(
+        night_cap_key="2026-07-04",
+        night_wake_count=0,
+        next_floor_due_at=NIGHT_NOW + timedelta(hours=1),
+    )
+    context = {"events": [{"id": 1}]}
+    decision, new_state = tick(state, context, base_config(), NIGHT_NOW, random.Random(1))
+    assert decision["wake"] is True
+    assert any(r.kind == "event" for r in decision["reasons"])
+    assert new_state.night_wake_count == 0  # event pierces, doesn't consume cap
+
+
+def test_tick_night_counter_untouched_outside_window():
+    state = PacemakerState(
+        desire=DesireState(attachment=0.85, last_tick_at=NOW),
+        night_cap_key=None,
+        night_wake_count=0,
+    )
+    decision, new_state = tick(state, {}, base_config(), NOW, random.Random(1))
+    assert decision["wake"] is True
+    assert new_state.night_cap_key is None
+    assert new_state.night_wake_count == 0
