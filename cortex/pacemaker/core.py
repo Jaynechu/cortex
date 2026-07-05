@@ -27,9 +27,8 @@ class PacemakerState:
     expect_reply: ExpectReplyState = ExpectReplyState()
     next_floor_due_at: datetime | None = None
     last_wake_at: datetime | None = None
-    # C-wm timing: lie-down = wake finished; cooldown drawn at lie-down.
+    # C-wm timing: lie-down = wake finished; floor clock redraws from here.
     last_lie_down_at: datetime | None = None
-    cooldown_until: datetime | None = None
     # Night mode: capped desire/floor wakes used in the night keyed here.
     night_cap_key: str | None = None
     night_wake_count: int = 0
@@ -112,7 +111,6 @@ def tick(
         next_floor_due_at=new_next_floor_due_at,
         last_wake_at=new_last_wake_at,
         last_lie_down_at=state.last_lie_down_at,
-        cooldown_until=state.cooldown_until,
         night_cap_key=new_night_cap_key,
         night_wake_count=new_night_wake_count,
         cortex_session_id=state.cortex_session_id,

@@ -29,12 +29,7 @@ def base_config():
             "floor_max_min": 55,
         },
         "gates": {
-            "cooldown_min_min": 15,
-            "cooldown_max_min": 20,
-            "wake_stale_min": 30,
-            "daily_message_cap": 5,
             "night": {"start": "00:00", "end": "06:00", "cap": 1},
-            "token_budget_min_reserve": 0.1,
         },
         "expect_reply": {
             "check_interval_min": 30,
@@ -55,13 +50,25 @@ def test_floor_trigger_wakes_on_first_tick_with_no_gates():
 
 
 def test_desire_threshold_wake_via_tick():
+    # Desire motivates a wake only once the floor is due (floor governs desire).
+    state = PacemakerState(
+        desire=DesireState(attachment=0.85, last_tick_at=NOW),
+        next_floor_due_at=NOW - timedelta(seconds=1),
+    )
+    decision, _ = tick(state, {}, base_config(), NOW, random.Random(1))
+    assert decision["wake"] is True
+    assert any(r.kind == "desire" for r in decision["reasons"])
+
+
+def test_desire_held_behind_floor_no_wake():
+    # Over threshold but floor not due -> desire is held, no wake.
     state = PacemakerState(
         desire=DesireState(attachment=0.85, last_tick_at=NOW),
         next_floor_due_at=NOW + timedelta(hours=1),
     )
     decision, _ = tick(state, {}, base_config(), NOW, random.Random(1))
-    assert decision["wake"] is True
-    assert any(r.kind == "desire" for r in decision["reasons"])
+    assert decision["wake"] is False
+    assert decision["reasons"] == []
 
 
 def test_no_reasons_no_wake():
@@ -115,25 +122,16 @@ def test_next_check_uses_soonest_of_floor_and_expect_reply():
 
 
 def test_explanation_string_contains_gate_names_when_blocked():
+    # Night cap reached -> floor wake is gated, gate name appears in explanation.
     state = PacemakerState(
-        desire=DesireState(attachment=0.85, last_tick_at=NOW),
-        last_wake_at=NOW - timedelta(minutes=5),
+        next_floor_due_at=NIGHT_NOW - timedelta(seconds=1),
+        night_cap_key="2026-07-04",
+        night_wake_count=1,
     )
-    decision, _ = tick(state, {}, base_config(), NOW, random.Random(1))
-    assert "gated:" in decision["explanation"]
-    assert "cooldown" in decision["explanation"]
-
-
-def test_cooldown_gate_blocks_wake_shortly_after_previous_wake():
-    # wake-in-progress: last_wake_at recent, never lain down yet
-    state = PacemakerState(
-        desire=DesireState(attachment=0.85, last_tick_at=NOW),
-        last_wake_at=NOW - timedelta(minutes=5),
-        next_floor_due_at=NOW + timedelta(hours=1),
-    )
-    decision, _ = tick(state, {}, base_config(), NOW, random.Random(1))
+    decision, _ = tick(state, {}, base_config(), NIGHT_NOW, random.Random(1))
     assert decision["wake"] is False
-    assert any(g.name == "cooldown" for g in decision["gated_by"])
+    assert "gated:" in decision["explanation"]
+    assert "night-mode" in decision["explanation"]
 
 
 # --- night wake counter -------------------------------------------------------

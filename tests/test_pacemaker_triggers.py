@@ -36,9 +36,9 @@ def test_affect_flag_absent_no_trigger():
     assert not any(r.kind == "affect_flag" for r in reasons)
 
 
-def test_desire_threshold_trigger_fires_above():
+def test_desire_threshold_trigger_fires_above_when_floor_due():
     state = DesireState(attachment=0.85)
-    reasons = evaluate(state, {}, base_config(), NOW, next_floor_due_at=NOW + timedelta(hours=1))
+    reasons = evaluate(state, {}, base_config(), NOW, next_floor_due_at=NOW - timedelta(seconds=1))
     desire_reasons = [r for r in reasons if r.kind == "desire"]
     assert len(desire_reasons) == 1
     assert desire_reasons[0].facts["dimension"] == "attachment"
@@ -46,8 +46,31 @@ def test_desire_threshold_trigger_fires_above():
 
 def test_desire_threshold_no_trigger_below():
     state = DesireState(attachment=0.5)
-    reasons = evaluate(state, {}, base_config(), NOW, next_floor_due_at=NOW + timedelta(hours=1))
+    reasons = evaluate(state, {}, base_config(), NOW, next_floor_due_at=NOW - timedelta(seconds=1))
     assert not any(r.kind == "desire" for r in reasons)
+
+
+def test_desire_held_behind_floor_when_not_due():
+    # Floor governs desire: over threshold but floor not yet due -> held.
+    state = DesireState(attachment=0.85)
+    reasons = evaluate(state, {}, base_config(), NOW, next_floor_due_at=NOW + timedelta(minutes=30))
+    assert reasons == []
+
+
+def test_floor_silent_when_pierce_source_fires():
+    # Floor due AND an event fires -> single wake, floor stays silent.
+    context = {"events": [{"id": 1}]}
+    reasons = evaluate(DesireState(), context, base_config(), NOW, next_floor_due_at=NOW - timedelta(seconds=1))
+    assert any(r.kind == "event" for r in reasons)
+    assert not any(r.kind == "floor" for r in reasons)
+
+
+def test_floor_silent_when_desire_fires():
+    # Floor due AND desire over threshold -> desire owns the wake, floor silent.
+    state = DesireState(attachment=0.85)
+    reasons = evaluate(state, {}, base_config(), NOW, next_floor_due_at=NOW - timedelta(seconds=1))
+    assert any(r.kind == "desire" for r in reasons)
+    assert not any(r.kind == "floor" for r in reasons)
 
 
 def test_self_scheduled_trigger_fires_when_due():

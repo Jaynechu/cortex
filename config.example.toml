@@ -71,10 +71,6 @@ active_window_min = 5          # activity within this many min => she is in a li
 at_home_default = true         # until geofence-derived location is wired in
 cal_busy_default = false       # until calendar busy state is wired in
 
-[pacemaker.token_meter]
-daily_budget_tokens = 0        # 0 = no budget cap (gate no-op); set to cap the rolling window
-window_hours = 24
-
 # Desire accrual/decay per dimension (per-minute rates, clamped [0,1]).
 [desire.attachment]
 base_rate_per_min = 0.002
@@ -93,12 +89,6 @@ base_rate_per_min = 0.001
 decay_rate_per_min = 0.0005
 
 [gates]
-cooldown_min_min = 15          # post-wake cooldown draw, minutes (uniform lo)
-cooldown_max_min = 20          # uniform hi
-wake_stale_min = 30            # in-progress wake presumed crashed after this
-daily_message_cap = 12
-token_budget_min_reserve = 0.1
-
 # Night mode (replaces fatigue windows): desire/floor/expect_reply wakes
 # capped per night; self_scheduled + rule triggers pierce. Static window
 # until sleep data lands (then dynamic).

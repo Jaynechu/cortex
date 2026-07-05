@@ -69,7 +69,6 @@ _DEFAULTS: dict[str, Any] = {
         "active_window_min": 5,
         "at_home_default": True,
         "cal_busy_default": False,
-        "token_meter": {"daily_budget_tokens": 0, "window_hours": 24},
     },
     # Pure-pacemaker config (consumed by pacemaker.* modules as top-level keys).
     "desire": {
@@ -85,17 +84,10 @@ _DEFAULTS: dict[str, Any] = {
         "duty": {"base_rate_per_min": 0.001, "decay_rate_per_min": 0.0005},
     },
     "gates": {
-        # Post-wake cooldown draw (minutes, uniform), clocked from lie-down.
-        "cooldown_min_min": 15,
-        "cooldown_max_min": 20,
-        # In-progress wake presumed crashed after this many minutes.
-        "wake_stale_min": 30,
-        "daily_message_cap": 12,
         # Night mode (C-wm, replaces fatigue windows): desire/floor/expect_reply
         # wakes capped per night; self_scheduled + rule triggers pierce.
         # Static window until sleep data lands (then dynamic).
         "night": {"start": "00:00", "end": "06:00", "cap": 1},
-        "token_budget_min_reserve": 0.1,
     },
     "triggers": {
         "desire_thresholds": {"attachment": 0.8, "curiosity": 0.8, "worry": 0.7, "duty": 0.8},

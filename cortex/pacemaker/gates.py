@@ -1,19 +1,14 @@
 """Gate chain: each gate is a pure function (state, context, config, now)
--> GateResult. A wake is allowed only if every gate allows.
+-> GateResult. A wake is allowed only if every gate allows. Night mode is the
+sole gate — spend protection lives in the 150k per-wake fuse + bulletin battery
+gauge, not here.
 
 Expected config shape (config["gates"]):
     {
-        "cooldown_min_min": float,       # cooldown draw lower bound (minutes)
-        "cooldown_max_min": float,       # cooldown draw upper bound (minutes)
-        "wake_stale_min": float,         # wake-in-progress presumed dead after this
-        "daily_message_cap": int,        # max wakes-that-messaged per day
         "night": {"start": "00:00", "end": "06:00", "cap": 1},
-        "token_budget_min_reserve": float,  # min remaining budget fraction (0-1)
     }
 
 Expected context keys used here:
-    "messages_sent_today": int           # integration-counted, from wake log
-    "token_budget_remaining_fraction": float  # integration-computed from audit_log
     "trigger_kinds": list[str]           # fired TriggerReason kinds, set by core.tick
 """
 
@@ -32,37 +27,6 @@ class GateResult:
     name: str
     allowed: bool
     reason: str
-
-
-def gate_cooldown(state, context: dict, config: dict, now: datetime) -> GateResult:
-    """Post-wake cooldown, clocked from lie-down (cooldown_until drawn there).
-    Also blocks while a wake is in progress (woke, not yet lain down), with a
-    staleness escape so a crashed wake can't wedge the pacemaker forever."""
-    gates_cfg = config.get("gates", {})
-    last_wake_at = getattr(state, "last_wake_at", None)
-    last_lie_down_at = getattr(state, "last_lie_down_at", None)
-    if last_wake_at is not None and (last_lie_down_at is None or last_lie_down_at < last_wake_at):
-        elapsed_min = (now - last_wake_at).total_seconds() / 60.0
-        stale_min = gates_cfg.get("wake_stale_min", 30)
-        if elapsed_min < stale_min:
-            return GateResult("cooldown", False, f"wake in progress ({elapsed_min:.1f}min)")
-
-    cooldown_until = getattr(state, "cooldown_until", None)
-    if cooldown_until is not None and now < cooldown_until:
-        remaining_min = (cooldown_until - now).total_seconds() / 60.0
-        return GateResult("cooldown", False, f"cooling down, {remaining_min:.1f}min left")
-    return GateResult("cooldown", True, "no active cooldown")
-
-
-def gate_daily_cap(state, context: dict, config: dict, now: datetime) -> GateResult:
-    cap = config.get("gates", {}).get("daily_message_cap")
-    if cap is None:
-        return GateResult("daily-cap", True, "no cap configured")
-
-    sent_today = context.get("messages_sent_today", 0)
-    if sent_today >= cap:
-        return GateResult("daily-cap", False, f"{sent_today}/{cap} messages sent today")
-    return GateResult("daily-cap", True, f"{sent_today}/{cap} messages sent today")
 
 
 def _parse_hhmm(value: str) -> time:
@@ -116,24 +80,8 @@ def gate_night_mode(state, context: dict, config: dict, now: datetime) -> GateRe
     return GateResult("night-mode", True, f"night wake {count}/{cap} used")
 
 
-def gate_token_budget(state, context: dict, config: dict, now: datetime) -> GateResult:
-    min_reserve = config.get("gates", {}).get("token_budget_min_reserve")
-    if min_reserve is None:
-        return GateResult("token-budget", True, "no budget floor configured")
-
-    remaining = context.get("token_budget_remaining_fraction", 1.0)
-    if remaining < min_reserve:
-        return GateResult(
-            "token-budget", False, f"{remaining:.2f} remaining < {min_reserve:.2f} floor"
-        )
-    return GateResult("token-budget", True, f"{remaining:.2f} remaining")
-
-
 ALL_GATES = (
-    gate_cooldown,
-    gate_daily_cap,
     gate_night_mode,
-    gate_token_budget,
 )
 
 

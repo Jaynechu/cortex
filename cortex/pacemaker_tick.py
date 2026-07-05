@@ -24,8 +24,8 @@ def main() -> int:
                 if not dry_run:
                     run_wake(conn, cfg, decision, tick_started=t_tick, gate_done=t_gate)
             finally:
-                # Lie down even on wake failure — floor + cooldown clocks
-                # start here (C-wm), and the in-progress guard must release.
+                # Lie down even on wake failure — the floor clock restarts
+                # here (C-wm) so a crashed wake can't wedge the heartbeat.
                 integration.lie_down(conn, cfg)
     finally:
         conn.close()

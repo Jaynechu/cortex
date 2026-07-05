@@ -12,17 +12,14 @@ from __future__ import annotations
 import dataclasses
 import json
 import random
-import re
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from cortex import config, db
 from cortex.pacemaker.core import PacemakerState, tick
 from cortex.pacemaker.desire import DesireState
 from cortex.pacemaker.expect_reply import ExpectReplyState
-
-_USAGE_RE = re.compile(r"in=(\d+) out=(\d+) cache_read=(\d+) cache_write=(\d+)")
 
 
 # --------------------------------------------------------------------------
@@ -66,7 +63,6 @@ def _state_to_json(state: PacemakerState) -> str:
         "next_floor_due_at": _iso(state.next_floor_due_at),
         "last_wake_at": _iso(state.last_wake_at),
         "last_lie_down_at": _iso(state.last_lie_down_at),
-        "cooldown_until": _iso(state.cooldown_until),
         "night_cap_key": state.night_cap_key,
         "night_wake_count": state.night_wake_count,
         "cortex_session_id": state.cortex_session_id,
@@ -92,7 +88,6 @@ def _state_from_json(text: str) -> PacemakerState:
         next_floor_due_at=_parse_dt(o.get("next_floor_due_at")),
         last_wake_at=_parse_dt(o.get("last_wake_at")),
         last_lie_down_at=_parse_dt(o.get("last_lie_down_at")),
-        cooldown_until=_parse_dt(o.get("cooldown_until")),
         night_cap_key=o.get("night_cap_key"),
         night_wake_count=o.get("night_wake_count", 0),
         cortex_session_id=o.get("cortex_session_id"),
@@ -118,42 +113,9 @@ def save_state(conn: sqlite3.Connection, state: PacemakerState) -> None:
 # context builders (real data -> plain numbers)
 # --------------------------------------------------------------------------
 
-def token_budget_remaining_fraction(conn: sqlite3.Connection, cfg: dict, now: datetime) -> float:
-    """Fraction of the rolling-window token budget still available. Tolerant:
-    missing audit_log or zero budget -> 1.0 (gate becomes a no-op)."""
-    meter = cfg["pacemaker"]["token_meter"]
-    budget = meter.get("daily_budget_tokens", 0) or 0
-    if budget <= 0:
-        return 1.0
-    window_hours = meter.get("window_hours", 24)
-    since = (now - timedelta(hours=window_hours)).astimezone(ZoneInfo("UTC"))
-    try:
-        rows = conn.execute(
-            "SELECT summary FROM audit_log WHERE action='llm_call_cost' AND occurred_at >= ?",
-            (since.strftime("%Y-%m-%dT%H:%M:%SZ"),),
-        ).fetchall()
-    except sqlite3.OperationalError:
-        return 1.0
-    used = 0
-    for row in rows:
-        m = _USAGE_RE.search(row["summary"] or "")
-        if m:
-            used += sum(int(g) for g in m.groups())
-    return max(0.0, 1.0 - used / budget)
-
-
 def _latest_activity_at(conn: sqlite3.Connection) -> datetime | None:
     row = conn.execute("SELECT MAX(ts) AS ts FROM ct_activity").fetchone()
     return _parse_dt(row["ts"]) if row and row["ts"] else None
-
-
-def _wakes_today(conn: sqlite3.Connection, now: datetime) -> int:
-    start = now.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(ZoneInfo("UTC"))
-    row = conn.execute(
-        "SELECT COUNT(*) AS n FROM ct_wake_log WHERE wake=1 AND ts >= ?",
-        (start.isoformat(),),
-    ).fetchone()
-    return row["n"] if row else 0
 
 
 def _read_json_file(path, default):
@@ -188,8 +150,6 @@ def build_context(conn: sqlite3.Connection, cfg: dict, now: datetime, state: Pac
         "active_session": active,
         "last_real_chat_at": last_activity,
         "replied": replied,
-        "messages_sent_today": _wakes_today(conn, now),
-        "token_budget_remaining_fraction": token_budget_remaining_fraction(conn, cfg, now),
         "cal_busy": pm.get("cal_busy_default", False),
         "at_home": pm.get("at_home_default", True),
         "affect_flag": _read_json_file(config.affect_flag_path(cfg), None),
@@ -216,24 +176,19 @@ def write_wake_log(conn: sqlite3.Connection, decision: dict, now: datetime, dry_
 
 def lie_down(conn: sqlite3.Connection, cfg: dict, now: datetime | None = None,
              rng: random.Random | None = None) -> None:
-    """Mark wake end (C-wm): floor clock restarts from lie-down (uniform
-    10-55min draw) and the 15-20min cooldown is drawn here. Called by the
-    tick entry point after a wake finishes — including on wake failure, so a
-    crashed wake can't wedge the wake-in-progress guard."""
+    """Mark wake end (C-wm): the floor clock restarts from lie-down (uniform
+    10-55min draw). Called by the tick entry point after a wake finishes —
+    including on wake failure, so a crashed wake can't wedge the floor."""
     from cortex.pacemaker.triggers import reschedule_floor
 
     now = now or _now(cfg)
     rng = rng or random.Random()
-    gates_cfg = cfg.get("gates", {})
-    lo = gates_cfg.get("cooldown_min_min", 15)
-    hi = gates_cfg.get("cooldown_max_min", 20)
 
     state = load_state(conn)
     new_state = dataclasses.replace(
         state,
         next_floor_due_at=reschedule_floor(now, cfg, rng),
         last_lie_down_at=now,
-        cooldown_until=now + timedelta(minutes=rng.uniform(lo, hi)),
     )
     save_state(conn, new_state)
 

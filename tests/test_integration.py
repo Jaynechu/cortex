@@ -32,50 +32,6 @@ def conn(cfg):
     c.close()
 
 
-def _add_audit_table(conn):
-    conn.execute(
-        "CREATE TABLE audit_log (target_table TEXT, action TEXT, summary TEXT,"
-        " occurred_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')))"
-    )
-    conn.commit()
-
-
-def _add_cost(conn, tokens_each, when_utc):
-    summary = f"model=opus fmt=json in={tokens_each} out={tokens_each} cache_read=0 cache_write=0"
-    conn.execute(
-        "INSERT INTO audit_log (target_table, action, summary, occurred_at) VALUES (?,?,?,?)",
-        ("llm_usage", "llm_call_cost", summary, when_utc.strftime("%Y-%m-%dT%H:%M:%SZ")),
-    )
-    conn.commit()
-
-
-# --- token meter -----------------------------------------------------------
-
-def test_token_meter_no_table(conn, cfg):
-    cfg["pacemaker"]["token_meter"]["daily_budget_tokens"] = 1000
-    now = datetime.now(MEL)
-    assert integration.token_budget_remaining_fraction(conn, cfg, now) == 1.0
-
-
-def test_token_meter_zero_budget_is_noop(conn, cfg):
-    _add_audit_table(conn)
-    _add_cost(conn, 500, datetime.now(timezone.utc))
-    now = datetime.now(MEL)
-    assert integration.token_budget_remaining_fraction(conn, cfg, now) == 1.0
-
-
-def test_token_meter_counts_window(conn, cfg):
-    _add_audit_table(conn)
-    now = datetime.now(MEL)
-    now_utc = now.astimezone(timezone.utc)
-    _add_cost(conn, 100, now_utc)              # 100+100 = 200 in window
-    _add_cost(conn, 50, now_utc)               # +100 = 300
-    _add_cost(conn, 999, now_utc - timedelta(hours=48))  # outside 24h window
-    cfg["pacemaker"]["token_meter"]["daily_budget_tokens"] = 1000
-    frac = integration.token_budget_remaining_fraction(conn, cfg, now)
-    assert frac == pytest.approx(1 - 300 / 1000)
-
-
 # --- state round trip ------------------------------------------------------
 
 def test_state_round_trip(conn):
@@ -87,7 +43,6 @@ def test_state_round_trip(conn):
         next_floor_due_at=now + timedelta(minutes=60),
         last_wake_at=now,
         last_lie_down_at=now - timedelta(minutes=1),
-        cooldown_until=now + timedelta(minutes=15),
         night_cap_key="2026-07-04",
         night_wake_count=1,
     )
@@ -99,7 +54,6 @@ def test_state_round_trip(conn):
     assert loaded.next_floor_due_at == state.next_floor_due_at
     assert loaded.last_wake_at == state.last_wake_at
     assert loaded.last_lie_down_at == state.last_lie_down_at
-    assert loaded.cooldown_until == state.cooldown_until
     assert loaded.night_cap_key == "2026-07-04"
     assert loaded.night_wake_count == 1
 
@@ -126,14 +80,13 @@ def test_load_state_old_json_without_new_fields_still_loads(conn):
     state = integration.load_state(conn)
     assert state.desire.attachment == pytest.approx(0.1)
     assert state.last_lie_down_at is None
-    assert state.cooldown_until is None
     assert state.night_cap_key is None
     assert state.night_wake_count == 0
 
 
 # --- lie_down ---------------------------------------------------------------
 
-def test_lie_down_sets_floor_and_cooldown_ranges_and_preserves_other_fields(conn, cfg):
+def test_lie_down_sets_floor_and_preserves_other_fields(conn, cfg):
     now = datetime(2026, 7, 4, 10, 0, tzinfo=MEL)
     prior = PacemakerState(
         desire=DesireState(attachment=0.4, curiosity=0.1, worry=0.2, duty=0.3, last_tick_at=now),
@@ -149,8 +102,6 @@ def test_lie_down_sets_floor_and_cooldown_ranges_and_preserves_other_fields(conn
     assert state.last_lie_down_at == now
     floor_delta_min = (state.next_floor_due_at - now).total_seconds() / 60.0
     assert 10.0 <= floor_delta_min <= 55.0
-    cooldown_delta_min = (state.cooldown_until - now).total_seconds() / 60.0
-    assert 15.0 <= cooldown_delta_min <= 20.0
     # other fields untouched
     assert state.desire.attachment == pytest.approx(0.4)
     assert state.last_wake_at == now
@@ -209,15 +160,16 @@ def test_first_tick_fires_floor_and_persists(conn, cfg):
     assert state.last_wake_at == now
 
 
-def test_second_tick_resumes_and_cools_down(conn, cfg):
+def test_second_tick_no_wake_while_floor_not_due(conn, cfg):
     now1 = datetime(2026, 7, 4, 10, 0, tzinfo=MEL)
     integration.run_tick(conn, cfg, now=now1, rng=random.Random(1))
-    # 5 min later: floor not due yet, and no lie_down has happened -> the
-    # cooldown gate's wake-in-progress guard blocks any wake.
+    # 5 min later the floor (drawn >=10min) is not due and nothing else fires,
+    # so no wake — and no gate is involved (no reasons at all).
     now2 = now1 + timedelta(minutes=5)
     decision = integration.run_tick(conn, cfg, now=now2, rng=random.Random(1))
     assert decision["wake"] is False
-    assert any(g.name == "cooldown" for g in decision["gated_by"])
+    assert decision["reasons"] == []
+    assert decision["gated_by"] == []
     assert conn.execute("SELECT COUNT(*) AS n FROM ct_wake_log").fetchone()["n"] == 2
 
 

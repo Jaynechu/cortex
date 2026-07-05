@@ -95,14 +95,28 @@ def evaluate(
     next_floor_due_at: datetime | None,
 ) -> list[TriggerReason]:
     """Evaluate all trigger kinds. Pure; consumes no rng (floor rescheduling
-    is a separate step, see reschedule_floor())."""
-    reasons: list[TriggerReason] = []
-    reasons.extend(_event_triggers(context))
-    reasons.extend(_affect_flag_trigger(context))
-    reasons.extend(_desire_triggers(desire_state, config))
-    reasons.extend(_self_scheduled_triggers(context, now))
-    reasons.extend(_floor_trigger(next_floor_due_at, now))
-    return reasons
+    is a separate step, see reschedule_floor()).
+
+    Collision model (C-wm): the floor timer governs desire + floor ONLY.
+    event/affect_flag (trigger) and self_scheduled (schedule) pierce anytime
+    and are never held back — ordered trigger > schedule. Desire is held
+    behind the floor (accrues meanwhile) and can only motivate a wake once the
+    floor is due. Coincident firings collapse to one wake; the plain floor
+    heartbeat stays silent whenever any other source already fired this tick.
+    """
+    pierce: list[TriggerReason] = []
+    pierce.extend(_event_triggers(context))
+    pierce.extend(_affect_flag_trigger(context))
+    pierce.extend(_self_scheduled_triggers(context, now))
+
+    floor_due = next_floor_due_at is None or now >= next_floor_due_at
+    if not floor_due:
+        return pierce  # desire held behind the floor; floor not due
+
+    desire = _desire_triggers(desire_state, config)
+    if pierce or desire:
+        return pierce + desire  # something real fired -> floor silent
+    return _floor_trigger(next_floor_due_at, now)
 
 
 def reschedule_floor(now: datetime, config: dict, rng: random.Random) -> datetime:

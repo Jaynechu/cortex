@@ -83,21 +83,6 @@ CREATE TABLE IF NOT EXISTS ct_pacemaker_state (
     state TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
-
--- Feedback ledger (C5, collection only): one row per outbound action, one
--- row per observed reaction linked via outbound_id. Distill comes later.
-CREATE TABLE IF NOT EXISTS ct_feedback (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    ts TEXT NOT NULL,
-    kind TEXT NOT NULL CHECK (kind IN ('outbound', 'reaction')),
-    channel TEXT,
-    action TEXT,
-    content TEXT,
-    context TEXT,
-    outbound_id INTEGER REFERENCES ct_feedback(id)
-);
-CREATE INDEX IF NOT EXISTS idx_ct_feedback_outbound
-    ON ct_feedback(outbound_id) WHERE outbound_id IS NOT NULL;
 """
 
 

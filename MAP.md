@@ -30,12 +30,12 @@ Registry COLLECTORS = {knowledgec, geofence, health}; `run_all` catches per-sour
 ## 3. Pacemaker (`pacemaker/`)
 
 Pure decision core — no I/O, no wall-clock; `now`/`rng` injected.
-- State (`core.py`): desire 4-float, expect_reply, next_floor_due_at, last_wake_at, cortex session fields (sid+date, opaque to tick).
+- State (`core.py`): desire 4-float, expect_reply, next_floor_due_at, last_wake_at, last_lie_down_at, night_cap_key/count, cortex session fields (sid+date, opaque to tick).
 - Desire (`desire.py`): attachment/curiosity/worry/duty, base_rate-decay [0,1]. Attachment modulated: cal_busy→0; home+free+gap→2x; else 1x.
-- Triggers (`triggers.py`): event (always [] — unwired) · affect_flag · desire threshold · self_scheduled · floor (60min±jitter). Facts only, no pre-written motive.
+- Triggers (`triggers.py`): event (always [] — unwired) · affect_flag · desire threshold · self_scheduled · floor (10-55min uniform from lie-down). Facts only, no pre-written motive. Collision: floor governs desire+floor only (desire held behind floor, accrues meanwhile); event/affect_flag(trigger)/self_scheduled(schedule) pierce anytime, trigger>schedule; coincident→one wake; plain floor silent when any other source fires.
 - Expect-reply (`expect_reply.py`): pending→check 30min→escalate tone+worry. Unwired (no outbound, C5).
-- Gates (`gates.py`): active-suspend · cooldown 45min · daily-cap 12 · fatigue 23:30-07:00 · token-budget 0.1 reserve. All run, no short-circuit.
-- Integration (`integration.py`): I/O owner. build_context: active_session (5min window), token_budget (audit_log parse), cal_busy/at_home (config defaults). State = ct_pacemaker_state single-row JSON. run_tick→tick→save→ct_wake_log (always, even dry_run).
+- Gates (`gates.py`): night mode 00-06 cap 1 (desire/floor/expect_reply consume cap; event/affect_flag/self_scheduled pierce) is the SOLE gate. No cooldown/daily-cap/token-budget/fatigue/active-suspend — spend protection = 150k per-wake fuse + bulletin battery gauge.
+- Integration (`integration.py`): I/O owner. build_context: active_session (5min window), cal_busy/at_home (config defaults), affect_flag + self_schedule files. State = ct_pacemaker_state single-row JSON. run_tick→tick→save→ct_wake_log (always, even dry_run). lie_down redraws floor from lie-down time.
 - Entry: `pacemaker_tick.py` (300s); wake.run_wake only when wake=true AND dry_run=false.
 
 ## 4. Wake runner (`wake.py`)
