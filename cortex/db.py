@@ -106,9 +106,13 @@ def connect_path(path: Path) -> sqlite3.Connection:
 # Columns added after the initial CREATE (idempotent guarded ALTER, matching
 # SCHEMA's IF-NOT-EXISTS convention). ct_wake_log.tokens / force_slept are
 # written by the interactive-window watchdog and read by the wakeup note.
+# net_tokens = NET spend (cache-miss rewrite + output, excludes cache_read and
+# plain input) for the same wake; nullable so pre-migration rows degrade to
+# `tokens` via COALESCE(net_tokens, tokens) at every read site.
 _ADDED_COLUMNS = (
     ("ct_wake_log", "tokens", "INTEGER"),
     ("ct_wake_log", "force_slept", "TEXT"),
+    ("ct_wake_log", "net_tokens", "INTEGER"),
 )
 
 

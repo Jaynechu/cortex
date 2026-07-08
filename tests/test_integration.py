@@ -228,6 +228,39 @@ def test_daily_budget_gates_floor_and_schedule_pierces(conn, cfg):
     assert any(r.kind == "schedule" for r in decision2["reasons"])
 
 
+def test_daily_budget_uses_net_tokens_over_total(conn, cfg):
+    """The gate sums COALESCE(net_tokens, tokens): a row with net_tokens set
+    counts NET spend, not the (much larger) total occupancy in `tokens`."""
+    now = datetime(2026, 7, 8, 12, 0, tzinfo=MEL)
+    start_utc = now.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(
+        timezone.utc).isoformat()
+    cap = cfg["gates"]["daily_budget"]["tokens"]
+    # total occupancy is way over cap, but net spend is a small fraction of it
+    conn.execute(
+        "INSERT INTO ct_wake_log (ts, wake, dry_run, tokens, net_tokens) VALUES (?,1,0,?,?)",
+        (start_utc, cap * 3, 100))
+    conn.commit()
+    integration.save_state(conn, PacemakerState(next_floor_due_at=now - timedelta(minutes=1)))
+    decision = integration.run_tick(conn, cfg, now=now, rng=random.Random(1))
+    assert decision["wake"] is True  # net (100) is far under cap -> not gated
+    assert not any(g.name == "daily_budget" for g in decision["gated_by"])
+
+
+def test_daily_budget_falls_back_to_tokens_when_net_missing(conn, cfg):
+    """A pre-migration row (net_tokens NULL) degrades to `tokens` — unchanged
+    behaviour for old rows."""
+    now = datetime(2026, 7, 8, 12, 0, tzinfo=MEL)
+    start_utc = now.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(
+        timezone.utc).isoformat()
+    conn.execute("INSERT INTO ct_wake_log (ts, wake, dry_run, tokens) VALUES (?,1,0,?)",
+                 (start_utc, cfg["gates"]["daily_budget"]["tokens"]))
+    conn.commit()
+    integration.save_state(conn, PacemakerState(next_floor_due_at=now - timedelta(minutes=1)))
+    decision = integration.run_tick(conn, cfg, now=now, rng=random.Random(1))
+    assert decision["wake"] is False
+    assert any(g.name == "daily_budget" for g in decision["gated_by"])
+
+
 def test_night_mode_gates_floor_wake(conn, cfg):
     now = datetime(2026, 7, 4, 2, 0, tzinfo=MEL)  # inside default 23:00-06:00 window
     night_key = gates.night_key(cfg, now)

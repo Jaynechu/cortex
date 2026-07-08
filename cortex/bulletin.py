@@ -118,13 +118,17 @@ def _last_wake(conn: sqlite3.Connection, now: datetime) -> dict | None:
 
 
 def _today_tokens(conn: sqlite3.Connection, now: datetime) -> int:
-    """SUM(ct_wake_log.tokens) for today's Melbourne-local date. ts is UTC ISO,
-    so filter from local midnight converted to UTC then compare local dates."""
+    """SUM(COALESCE(net_tokens, tokens)) for today's Melbourne-local date — must
+    agree with the daily-budget gate (pacemaker.integration._today_tokens): NET
+    spend (cache-miss rewrite + output), pre-migration rows fall back to total
+    `tokens`. ts is UTC ISO, so filter from local midnight converted to UTC then
+    compare local dates."""
     start_local = now.replace(hour=0, minute=0, second=0, microsecond=0)
     start_utc = start_local.astimezone(ZoneInfo("UTC")).isoformat()
     try:
         rows = conn.execute(
-            "SELECT ts, tokens FROM ct_wake_log WHERE tokens IS NOT NULL AND ts >= ?",
+            "SELECT ts, COALESCE(net_tokens, tokens) AS spend FROM ct_wake_log "
+            "WHERE tokens IS NOT NULL AND ts >= ?",
             (start_utc,),
         ).fetchall()
     except sqlite3.OperationalError:
@@ -135,7 +139,7 @@ def _today_tokens(conn: sqlite3.Connection, now: datetime) -> int:
     for row in rows:
         try:
             if _parse_utc(row["ts"]).astimezone(tz).date() == today:
-                total += int(row["tokens"])
+                total += int(row["spend"])
         except (TypeError, ValueError):
             continue
     return total

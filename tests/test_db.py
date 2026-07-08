@@ -27,6 +27,36 @@ def test_migrate_is_idempotent(marrow_conn):
     db.migrate(marrow_conn)  # must not raise
 
 
+def test_migrate_adds_net_tokens_column(marrow_conn):
+    cols = {row[1] for row in marrow_conn.execute("PRAGMA table_info(ct_wake_log)")}
+    assert "net_tokens" in cols
+
+
+def test_migrate_backfills_net_tokens_on_pre_migration_db(tmp_path):
+    """A DB created before net_tokens existed (only tokens/force_slept) gets the
+    column added on the next connect, existing rows left NULL (COALESCE handles
+    the fallback at read time), no data loss."""
+    import sqlite3
+
+    path = tmp_path / "old.db"
+    conn = sqlite3.connect(str(path))
+    conn.executescript(
+        "CREATE TABLE ct_wake_log (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "ts TEXT NOT NULL, wake INTEGER NOT NULL, dry_run INTEGER NOT NULL, "
+        "reasons TEXT, gated_by TEXT, explanation TEXT, tokens INTEGER, force_slept TEXT);"
+    )
+    conn.execute("INSERT INTO ct_wake_log (ts, wake, dry_run, tokens) VALUES ('t',1,0,500)")
+    conn.commit()
+    conn.close()
+
+    conn = db.connect_path(path)  # runs migrate()
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(ct_wake_log)")}
+    assert "net_tokens" in cols
+    row = conn.execute("SELECT tokens, net_tokens FROM ct_wake_log").fetchone()
+    assert row["tokens"] == 500 and row["net_tokens"] is None
+    conn.close()
+
+
 def test_log_collector_run(marrow_conn):
     db.log_collector_run(marrow_conn, "knowledgec", ok=True)
     db.log_collector_run(marrow_conn, "geofence", ok=False, error="boom")

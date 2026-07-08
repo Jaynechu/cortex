@@ -182,15 +182,18 @@ def _latest_activity_at(conn: sqlite3.Connection) -> datetime | None:
 
 
 def _today_tokens(conn: sqlite3.Connection, now: datetime) -> int:
-    """SUM(ct_wake_log.tokens) for `now`'s local date. ts is stored UTC ISO;
+    """SUM(COALESCE(net_tokens, tokens)) for `now`'s local date — the daily
+    budget gate counts NET spend (cache-miss rewrite + output); a pre-migration
+    row with no net_tokens degrades to its total `tokens`. ts is stored UTC ISO;
     filter from local midnight (converted to UTC) then confirm the local date so
-    the daily-budget gate resets naturally at local midnight."""
+    the gate resets naturally at local midnight."""
     tz = now.tzinfo
     start_utc = now.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(
         ZoneInfo("UTC")).isoformat()
     try:
         rows = conn.execute(
-            "SELECT ts, tokens FROM ct_wake_log WHERE tokens IS NOT NULL AND ts >= ?",
+            "SELECT ts, COALESCE(net_tokens, tokens) AS spend FROM ct_wake_log "
+            "WHERE tokens IS NOT NULL AND ts >= ?",
             (start_utc,),
         ).fetchall()
     except sqlite3.OperationalError:
@@ -200,7 +203,7 @@ def _today_tokens(conn: sqlite3.Connection, now: datetime) -> int:
     for row in rows:
         try:
             if _parse_dt(row["ts"]).astimezone(tz).date() == today:
-                total += int(row["tokens"])
+                total += int(row["spend"])
         except (TypeError, ValueError, AttributeError):
             continue
     return total

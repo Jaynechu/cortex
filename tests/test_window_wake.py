@@ -407,5 +407,27 @@ def test_lie_down_publishes_net_not_total(cfg):
     conn = db.connect(cfg)
     try:
         assert bulletin._window_tokens(conn) == 1_500  # Budget 'net' = net spend
+        row = conn.execute(
+            "SELECT tokens, net_tokens FROM ct_wake_log WHERE id=?", (wid,)).fetchone()
+        assert row["tokens"] == 91_500 and row["net_tokens"] == 1_500
+    finally:
+        conn.close()
+
+
+def test_daily_budget_line_sums_net_not_total(cfg):
+    """bulletin._today_tokens (the 'today X/Y' note line) sums NET spend, the
+    same figure the gate reads — display and gate must agree."""
+    from cortex import bulletin
+    from datetime import datetime as _dt, timezone as _tz
+
+    now = _dt.now(_tz.utc)
+    conn = db.connect(cfg)
+    try:
+        conn.execute(
+            "INSERT INTO ct_wake_log (ts, wake, dry_run, tokens, net_tokens) "
+            "VALUES (?,1,0,?,?)",
+            (db.utcnow_iso(), 90_000, 1_500))
+        conn.commit()
+        assert bulletin._today_tokens(conn, now) == 1_500  # net, not the 90k total
     finally:
         conn.close()

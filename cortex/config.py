@@ -100,9 +100,11 @@ _DEFAULTS: dict[str, Any] = {
         # Night window (plan 07-08): zero self-wakes 23-06 — floor/desire/
         # self_scheduled/affect_flag all silent; only schedule (duty) pierces.
         "night": {"start": "23:00", "end": "06:00", "cap": 0},
-        # Daily wake-token budget: once today's SUM(ct_wake_log.tokens) reaches
-        # this, self-wakes stop; schedule pierces; resets at local midnight.
-        "daily_budget": {"tokens": 1_000_000},
+        # Daily wake-token budget: once today's SUM(NET spend — cache-miss
+        # rewrite + output, ct_wake_log.net_tokens with a tokens fallback)
+        # reaches this, self-wakes stop; schedule pierces; resets at local
+        # midnight. 2M net (not the old 1M total) — cache reads are near-free.
+        "daily_budget": {"tokens": 2_000_000},
     },
     "triggers": {
         "desire_thresholds": {"attachment": 0.8, "curiosity": 0.8, "worry": 0.7, "duty": 0.8},
@@ -123,8 +125,9 @@ _DEFAULTS: dict[str, Any] = {
         "replay_events": 6,
         # Per-event truncation inside the replay section.
         "replay_event_chars": 300,
-        # Daily wake-token budget the "today X/Y" line renders against.
-        "daily_budget": 1_000_000,
+        # Daily wake-token (NET spend) budget the "today X/Y" line renders
+        # against — must match gates.daily_budget.tokens (display and gate agree).
+        "daily_budget": 2_000_000,
         # Pending self-schedule entries surface only when due within this window.
         "pending_window_min": 15,
     },

@@ -65,30 +65,35 @@ def _kill_watchdog(cfg: dict) -> None:
     p.unlink(missing_ok=True)
 
 
-def _record_tokens(conn, cfg: dict, state: dict, force_slept: str | None) -> int:
+def _record_tokens(conn, cfg: dict, state: dict, force_slept: str | None) -> tuple[int, int]:
+    """Record both this wake's total context occupancy (`tokens`, drives
+    rotate/fuse) and its NET spend (`net_tokens` — cache-miss rewrite + output;
+    drives the daily budget gate + Budget note line). Returns (tokens, net)."""
     tokens = transcript.window_tokens(cfg)
+    net = transcript.net_tokens(cfg)
     wid = state.get("wake_log_id")
     if wid:
         try:
-            conn.execute("UPDATE ct_wake_log SET tokens=?, force_slept=? WHERE id=?",
-                        (tokens or None, force_slept, wid))
+            conn.execute(
+                "UPDATE ct_wake_log SET tokens=?, net_tokens=?, force_slept=? WHERE id=?",
+                (tokens or None, net or None, force_slept, wid))
             conn.commit()
         except Exception:  # column race with concurrent migrate; best-effort
             pass
-    return tokens
+    return tokens, net
 
 
 def lie_down(cfg: dict, force_slept: str | None = None) -> dict:
     conn = db.connect(cfg)
     try:
         state = wake_state.load(cfg)
-        tokens = _record_tokens(conn, cfg, state, force_slept)
+        tokens, net = _record_tokens(conn, cfg, state, force_slept)
         cleared = _clear_due_self_schedule(cfg)
         integration.lie_down(conn, cfg)  # floor redraw from now (rewrites state)
         # Publish AFTER the floor redraw's save_state (which drops the key), so the
         # next wake's Budget line sees this wake's NET spend (cache-miss rewrite +
         # output — not the full context occupancy `tokens` used for rotate/fuse).
-        integration.store_window_tokens(conn, transcript.net_tokens(cfg))
+        integration.store_window_tokens(conn, net)
         _kill_watchdog(cfg)
         rotate = int(cfg["wake"].get("rotate", {}).get("threshold_tokens", 100_000))
         rotated = False
