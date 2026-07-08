@@ -20,7 +20,9 @@ DEFAULT_DAY_LOG = Path.home() / ".config" / "marrow" / "day_log.md"
 DEFAULT_DAY_LOG_ARCHIVE_DIR = Path.home() / ".config" / "marrow" / "day_log_archive"
 DEFAULT_AFFECT_FLAG = Path.home() / ".config" / "marrow" / "cortex" / "affect_flag.json"
 DEFAULT_SELF_SCHEDULE = Path.home() / ".config" / "marrow" / "cortex" / "self_schedule.json"
+DEFAULT_HANDOFF = Path.home() / ".config" / "marrow" / "cortex" / "handoff.md"
 DEFAULT_CORTEX_HOME = Path.home() / ".config" / "marrow" / "cortex"
+DEFAULT_CADENCE_BIN = Path.home() / "CC-Lab" / "cadence" / ".build" / "debug" / "cadence"
 DEFAULT_NY_DB_PAGES = Path.home() / "Desktop" / "NY" / "db-pages"
 DEFAULT_MARROW_REPO = Path.home() / "CC-Lab" / "marrow"
 DEFAULT_WAKE_TIMING_LOG = Path.home() / ".config" / "marrow" / "logs" / "wake_timing.log"
@@ -36,6 +38,7 @@ _DEFAULTS: dict[str, Any] = {
         "day_log_archive_dir": "",
         "affect_flag_file": "",
         "self_schedule_file": "",
+        "handoff_file": "",
         "cortex_home": "",
         "wishlist_file": "",
         "ny_db_pages": "",
@@ -100,22 +103,36 @@ _DEFAULTS: dict[str, Any] = {
         "worry_increment": 0.05,
         "tone_levels": ["neutral", "concerned", "worried", "anxious"],
     },
-    # Wake bulletin knobs (07-04: battery gauge + forced replay).
+    # Wakeup note knobs. Every field is deterministic now, so the old whole-note
+    # max_chars cap is gone; per-source limits below keep each line bounded.
     "bulletin": {
-        # Hard cap on the whole rendered bulletin text.
-        "max_chars": 2000,
-        # How many trailing user/assistant conversation pairs to force-append
-        # (Decided 07-04: never rely on cortex self-serve recall queries).
-        "replay_pairs": 3,
-        # Per-message truncation inside a replayed pair, keeps total bounded.
-        "replay_pair_chars": 240,
+        # Trailing conversation events force-appended to the replay section
+        # (cross-session, uniform, no decay).
+        "replay_events": 6,
+        # Per-event truncation inside the replay section.
+        "replay_event_chars": 300,
+        # Daily wake-token budget the "today X/Y" line renders against.
+        "daily_budget": 1_000_000,
+        # Pending self-schedule entries surface only when due within this window.
+        "pending_window_min": 15,
+    },
+    # Wakeup note persona/display strings + behaviour (OSS: identity in config,
+    # never hardcoded in .py).
+    "note": {
+        # Display titles for the two localized sections.
+        "handoff_title": "阿屿の碎碎念",
+        "replay_title": "最近对话回放",
+        # Wake kinds that receive the handoff note (only on a fresh window).
+        "handoff_wake_kinds": ["rebirth", "rotate"],
+        # cadence CLI binary for cal/rem lines. Empty -> those lines are omitted.
+        "cadence_bin": "",
     },
 }
 
 _SECTIONS = (
     "core", "paths", "knowledgec", "geofence", "health",
     "tick", "pacemaker", "desire", "gates", "triggers", "expect_reply", "marrow",
-    "wake", "bulletin",
+    "wake", "bulletin", "note",
 )
 
 
@@ -193,6 +210,18 @@ def affect_flag_path(cfg: dict) -> Path:
 def self_schedule_path(cfg: dict) -> Path:
     raw = cfg["paths"].get("self_schedule_file") or ""
     return Path(raw).expanduser() if raw else DEFAULT_SELF_SCHEDULE
+
+
+def handoff_path(cfg: dict) -> Path:
+    raw = cfg["paths"].get("handoff_file") or ""
+    return Path(raw).expanduser() if raw else DEFAULT_HANDOFF
+
+
+def cadence_bin_path(cfg: dict) -> Path:
+    """cadence CLI for cal/rem note lines. Empty -> packaged default path; a
+    missing/non-executable binary simply omits those lines (best-effort)."""
+    raw = (cfg.get("note", {}) or {}).get("cadence_bin") or ""
+    return Path(raw).expanduser() if raw else DEFAULT_CADENCE_BIN
 
 
 def cortex_home(cfg: dict) -> Path:
