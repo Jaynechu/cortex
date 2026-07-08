@@ -64,7 +64,8 @@ render sections: Now · Trigger · Last activity · Calendar "none" · Usage · 
 ## 7. Config, symlinks, install
 
 Config (`config.py`): TOML ~/.config/marrow/cortex.toml, deep-merge over _DEFAULTS.
-Symlinks (`symlinks.py`): day_log.md + wishlist.md → ~/Desktop/NY/db-pages. Creates wishlist if missing, refuses non-symlink clobber. ensure_commands → <home>/.claude/commands: __VENV_PYTHON__ templates (say/lie-down) land as token-resolved copies (no personal path in repo, migrates legacy symlink); rest symlink.
+Symlinks (`symlinks.py`): day_log.md + wishlist.md → ~/Desktop/NY/db-pages. Creates wishlist if missing, refuses non-symlink clobber.
+lie_down / say: env-gated MCP tools in marrow daemon (subprocess `-m cortex.lie_down|say` from repo_root), registered only when MARROW_CORTEX set. Not slash commands.
 Install (`install.py`): 2 plists (com.cortex.collect-tick, com.cortex.pacemaker-tick), template tokens from config.
 Safety: pacemaker.dry_run=true default — flip at C5.
 
