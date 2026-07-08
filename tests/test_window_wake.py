@@ -158,7 +158,7 @@ def test_window_wake_dispatch(cfg, monkeypatch):
                         lambda c: calls.setdefault("respawn", True))
     monkeypatch.setattr(
         window, "append_wake_signal",
-        lambda c, reason, note=None: calls.setdefault("signal", (reason, note)))
+        lambda c, note: calls.setdefault("signal", note))
     monkeypatch.setattr(wake, "_signal_landed", lambda c, before, t: True)
     monkeypatch.setattr(watchdog, "spawn", lambda c: calls.setdefault("watchdog", True))
 
@@ -167,7 +167,7 @@ def test_window_wake_dispatch(cfg, monkeypatch):
     conn.close()
     assert res == {"mode": "window", "session_id": None, "text": None}
     assert "respawn" not in calls               # live window is not respawned
-    assert calls["signal"][0] == "floor"        # one WAKE line appended
+    assert calls["signal"] == str(wake_state.wakeup_note_path(cfg))  # WAKE line = note path
     assert calls["watchdog"] is True
     # note file written with the note body
     assert wake_state.wakeup_note_path(cfg).read_text() == "NOTE-BODY"
@@ -188,7 +188,7 @@ def test_window_wake_respawn_on_flag(cfg, monkeypatch):
     calls = {}
     monkeypatch.setattr(window, "respawn", lambda c: calls.setdefault("respawn", True))
     monkeypatch.setattr(window, "append_wake_signal",
-                        lambda c, reason, note=None: calls.setdefault("signal", reason))
+                        lambda c, note: calls.setdefault("signal", note))
     monkeypatch.setattr(wake, "_signal_landed", lambda c, before, t: True)
     monkeypatch.setattr(watchdog, "spawn", lambda c: None)
 
@@ -196,7 +196,8 @@ def test_window_wake_respawn_on_flag(cfg, monkeypatch):
     res = wake._window_wake(conn, cfg, "N", _dt.now(timezone.utc), respawn=True)
     conn.close()
     assert res["mode"] == "window"
-    assert calls["respawn"] is True and calls["signal"] == "floor"
+    assert calls["respawn"] is True
+    assert calls["signal"] == str(wake_state.wakeup_note_path(cfg))
 
 
 def test_window_wake_recovery_reappends_on_ear_miss(cfg, monkeypatch):
@@ -214,7 +215,7 @@ def test_window_wake_recovery_reappends_on_ear_miss(cfg, monkeypatch):
     monkeypatch.setattr(window, "respawn",
                         lambda c: calls.__setitem__("respawn", calls["respawn"] + 1))
     monkeypatch.setattr(window, "append_wake_signal",
-                        lambda c, reason, note=None: calls.__setitem__("signal", calls["signal"] + 1))
+                        lambda c, note: calls.__setitem__("signal", calls["signal"] + 1))
     monkeypatch.setattr(wake, "_signal_landed", lambda c, before, t: False)  # never lands
     monkeypatch.setattr(watchdog, "spawn", lambda c: None)
 
@@ -235,7 +236,7 @@ def test_window_wake_falls_back_on_window_error(cfg, monkeypatch):
         raise window.WindowError("no iterm")
     monkeypatch.setattr(wake, "_window_alive", lambda c: True)
     monkeypatch.setattr(window, "append_wake_signal",
-                        lambda c, reason, note=None: (_ for _ in ()).throw(
+                        lambda c, note: (_ for _ in ()).throw(
                             window.WindowError("append")))
     monkeypatch.setattr(window, "respawn", boom)
     from datetime import datetime as _dt
@@ -291,34 +292,31 @@ def test_store_window_tokens_reaches_budget_line(cfg):
 # --- signal-file ear ----------------------------------------------------------
 
 def test_append_wake_signal_line_format(cfg):
-    """append_wake_signal writes one parseable line: WAKE for a normal wake,
-    with reason + note + a UTC iso ts."""
+    """append_wake_signal writes exactly one line: 'Waking up — read <note>
+    first'. No reason field — the wake reason already lives inside the note
+    itself (bulletin's Wake: line), so it is not duplicated on the signal line."""
     from cortex import window
 
-    window.append_wake_signal(cfg, "floor", "/tmp/note.md")
+    window.append_wake_signal(cfg, "/tmp/note.md")
     text = config.wake_signal_log_path(cfg).read_text().strip()
-    assert text.startswith("WAKE ")
-    assert "reason=floor" in text
-    assert "note=/tmp/note.md" in text
-    assert "ts=" in text and "+00:00" in text  # UTC-aware iso
+    assert text == "Waking up — read /tmp/note.md first"
 
 
-def test_append_wake_signal_nudge_kind(cfg):
-    """A 'nudge ...' reason (watchdog wrap-up) is a NUDGE line, not WAKE."""
+def test_append_nudge_signal_kind(cfg):
+    """The watchdog wrap-up nudge is a distinct NUDGE line carrying wrap_line."""
     from cortex import window
 
-    window.append_wake_signal(cfg, "nudge 写碎碎念收尾躺下")
+    window.append_nudge_signal(cfg, "写碎碎念收尾躺下")
     lines = config.wake_signal_log_path(cfg).read_text().strip().splitlines()
-    assert lines[-1].startswith("NUDGE ")
-    assert "reason=nudge 写碎碎念收尾躺下" in lines[-1]
+    assert lines[-1] == "NUDGE 写碎碎念收尾躺下"
 
 
 def test_append_wake_signal_appends_not_overwrites(cfg):
     """Multiple signals accumulate (the ear tails the file)."""
     from cortex import window
 
-    window.append_wake_signal(cfg, "floor", "/a")
-    window.append_wake_signal(cfg, "floor", "/b")
+    window.append_wake_signal(cfg, "/a")
+    window.append_wake_signal(cfg, "/b")
     lines = config.wake_signal_log_path(cfg).read_text().strip().splitlines()
     assert len(lines) == 2
 

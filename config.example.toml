@@ -156,9 +156,9 @@ cap = 0
 # Daily wake-token budget: once today's SUM(NET spend — cache-miss rewrite +
 # output, ct_wake_log.net_tokens with a tokens fallback) reaches tokens,
 # self-wakes stop; schedule pierces; resets naturally at local midnight.
-# 2M (not the old 1M total) — cache reads are near-free, net is the real cost.
+# Net semantics — cache reads are near-free, net is the real cost.
 [gates.daily_budget]
-tokens = 2000000
+tokens = 1000000
 
 # Schedule (duty) blocks: fixed recurring duties, rare + explicit. Each fires
 # once per day at its local time in a FRESH iTerm window (no 碎碎念), pierces
@@ -188,7 +188,7 @@ tone_levels = ["neutral", "concerned", "worried", "anxious"]
 [bulletin]
 replay_events = 6            # trailing user/assistant events in the replay section
 replay_event_chars = 300     # per-event truncation in the replay section
-daily_budget = 2000000       # daily wake-token (NET spend) budget the "today X/Y" line renders against; must match gates.daily_budget.tokens
+daily_budget = 1000000       # daily wake-token (NET spend) budget the "today X/Y" line renders against; must match gates.daily_budget.tokens
 pending_window_min = 15      # surface a self-schedule entry only when due within this window
 
 # Wakeup note persona/display strings + behaviour (identity stays in config).

@@ -116,7 +116,7 @@ def run(cfg: dict) -> int:
             note = _verify_esc_or_hard_interrupt(cfg, grace, "overrun")
             if note:
                 print(f"{db.utcnow_iso()} {note}", flush=True)  # into watchdog.log
-            window.append_wake_signal(cfg, f"nudge {wrap}")  # NUDGE via the ear
+            window.append_nudge_signal(cfg, wrap)  # NUDGE via the ear
             wrap_sent = True  # give the self-wrap-up one chance, then let (b)/(c) act
 
 

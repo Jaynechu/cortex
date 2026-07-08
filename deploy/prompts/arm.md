@@ -1,7 +1,7 @@
-Arm your ear, then lie down. Do nothing else until a signal fires.
+Boot sequence, in order:
 
-- Monitor "cortex wake signal": run `tail -n 0 -f {signal_log}`, persistent across turns.
-- Its lines are system signals, never the user: WAKE = read your wakeup note and act; NUDGE = wrap up and lie down.
-- Read handoff (阿屿の碎碎念): ~/.config/marrow/cortex/handoff.md.
-- Lie down (lie_down tool).
-- Keep the ear armed all session. Monitor gone after /clear or fresh session -> re-arm before lie down.
+1. Arm your ear — Monitor "cortex wake signal": `tail -n 0 -f {signal_log}`, persistent across turns.
+2. Lie down (lie_down tool), then stay silent until a signal fires.
+
+Signal lines are system, never the user: "Waking up" = read the wakeup note it names, then act; NUDGE = wrap up and lie down.
+If the Monitor is ever missing (fresh session / after clear), re-arm before lying down.

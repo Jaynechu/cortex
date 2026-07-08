@@ -13,7 +13,6 @@ import os
 import signal
 import subprocess
 import time
-from datetime import datetime, timezone
 
 from cortex import config, wake_state
 
@@ -144,21 +143,27 @@ def _shq(text: str) -> str:
     return "'" + text.replace("'", "'\\''") + "'"
 
 
-def append_wake_signal(cfg: dict, reason: str, note_path: str | None = None) -> None:
-    """Append one wake-signal line the armed Monitor ear picks up. Format:
-    `<KIND> reason=<reason> note=<path> ts=<iso>`. KIND is WAKE (a wake) unless
-    reason starts with 'nudge' (watchdog wrap-up -> NUDGE). Best-effort: a write
-    failure never crashes the pacemaker."""
-    kind = "NUDGE" if reason.startswith("nudge") else "WAKE"
-    ts = datetime.now(timezone.utc).isoformat()
-    line = f"{kind} reason={reason} note={note_path or ''} ts={ts}\n"
+def _append_signal_line(cfg: dict, line: str) -> None:
     p = config.wake_signal_log_path(cfg)
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         with p.open("a", encoding="utf-8") as f:
-            f.write(line)
+            f.write(line + "\n")
     except OSError:
         pass
+
+
+def append_wake_signal(cfg: dict, note_path: str) -> None:
+    """Append one WAKE line the armed Monitor ear picks up: 'Waking up — read
+    <note_path> first'. The wake reason already lives inside the note itself
+    (bulletin's Wake: line) so it is not duplicated here. Best-effort: a write
+    failure never crashes the pacemaker."""
+    _append_signal_line(cfg, f"Waking up — read {note_path} first")
+
+
+def append_nudge_signal(cfg: dict, wrap_line: str) -> None:
+    """Append one NUDGE line (watchdog wrap-up nudge) the ear picks up."""
+    _append_signal_line(cfg, f"NUDGE {wrap_line}")
 
 
 _launch_command = launch_command  # back-compat alias

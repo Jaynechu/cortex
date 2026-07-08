@@ -252,11 +252,11 @@ def _window_wake(conn, cfg, note_text, now, respawn: bool = False) -> dict | Non
         if respawn or not _window_alive(cfg):
             window.respawn(cfg)
         before = transcript.mtime(cfg)
-        window.append_wake_signal(cfg, "floor", note_path)
+        window.append_wake_signal(cfg, note_path)
         if not _signal_landed(cfg, before, timeout):
             _audit_wake(conn, wake_id_of(now), "ear miss -> respawn + re-append")
             window.respawn(cfg)
-            window.append_wake_signal(cfg, "floor", note_path)
+            window.append_wake_signal(cfg, note_path)
     except window.WindowError:
         return None
     tpath = transcript.newest(cfg)
