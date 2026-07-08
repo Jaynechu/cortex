@@ -103,8 +103,25 @@ def connect_path(path: Path) -> sqlite3.Connection:
     return conn
 
 
+# Columns added after the initial CREATE (idempotent guarded ALTER, matching
+# SCHEMA's IF-NOT-EXISTS convention). ct_wake_log.tokens / force_slept are
+# written by the interactive-window watchdog and read by the wakeup note.
+_ADDED_COLUMNS = (
+    ("ct_wake_log", "tokens", "INTEGER"),
+    ("ct_wake_log", "force_slept", "TEXT"),
+)
+
+
+def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, decl: str) -> None:
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column not in existing:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
+    for table, column, decl in _ADDED_COLUMNS:
+        _add_column_if_missing(conn, table, column, decl)
     conn.commit()
 
 
