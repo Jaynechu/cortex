@@ -100,6 +100,19 @@ def test_clear_due_self_schedule_naive_local(cfg):
     assert [x["intent"] for x in json.loads(p.read_text())] == ["future-local"]
 
 
+def test_clear_due_self_schedule_bare_dict(cfg):
+    """A bare dict (not wrapped in a list) is tolerated: treated as one entry,
+    and the file is always rewritten as a list."""
+    now = datetime.now(timezone.utc)
+    past = (now - timedelta(minutes=5)).isoformat()
+    p = config.self_schedule_path(cfg)
+    p.write_text(json.dumps({"due_at": past, "intent": "gone"}))
+    removed = lie_down._clear_due_self_schedule(cfg)
+    assert removed == 1
+    left = json.loads(p.read_text())
+    assert left == []
+
+
 # --- lie_down: token recording into ct_wake_log ------------------------------
 
 def test_window_wake_dispatch(cfg, monkeypatch):

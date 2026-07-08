@@ -33,6 +33,8 @@ def _clear_due_self_schedule(cfg: dict) -> int:
         items = json.loads(p.read_text()) if p.exists() else []
     except (OSError, ValueError):
         return 0
+    if isinstance(items, dict):  # tolerate a bare dict (single entry, not wrapped in a list)
+        items = [items]
     if not isinstance(items, list):
         return 0
     now = _now_utc()

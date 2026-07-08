@@ -217,6 +217,8 @@ def _read_json_file(path, default):
 
 def _self_scheduled(cfg: dict) -> list[dict]:
     items = _read_json_file(config.self_schedule_path(cfg), [])
+    if isinstance(items, dict):  # tolerate a bare dict (single entry, not wrapped in a list)
+        items = [items]
     tz = ZoneInfo(cfg["core"]["timezone"])
     out = []
     for item in items if isinstance(items, list) else []:

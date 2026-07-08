@@ -144,6 +144,17 @@ def test_build_context_reads_flag_and_schedule_files(conn, cfg, tmp_path):
     assert isinstance(ctx["self_scheduled"][0]["due_at"], datetime)
 
 
+def test_self_scheduled_tolerates_bare_dict(cfg, tmp_path):
+    """A bare dict (not wrapped in a list) is read as a single-item list."""
+    now = datetime.now(MEL)
+    due = (now - timedelta(minutes=1)).isoformat()
+    (tmp_path / "self_schedule.json").write_text(json.dumps({"due_at": due, "intent": "check in"}))
+    out = integration._self_scheduled(cfg)
+    assert len(out) == 1
+    assert out[0]["intent"] == "check in"
+    assert isinstance(out[0]["due_at"], datetime)
+
+
 # --- run_tick orchestration ------------------------------------------------
 
 def test_first_tick_fires_floor_and_persists(conn, cfg):
