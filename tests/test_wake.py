@@ -51,8 +51,8 @@ class FakeCaller:
         return {"text": "hi", "session_id": self.session_id}
 
 
-def test_assemble_bulletin_real_data(marrow_conn, wcfg):
-    text = wake.assemble_bulletin(marrow_conn, wcfg, DAY1)
+def test_assemble_note_real_data(marrow_conn, wcfg):
+    text = wake.assemble_note(marrow_conn, wcfg, DAY1)
     assert "Now:" in text
     assert "Wake:" in text  # new note format leads with the Wake (trigger) line
     assert len(text) < 1000

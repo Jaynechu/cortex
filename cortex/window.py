@@ -156,7 +156,7 @@ def _append_signal_line(cfg: dict, line: str) -> None:
 def append_wake_signal(cfg: dict, note_path: str) -> None:
     """Append one WAKE line the armed Monitor ear picks up: 'Waking up — read
     <note_path> first'. The wake reason already lives inside the note itself
-    (bulletin's Wake: line) so it is not duplicated here. Best-effort: a write
+    (note's Wake: line) so it is not duplicated here. Best-effort: a write
     failure never crashes the pacemaker."""
     _append_signal_line(cfg, f"Waking up — read {note_path} first")
 

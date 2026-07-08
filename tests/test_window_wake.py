@@ -272,19 +272,19 @@ def test_lie_down_records_tokens(cfg):
 
 
 def test_store_window_tokens_reaches_budget_line(cfg):
-    """store_window_tokens publishes to ct_pacemaker_state; bulletin reads it back
+    """store_window_tokens publishes to ct_pacemaker_state; note reads it back
     (Budget line 'net Xk'). Survives lie_down's own floor-redraw save_state."""
-    from cortex import bulletin
+    from cortex import note
     from cortex.pacemaker import integration
 
     conn = db.connect(cfg)
     try:
         integration.store_window_tokens(conn, 88_000)
-        assert bulletin._window_tokens(conn) == 88_000
+        assert note._window_tokens(conn) == 88_000
         # a later floor-redraw save must NOT wipe it out of order
         integration.lie_down(conn, cfg)
         integration.store_window_tokens(conn, 90_000)
-        assert bulletin._window_tokens(conn) == 90_000
+        assert note._window_tokens(conn) == 90_000
     finally:
         conn.close()
 
@@ -294,7 +294,7 @@ def test_store_window_tokens_reaches_budget_line(cfg):
 def test_append_wake_signal_line_format(cfg):
     """append_wake_signal writes exactly one line: 'Waking up — read <note>
     first'. No reason field — the wake reason already lives inside the note
-    itself (bulletin's Wake: line), so it is not duplicated on the signal line."""
+    itself (note's Wake: line), so it is not duplicated on the signal line."""
     from cortex import window
 
     window.append_wake_signal(cfg, "/tmp/note.md")
@@ -381,7 +381,7 @@ def test_lie_down_over_rotate_sets_flag_no_typing(cfg, monkeypatch):
 def test_lie_down_publishes_net_not_total(cfg):
     """lie_down records total occupancy to ct_wake_log but publishes NET spend
     (cache_creation + output) for the next wake's Budget 'net' line."""
-    from cortex import bulletin
+    from cortex import note
     from cortex.pacemaker import integration
 
     conn = db.connect(cfg)
@@ -404,7 +404,7 @@ def test_lie_down_publishes_net_not_total(cfg):
     assert r["tokens"] == 91_500  # ct_wake_log records total occupancy
     conn = db.connect(cfg)
     try:
-        assert bulletin._window_tokens(conn) == 1_500  # Budget 'net' = net spend
+        assert note._window_tokens(conn) == 1_500  # Budget 'net' = net spend
         row = conn.execute(
             "SELECT tokens, net_tokens FROM ct_wake_log WHERE id=?", (wid,)).fetchone()
         assert row["tokens"] == 91_500 and row["net_tokens"] == 1_500
@@ -413,9 +413,9 @@ def test_lie_down_publishes_net_not_total(cfg):
 
 
 def test_daily_budget_line_sums_net_not_total(cfg):
-    """bulletin._today_tokens (the 'today X/Y' note line) sums NET spend, the
+    """note._today_tokens (the 'today X/Y' note line) sums NET spend, the
     same figure the gate reads — display and gate must agree."""
-    from cortex import bulletin
+    from cortex import note
     from datetime import datetime as _dt, timezone as _tz
 
     now = _dt.now(_tz.utc)
@@ -426,6 +426,6 @@ def test_daily_budget_line_sums_net_not_total(cfg):
             "VALUES (?,1,0,?,?)",
             (db.utcnow_iso(), 90_000, 1_500))
         conn.commit()
-        assert bulletin._today_tokens(conn, now) == 1_500  # net, not the 90k total
+        assert note._today_tokens(conn, now) == 1_500  # net, not the 90k total
     finally:
         conn.close()

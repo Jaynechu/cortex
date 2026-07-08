@@ -44,10 +44,6 @@ def _local_hm(ts_iso: str, cfg: dict) -> str:
     return _parse_utc(ts_iso).astimezone(_tz(cfg)).strftime("%H:%M")
 
 
-def _bulletin_cfg(cfg: dict) -> dict:
-    return cfg.get("bulletin", {}) or {}
-
-
 def _note_cfg(cfg: dict) -> dict:
     return cfg.get("note", {}) or {}
 
@@ -309,7 +305,7 @@ def _pending(cfg: dict, now: datetime) -> list[dict]:
         return []
     if not isinstance(items, list):
         return []
-    window = _bulletin_cfg(cfg).get("pending_window_min", 15)
+    window = _note_cfg(cfg).get("pending_window_min", 15)
     horizon = now + timedelta(minutes=window)
     tz = _tz(cfg)
     out = []
@@ -354,11 +350,10 @@ def gather(
 ) -> dict:
     """Assemble the wakeup note data dict. conn must use sqlite3.Row factory.
     `fresh`/`wake_kind` gate the handoff section (fresh windows only)."""
-    bcfg = _bulletin_cfg(cfg)
     ncfg = _note_cfg(cfg)
 
     kv = _safe(_rate_limit_kv, conn, default={})
-    budget = _safe(_build_budget, conn, cfg, now, kv, bcfg)
+    budget = _safe(_build_budget, conn, cfg, now, kv, ncfg)
 
     return {
         "wake_parts": _safe(_wake_parts, decision, default=["巡回"]),
@@ -372,15 +367,15 @@ def gather(
         "handoff_title": ncfg.get("handoff_title", "阿屿の碎碎念"),
         "replay": _safe(
             _replay_events, conn, cfg,
-            bcfg.get("replay_events", 6),
-            bcfg.get("replay_event_chars", 300),
+            ncfg.get("replay_events", 6),
+            ncfg.get("replay_event_chars", 300),
             default=[],
         ),
         "replay_title": ncfg.get("replay_title", "最近对话回放"),
     }
 
 
-def _build_budget(conn, cfg, now, kv, bcfg) -> dict:
+def _build_budget(conn, cfg, now, kv, ncfg) -> dict:
     five = kv.get(_FIVE_HOUR[0])
     seven = kv.get(_SEVEN_DAY[0])
     reset = kv.get(_FIVE_HOUR[1])
@@ -390,7 +385,7 @@ def _build_budget(conn, cfg, now, kv, bcfg) -> dict:
         "seven_d_pct": _as_float(seven),
         "window_tokens": _window_tokens(conn),
         "today_tokens": _today_tokens(conn, now),
-        "daily_budget": int(bcfg.get("daily_budget", 1_000_000)),
+        "daily_budget": int(ncfg.get("daily_budget", 1_000_000)),
     }
 
 

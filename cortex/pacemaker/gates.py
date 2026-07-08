@@ -2,7 +2,7 @@
 -> GateResult. A wake is allowed only if every gate allows. Two gates: the
 night window (23-06 zero self-wakes) and the daily token budget — both let
 schedule (duty) wakes pierce; every other spend protection is the 150k
-per-wake fuse + bulletin battery gauge.
+per-wake fuse + wakeup note battery gauge.
 
 Expected config shape (config["gates"]):
     {

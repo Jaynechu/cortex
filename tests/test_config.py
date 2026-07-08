@@ -19,7 +19,7 @@ def test_daily_budget_defaults_are_1m_net(tmp_path):
     two must agree with each other."""
     cfg = config.load(tmp_path / "does_not_exist.toml")
     assert cfg["gates"]["daily_budget"]["tokens"] == 1_000_000
-    assert cfg["bulletin"]["daily_budget"] == 1_000_000
+    assert cfg["note"]["daily_budget"] == 1_000_000
 
 
 def test_load_merges_overrides(tmp_path):

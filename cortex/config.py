@@ -119,7 +119,8 @@ _DEFAULTS: dict[str, Any] = {
     },
     # Wakeup note knobs. Every field is deterministic now, so the old whole-note
     # max_chars cap is gone; per-source limits below keep each line bounded.
-    "bulletin": {
+    # OSS: identity/display strings stay in config, never hardcoded in .py.
+    "note": {
         # Trailing conversation events force-appended to the replay section
         # (cross-session, uniform, no decay).
         "replay_events": 6,
@@ -130,10 +131,6 @@ _DEFAULTS: dict[str, Any] = {
         "daily_budget": 1_000_000,
         # Pending self-schedule entries surface only when due within this window.
         "pending_window_min": 15,
-    },
-    # Wakeup note persona/display strings + behaviour (OSS: identity in config,
-    # never hardcoded in .py).
-    "note": {
         # Display titles for the two localized sections.
         "handoff_title": "阿屿の碎碎念",
         "replay_title": "最近对话回放",
@@ -147,7 +144,7 @@ _DEFAULTS: dict[str, Any] = {
 _SECTIONS = (
     "core", "paths", "knowledgec", "geofence", "health",
     "tick", "pacemaker", "desire", "gates", "triggers", "expect_reply", "marrow",
-    "wake", "bulletin", "note",
+    "wake", "note",
 )
 
 
@@ -178,6 +175,11 @@ def load(path: Path | None = None) -> dict[str, Any]:
     for section in _SECTIONS:
         if section in loaded:
             cfg[section] = _merge(cfg[section], loaded[section])
+
+    # Legacy fallback: an old config.toml may still carry the pre-rename
+    # [bulletin] section (renamed to [note]) — merge it in if present.
+    if "bulletin" in loaded:
+        cfg["note"] = _merge(cfg["note"], loaded["bulletin"])
 
     categories = dict(_DEFAULTS["knowledgec.categories"])
     loaded_categories = loaded.get("knowledgec", {}).get("categories", {})

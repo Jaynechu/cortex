@@ -1,4 +1,4 @@
-"""Wake runner (C3): on a pacemaker wake decision, assemble the bulletin,
+"""Wake runner (C3): on a pacemaker wake decision, assemble the wakeup note,
 call marrow's resumed full-env cortex session, persist the session_id, and
 refresh day_log.md. Daily rebirth: first wake on a new local date starts a
 fresh marrow session (no resume_sid) and archives the previous day_log.
@@ -21,7 +21,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from cortex import bulletin, config, day_log, db, symlinks
+from cortex import config, day_log, db, note, symlinks
 from cortex.pacemaker import integration
 from cortex.timing import WakeTimer
 
@@ -56,14 +56,14 @@ def _now(cfg: dict) -> datetime:
     return datetime.now(ZoneInfo(cfg["core"]["timezone"]))
 
 
-def assemble_bulletin(conn: sqlite3.Connection, cfg: dict, now: datetime,
-                      decision: dict | None = None, fresh: bool = False,
-                      wake_kind: str | None = None) -> str:
+def assemble_note(conn: sqlite3.Connection, cfg: dict, now: datetime,
+                  decision: dict | None = None, fresh: bool = False,
+                  wake_kind: str | None = None) -> str:
     """Thin wrapper: gather() + render(). `fresh`/`wake_kind` gate the handoff
     (碎碎念) section — only a fresh window (rebirth/rotate) receives it."""
-    data = bulletin.gather(conn, cfg, now, decision=decision,
-                           fresh=fresh, wake_kind=wake_kind)
-    return bulletin.render(cfg, now, data)
+    data = note.gather(conn, cfg, now, decision=decision,
+                       fresh=fresh, wake_kind=wake_kind)
+    return note.render(cfg, now, data)
 
 
 def call_marrow_cortex(prompt: str, cwd: str, resume_sid: str | None, cfg: dict) -> dict:
@@ -166,17 +166,17 @@ def _schedule_wake(conn, cfg, decision, now, duties) -> dict:
     home = str(config.cortex_home(cfg))
     for duty in duties:
         name = duty.get("name") or "duty"
-        note = assemble_bulletin(conn, cfg, now, decision=decision,
-                                 fresh=False, wake_kind="schedule")
+        note_text = assemble_note(conn, cfg, now, decision=decision,
+                                  fresh=False, wake_kind="schedule")
         duty_prompt = _duty_prompt(duty)
         if duty.get("prompt_path") and duty_prompt is None:
             _audit_wake(conn, wake_id_of(now),
                         f"schedule duty prompt_path unreadable: {name}")
         if duty_prompt:
-            note = f"{note}\n\n{duty_prompt}"
+            note_text = f"{note_text}\n\n{duty_prompt}"
         try:
             sid = window.spawn_fresh(cfg)
-            window.inject_note(cfg, note, sid=sid)
+            window.inject_note(cfg, note_text, sid=sid)
             window.say(cfg)  # quiet attention request (notification), no focus steal
         except window.WindowError:
             _audit_wake(conn, wake_id_of(now), f"schedule window failed: {name}")
@@ -335,11 +335,11 @@ def run_wake(
         day_log.new_day(path, today)
     timer.mark("rebirth" if rebirth else "resume")
 
-    bulletin_text = assemble_bulletin(
+    note_text = assemble_note(
         conn, cfg, now, decision=decision,
         fresh=rebirth, wake_kind="rebirth" if rebirth else None)
     home = str(config.cortex_home(cfg))
-    timer.mark("bulletin")
+    timer.mark("note")
 
     # Interactive path (B3v): the resident iTerm window is the cortex body. Only
     # taken for the real wake (default caller) in window mode; explicit `caller`
@@ -349,13 +349,13 @@ def run_wake(
         # window is a fresh brain that must read the old brain's handoff note.
         # Either fresh-brain case -> respawn (SIGTERM claude + fresh self-arming
         # window), so the same path serves rotate, rebirth and a dead window.
-        window_text = bulletin_text
+        window_text = note_text
         respawn = rebirth
         if not rebirth and _window_rotated(cfg):
             respawn = True
-            window_text = assemble_bulletin(
+            window_text = assemble_note(
                 conn, cfg, now, decision=decision, fresh=True, wake_kind="rotate")
-            timer.mark("rotate_bulletin")
+            timer.mark("rotate_note")
         win = _window_wake(conn, cfg, window_text, now, respawn=respawn)
         if win is not None:
             state = replace(state, cortex_session_date=today)
@@ -369,7 +369,7 @@ def run_wake(
 
     timer.mark("spawn_marrow")
     try:
-        result = caller(bulletin_text, home, resume_sid, cfg)
+        result = caller(note_text, home, resume_sid, cfg)
     except WakeError as e:
         _force_fresh_next(conn, state, today)
         _audit_wake(conn, wake_id, f"wake_failed: {str(e)[:180]}")
@@ -412,7 +412,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         now = _now(cfg)
         if args.print_note:
-            text = assemble_bulletin(conn, cfg, now)
+            text = assemble_note(conn, cfg, now)
             print(text)
             print(f"\n[{len(text)} chars]", file=sys.stderr)
             return 0

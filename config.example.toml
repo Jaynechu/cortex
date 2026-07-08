@@ -185,14 +185,12 @@ tone_levels = ["neutral", "concerned", "worried", "anxious"]
 
 # Wakeup note knobs. Every line is deterministic now, so the old whole-note
 # max_chars cap is gone; per-source limits below keep each line bounded.
-[bulletin]
+# Persona/display strings + behaviour (identity stays in config).
+[note]
 replay_events = 6            # trailing user/assistant events in the replay section
 replay_event_chars = 300     # per-event truncation in the replay section
 daily_budget = 1000000       # daily wake-token (NET spend) budget the "today X/Y" line renders against; must match gates.daily_budget.tokens
 pending_window_min = 15      # surface a self-schedule entry only when due within this window
-
-# Wakeup note persona/display strings + behaviour (identity stays in config).
-[note]
 handoff_title = "阿屿の碎碎念"   # title of the handoff-note section
 replay_title = "最近对话回放"     # title of the conversation-replay section
 handoff_wake_kinds = ["rebirth", "rotate"]  # wake kinds that get the handoff (fresh window only)

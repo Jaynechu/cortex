@@ -117,7 +117,7 @@ def load_state(conn: sqlite3.Connection) -> PacemakerState:
 
 def store_window_tokens(conn: sqlite3.Connection, tokens: int | None) -> None:
     """Stash the live window-token count on the ct_pacemaker_state JSON so the
-    wakeup note's Budget line can read it (bulletin._window_tokens). Merged into
+    wakeup note's Budget line can read it (note._window_tokens). Merged into
     the raw JSON (not the dataclass) so it survives independently of tick saves."""
     row = conn.execute("SELECT state FROM ct_pacemaker_state WHERE id = 1").fetchone()
     try:
