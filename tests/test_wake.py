@@ -215,6 +215,114 @@ def test_token_cap_breach_forces_fresh_no_rearchive(marrow_conn, wcfg):
     assert not (Path(wcfg["paths"]["day_log_archive_dir"]) / "2026-07-03.md").exists()
 
 
+# --------------------------------------------------------------------------- #
+# Rotate (碎碎念 round-trip): a rotated/respawned resident window is a fresh
+# brain and must receive the previous brain's handoff note.
+# --------------------------------------------------------------------------- #
+
+@pytest.fixture
+def rot_cfg(wcfg, tmp_path):
+    """wcfg + handoff note config + a written handoff file, mode=window."""
+    cfg = dict(wcfg)
+    cfg["wake"] = {**wcfg["wake"], "mode": "window"}
+    cfg["paths"] = {**wcfg["paths"], "handoff_file": str(tmp_path / "handoff.md"),
+                    "wake_state_file": str(tmp_path / "wake_state.json")}
+    cfg["note"] = {"handoff_wake_kinds": ["rebirth", "rotate"],
+                   "handoff_title": "碎碎念"}
+    Path(cfg["paths"]["handoff_file"]).write_text("carry this to your next self")
+    return cfg
+
+
+def test_window_rotated_flag_path(monkeypatch, rot_cfg):
+    from cortex import wake_state, window, transcript
+    wake_state.set_session_id(rot_cfg, "sid-1")
+    wake_state.set_rotated(rot_cfg)
+    monkeypatch.setattr(window, "is_running", lambda: True)
+    monkeypatch.setattr(window, "_session_alive", lambda sid: True)
+    monkeypatch.setattr(transcript, "newest", lambda cfg: None)
+    assert wake._window_rotated(rot_cfg) is True
+    # flag consumed (read-and-clear): a second check without a new signal is False
+    assert wake._window_rotated(rot_cfg) is False
+
+
+def test_window_rotated_transcript_diff_path(monkeypatch, rot_cfg):
+    from cortex import wake_state, window, transcript
+    wake_state.set_session_id(rot_cfg, "sid-1")
+    wake_state.update(rot_cfg, transcript="/t/old.jsonl")
+    monkeypatch.setattr(window, "is_running", lambda: True)
+    monkeypatch.setattr(window, "_session_alive", lambda sid: True)
+    monkeypatch.setattr(transcript, "newest", lambda cfg: Path("/t/new.jsonl"))
+    assert wake._window_rotated(rot_cfg) is True
+
+
+def test_window_rotated_dead_window_is_fresh(monkeypatch, rot_cfg):
+    from cortex import wake_state, window
+    wake_state.set_session_id(rot_cfg, "sid-1")
+    monkeypatch.setattr(window, "is_running", lambda: True)
+    monkeypatch.setattr(window, "_session_alive", lambda sid: False)
+    assert wake._window_rotated(rot_cfg) is True
+
+
+def test_window_unrotated_resume_stays_non_fresh(monkeypatch, rot_cfg):
+    """Plain wake into a live, un-rotated window: same transcript, no flag ->
+    NOT fresh (no 碎碎念; replay continuity lives in the window's own context)."""
+    from cortex import wake_state, window, transcript
+    wake_state.set_session_id(rot_cfg, "sid-1")
+    wake_state.update(rot_cfg, transcript="/t/same.jsonl")
+    monkeypatch.setattr(window, "is_running", lambda: True)
+    monkeypatch.setattr(window, "_session_alive", lambda sid: True)
+    monkeypatch.setattr(transcript, "newest", lambda cfg: Path("/t/same.jsonl"))
+    assert wake._window_rotated(rot_cfg) is False
+
+
+def test_window_wake_rotate_injects_handoff(monkeypatch, marrow_conn, rot_cfg):
+    """Full window-branch: a rotated window (same local day) receives the 碎碎念."""
+    monkeypatch.setattr(wake, "_window_rotated", lambda cfg: True)
+    captured = {}
+    def fake_window_wake(conn, cfg, note_text, now):
+        captured["text"] = note_text
+        return {"mode": "window", "session_id": None, "text": None}
+    monkeypatch.setattr(wake, "_window_wake", fake_window_wake)
+    # same-day second wake (not rebirth): seed today's session date
+    wake.run_wake(marrow_conn, rot_cfg, DECISION, now=DAY1)  # first wake seeds state
+    captured.clear()
+    wake.run_wake(marrow_conn, rot_cfg, DECISION, now=DAY1 + timedelta(hours=1))
+    assert "碎碎念" in captured["text"]
+    assert "carry this to your next self" in captured["text"]
+
+
+def test_window_wake_rebirth_wins_over_rotate(monkeypatch, marrow_conn, rot_cfg):
+    """Rebirth (new local date) sets its own kind; rotate is not re-evaluated."""
+    called = {"rotated": False}
+    def spy_rotated(cfg):
+        called["rotated"] = True
+        return True
+    monkeypatch.setattr(wake, "_window_rotated", spy_rotated)
+    captured = {}
+    monkeypatch.setattr(wake, "_window_wake",
+                        lambda conn, cfg, t, now: captured.update(text=t) or
+                        {"mode": "window", "session_id": None, "text": None})
+    wake.run_wake(marrow_conn, rot_cfg, DECISION, now=DAY1)  # seed day1
+    captured.clear()
+    called["rotated"] = False
+    wake.run_wake(marrow_conn, rot_cfg, DECISION, now=DAY2)  # new date -> rebirth
+    assert called["rotated"] is False           # rotate short-circuited by rebirth
+    assert "碎碎念" in captured["text"]           # rebirth still delivers the handoff
+
+
+def test_window_wake_unrotated_no_handoff(monkeypatch, marrow_conn, rot_cfg):
+    """Un-rotated same-day wake: no 碎碎念 in the note."""
+    monkeypatch.setattr(wake, "_window_rotated", lambda cfg: False)
+    captured = {}
+    monkeypatch.setattr(wake, "_window_wake",
+                        lambda conn, cfg, t, now: captured.update(text=t) or
+                        {"mode": "window", "session_id": None, "text": None})
+    wake.run_wake(marrow_conn, rot_cfg, DECISION, now=DAY1)
+    captured.clear()
+    wake.run_wake(marrow_conn, rot_cfg, DECISION, now=DAY1 + timedelta(hours=1))
+    assert "碎碎念" not in captured["text"]
+
+
 def test_main_print_note_no_marrow_call(monkeypatch, marrow_conn, wcfg, capsys):
     monkeypatch.setattr(wake.config, "load", lambda: wcfg)
     monkeypatch.setattr(wake.db, "connect", lambda cfg: marrow_conn)

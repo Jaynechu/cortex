@@ -162,6 +162,27 @@ def wake_id_of(now: datetime) -> str:
     return f"{now.strftime('%Y%m%dT%H%M%S')}-{os.getpid()}"
 
 
+def _window_rotated(cfg) -> bool:
+    """Structural freshness check for the resident window: has its brain been
+    replaced since the last wake? A /clear (self- or proxy-typed) starts a NEW
+    interactive session -> a new transcript jsonl (verified empirically), so the
+    newest transcript differs from the one recorded at set_awake; a respawned or
+    first-ever window has no recorded hint. The rotate flag (set by lie_down when
+    it types /clear) is the belt-and-braces path for the crash/respawn case where
+    the transcript may not have rolled yet. Either signal -> rotated."""
+    from cortex import transcript, wake_state, window
+
+    if wake_state.take_rotated(cfg):
+        return True
+    sid = wake_state.get_session_id(cfg)
+    if not sid or not window.is_running() or not window._session_alive(sid):
+        return True  # window died / never existed -> respawn is a fresh brain
+    prev = wake_state.load(cfg).get("transcript")
+    cur = transcript.newest(cfg)
+    cur = str(cur) if cur else None
+    return cur != prev
+
+
 def _window_wake(conn, cfg, note_text, now) -> dict | None:
     """Interactive wake: ensure the resident iTerm window is alive, inject the
     note as one prompt, set the awake marker, and light a per-wake watchdog.
@@ -251,7 +272,14 @@ def run_wake(
     # taken for the real wake (default caller) in window mode; explicit `caller`
     # (tests / headless callers) always runs the marrow-subprocess path below.
     if cfg["wake"].get("mode", "window") == "window" and caller is call_marrow_cortex:
-        win = _window_wake(conn, cfg, bulletin_text, now)
+        # Rotate (碎碎念 round-trip): rebirth wins; otherwise a rotated/respawned
+        # window is a fresh brain that must read the old brain's handoff note.
+        window_text = bulletin_text
+        if not rebirth and _window_rotated(cfg):
+            window_text = assemble_bulletin(
+                conn, cfg, now, decision=decision, fresh=True, wake_kind="rotate")
+            timer.mark("rotate_bulletin")
+        win = _window_wake(conn, cfg, window_text, now)
         if win is not None:
             state = replace(state, cortex_session_date=today)
             integration.save_state(conn, state)

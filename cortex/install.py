@@ -31,6 +31,12 @@ _PLISTS: list[tuple[str, str]] = [
 ]
 
 
+def venv_python() -> Path:
+    """The repo venv interpreter — single source for the __VENV_PYTHON__ token
+    (plists here + slash-command copies in symlinks.ensure_commands)."""
+    return _VENV_PYTHON
+
+
 def _launchctl(*args: str) -> tuple[int, str]:
     r = subprocess.run(["launchctl", *args], capture_output=True, text=True)
     return r.returncode, (r.stdout + r.stderr).strip()

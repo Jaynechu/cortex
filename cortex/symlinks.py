@@ -37,15 +37,38 @@ def _ensure_symlink(source: Path, target: Path) -> None:
     target.symlink_to(source)
 
 
+def _ensure_templated_copy(source: Path, target: Path) -> None:
+    """Land a token-resolved COPY (not a symlink): the command body carries the
+    repo placeholder __VENV_PYTHON__ (no personal path in the OSS repo), resolved
+    to the real interpreter here. Refuses to clobber a real (non-managed) file;
+    rewrites the copy in place so template edits propagate on the next wake."""
+    from cortex.install import venv_python
+
+    body = source.read_text().replace("__VENV_PYTHON__", str(venv_python()))
+    if target.is_symlink():
+        target.unlink()  # migrate a legacy symlink to a real copy
+    elif target.exists() and "__VENV_PYTHON__" not in target.read_text() \
+            and str(venv_python()) not in target.read_text():
+        raise FileExistsError(f"{target} exists and is not a managed copy — refusing to clobber")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(body)
+
+
 def ensure_commands(cfg: dict) -> None:
-    """Symlink each deploy/commands/*.md into <cortex_home>/.claude/commands/.
+    """Land each deploy/commands/*.md into <cortex_home>/.claude/commands/.
     Project-scoped commands: only visible to a session with that cwd (the cortex
-    window), never to normal sessions. Refuses to clobber a real file."""
+    window), never to normal sessions. Templated bodies (__VENV_PYTHON__) land as
+    token-resolved copies so no personal path lives in the repo; the rest symlink.
+    Refuses to clobber a real file."""
     if not _COMMANDS_SRC.is_dir():
         return
     dest_dir = config.cortex_home(cfg) / ".claude" / "commands"
     for src in sorted(_COMMANDS_SRC.glob("*.md")):
-        _ensure_symlink(src, dest_dir / src.name)
+        dest = dest_dir / src.name
+        if "__VENV_PYTHON__" in src.read_text():
+            _ensure_templated_copy(src, dest)
+        else:
+            _ensure_symlink(src, dest)
 
 
 def ensure_all(cfg: dict) -> None:

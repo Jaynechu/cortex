@@ -41,6 +41,7 @@ Pure decision core — no I/O, no wall-clock; `now`/`rng` injected.
 ## 4. Wake runner (`wake.py`)
 
 run_wake: daily rebirth (session_date≠today) → archive day_log → new_day → persist date/None sid BEFORE call (retry-safe). symlinks.ensure_all every wake. assemble_bulletin → call_marrow_cortex (subprocess, inner timeout 600s config, outer=inner+30s). After: save sid+date → day_log.update.
+Handoff (碎碎念) round-trip: fresh window gets handoff.md. Rebirth is fresh (wins). Window path also detects rotate (`_window_rotated`): rotate flag (lie_down set_rotated on /clear, read-and-clear) OR newest transcript ≠ recorded set_awake hint (a /clear starts a new session jsonl — verified) OR window dead/never-spawned. wake_kind=rotate → 碎碎念; un-rotated resume stays non-fresh (continuity in window context). Gated by note.handoff_wake_kinds.
 CLI: --print-note | --force (bypass gates).
 Marrow side (`llm.py:call_cortex`): NO isolation (full persona/rules/MCP/agents), MARROW_CORTEX=1, bypassPermissions, --resume. Tier top (opus).
 
@@ -63,7 +64,7 @@ render sections: Now · Trigger · Last activity · Calendar "none" · Usage · 
 ## 7. Config, symlinks, install
 
 Config (`config.py`): TOML ~/.config/marrow/cortex.toml, deep-merge over _DEFAULTS.
-Symlinks (`symlinks.py`): day_log.md + wishlist.md → ~/Desktop/NY/db-pages. Creates wishlist if missing, refuses non-symlink clobber.
+Symlinks (`symlinks.py`): day_log.md + wishlist.md → ~/Desktop/NY/db-pages. Creates wishlist if missing, refuses non-symlink clobber. ensure_commands → <home>/.claude/commands: __VENV_PYTHON__ templates (say/lie-down) land as token-resolved copies (no personal path in repo, migrates legacy symlink); rest symlink.
 Install (`install.py`): 2 plists (com.cortex.collect-tick, com.cortex.pacemaker-tick), template tokens from config.
 Safety: pacemaker.dry_run=true default — flip at C5.
 

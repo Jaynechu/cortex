@@ -76,3 +76,18 @@ def clear_awake(cfg: dict) -> None:
     for k in _AWAKE_KEYS:
         d.pop(k, None)
     _save(cfg, d)
+
+
+def set_rotated(cfg: dict) -> None:
+    """Belt-and-braces rotate flag: lie_down sets it when it types /clear so the
+    next wake treats the window as fresh even before a new transcript exists."""
+    update(cfg, rotated=True)
+
+
+def take_rotated(cfg: dict) -> bool:
+    """Consume the rotate flag (read-and-clear). True = last lie_down rotated."""
+    d = load(cfg)
+    val = bool(d.pop("rotated", False))
+    if val:
+        _save(cfg, d)
+    return val

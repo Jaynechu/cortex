@@ -93,6 +93,7 @@ def lie_down(cfg: dict, force_slept: str | None = None) -> dict:
             try:
                 window.type_clear(cfg)
                 rotated = True
+                wake_state.set_rotated(cfg)  # next wake reads it -> fresh window
             except Exception:
                 pass
         wake_state.clear_awake(cfg)

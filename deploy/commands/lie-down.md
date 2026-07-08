@@ -6,4 +6,4 @@ If there is anything worth carrying to your next self, write the 碎碎念 (hand
 
 Then end the wake:
 
-!`/Users/Gabrielle/CC-Lab/cortex/.venv/bin/python -m cortex.lie_down`
+!`__VENV_PYTHON__ -m cortex.lie_down`
