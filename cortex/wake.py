@@ -217,17 +217,46 @@ def _window_rotated(cfg) -> bool:
     return cur != prev
 
 
-def _window_wake(conn, cfg, note_text, now) -> dict | None:
-    """Interactive wake: ensure the resident iTerm window is alive, inject the
-    note as one prompt, set the awake marker, and light a per-wake watchdog.
-    Returns a result dict on success, None if the window path failed (caller
-    then falls back to headless). The wake is NOT over here — lie_down (self or
-    watchdog proxy) ends it; that is why this returns immediately."""
+def _signal_landed(cfg, before: float | None, timeout_sec: float) -> bool:
+    """After appending a wake signal, poll the transcript mtime for up to
+    timeout_sec: a growing transcript = the ear fired and cortex is awake.
+    `before` is the mtime captured just before the append (None = no transcript
+    yet, any new activity counts)."""
+    from cortex import transcript
+
+    step = 3.0
+    waited = 0.0
+    while waited < timeout_sec:
+        time.sleep(min(step, timeout_sec - waited))
+        waited += step
+        after = transcript.mtime(cfg)
+        if after is not None and (before is None or after > before):
+            return True
+    return False
+
+
+def _window_wake(conn, cfg, note_text, now, respawn: bool = False) -> dict | None:
+    """Interactive wake via the signal-file ear: write the note file, then
+    append a WAKE line to the signal log the resident window's armed Monitor
+    tails — no typing. `respawn` (rotate/rebirth) or a dead/rotated window is
+    replaced by a fresh self-arming window first. After appending, verify the
+    wake landed (transcript mtime grows within ear_timeout_sec); if not, respawn
+    once and re-append. Sets the awake marker + lights the watchdog. Returns a
+    result dict, or None if the window path failed (caller -> headless). The
+    wake is NOT over here — lie_down (self or watchdog proxy) ends it."""
     from cortex import transcript, wake_state, watchdog, window
 
+    note_path = str(window.write_note(cfg, note_text))
+    timeout = float(cfg["wake"].get("ear_timeout_sec", 90))
     try:
-        window.ensure_window(cfg)
-        window.inject_note(cfg, note_text)
+        if respawn or not _window_alive(cfg):
+            window.respawn(cfg)
+        before = transcript.mtime(cfg)
+        window.append_wake_signal(cfg, "floor", note_path)
+        if not _signal_landed(cfg, before, timeout):
+            _audit_wake(conn, wake_id_of(now), "ear miss -> respawn + re-append")
+            window.respawn(cfg)
+            window.append_wake_signal(cfg, "floor", note_path)
     except window.WindowError:
         return None
     tpath = transcript.newest(cfg)
@@ -235,6 +264,16 @@ def _window_wake(conn, cfg, note_text, now) -> dict | None:
                          str(tpath) if tpath else None)
     watchdog.spawn(cfg)
     return {"mode": "window", "session_id": None, "text": None}
+
+
+def _window_alive(cfg) -> bool:
+    """The resident window exists, iTerm is up, and its `claude` is running."""
+    from cortex import wake_state, window
+
+    sid = wake_state.get_session_id(cfg)
+    if not sid or not window.is_running() or not window._session_alive(sid):
+        return False
+    return window.find_claude_pid(cfg) is not None
 
 
 def run_wake(
@@ -306,14 +345,18 @@ def run_wake(
     # taken for the real wake (default caller) in window mode; explicit `caller`
     # (tests / headless callers) always runs the marrow-subprocess path below.
     if cfg["wake"].get("mode", "window") == "window" and caller is call_marrow_cortex:
-        # Rotate (碎碎念 round-trip): rebirth wins; otherwise a rotated/respawned
+        # Rotate (碎碎念 round-trip): rebirth wins; otherwise a rotated/dead
         # window is a fresh brain that must read the old brain's handoff note.
+        # Either fresh-brain case -> respawn (SIGTERM claude + fresh self-arming
+        # window), so the same path serves rotate, rebirth and a dead window.
         window_text = bulletin_text
+        respawn = rebirth
         if not rebirth and _window_rotated(cfg):
+            respawn = True
             window_text = assemble_bulletin(
                 conn, cfg, now, decision=decision, fresh=True, wake_kind="rotate")
             timer.mark("rotate_bulletin")
-        win = _window_wake(conn, cfg, window_text, now)
+        win = _window_wake(conn, cfg, window_text, now, respawn=respawn)
         if win is not None:
             state = replace(state, cortex_session_date=today)
             integration.save_state(conn, state)

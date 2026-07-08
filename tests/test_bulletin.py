@@ -51,7 +51,8 @@ def test_render_full_note(cfg):
     text = bulletin.render(cfg, NOW, data)
     assert "Wake: 巡回" in text
     assert "Now: 14:30 Wed | Last wake: 12min ago" in text
-    assert "Budget: 5h 42% (reset 14:30) · 7d 15% · window 26k · today 123k/1M 12%" in text
+    # usage shown as REMAINING (100-used); window renamed to NET spend
+    assert "Budget: 5h 58% left (reset 14:30) · 7d 85% left · net 26k · today 123k/1M 12%" in text
     assert "Active (Mac): WeChat" in text
     assert "Cal: Current Grand round | Next Gym" in text
     assert "Rem: 剪脚指甲" in text
@@ -133,6 +134,23 @@ def test_render_budget_segments_optional(cfg):
     b = {"five_h_pct": None, "five_h_reset": None, "seven_d_pct": None,
          "window_tokens": None, "today_tokens": 50000, "daily_budget": 1_000_000}
     assert bulletin._render_budget(b) == "Budget: today 50k/1M 5%"
+
+
+def test_render_budget_usage_shown_as_remaining(cfg):
+    """five_h_pct/seven_d_pct are UTILIZATION (used); the note shows remaining
+    (100-used) with a 'left' label, so 0% used reads as 100% left."""
+    b = {"five_h_pct": 0.0, "five_h_reset": None, "seven_d_pct": 30.0,
+         "window_tokens": None, "today_tokens": 0, "daily_budget": 1_000_000}
+    line = bulletin._render_budget(b)
+    assert "5h 100% left" in line   # 0 used -> full
+    assert "7d 70% left" in line    # 30 used -> 70 left
+
+
+def test_remaining_clamps():
+    assert bulletin._remaining(0.0) == 100.0
+    assert bulletin._remaining(100.0) == 0.0
+    assert bulletin._remaining(150.0) == 0.0   # overshoot never negative
+    assert bulletin._remaining(-5.0) == 100.0
 
 
 def test_fmt_budget():

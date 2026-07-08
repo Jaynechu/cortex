@@ -42,7 +42,7 @@ def mtime(cfg: dict) -> float | None:
 def window_tokens(cfg: dict) -> int:
     """Context-window occupancy = the last assistant message's usage totals
     (input + cache read + cache creation + output). Grows with the conversation;
-    drives rotate (/clear) + fuse thresholds. 0 if no transcript/usage yet."""
+    drives rotate (respawn) + fuse thresholds. 0 if no transcript/usage yet."""
     p = newest(cfg)
     if not p:
         return 0
@@ -61,4 +61,31 @@ def window_tokens(cfg: dict) -> int:
         if u:
             total = (u.get("input_tokens", 0) + u.get("cache_read_input_tokens", 0)
                      + u.get("cache_creation_input_tokens", 0) + u.get("output_tokens", 0))
+    return total
+
+
+def net_tokens(cfg: dict) -> int:
+    """Net spend across the whole session = SUM over every assistant usage of
+    (cache_creation + output). Excludes cache_read (a cache HIT is ~free) and
+    plain input (prompt, largely cached). This is the real billed rewrite+gen
+    cost, summed per turn — not the last message's context occupancy. 0 if no
+    transcript/usage yet."""
+    p = newest(cfg)
+    if not p:
+        return 0
+    total = 0
+    try:
+        lines = p.read_text().splitlines()
+    except OSError:
+        return 0
+    for line in lines:
+        try:
+            o = json.loads(line)
+        except ValueError:
+            continue
+        msg = o.get("message")
+        u = msg.get("usage") if isinstance(msg, dict) else None
+        if u:
+            total += (u.get("cache_creation_input_tokens", 0)
+                      + u.get("output_tokens", 0))
     return total

@@ -1,7 +1,8 @@
 """cortex.lie_down — the command cortex runs to end a wake (the watchdog runs
 it as proxy). It: clears due self-schedule entries, redraws the floor, records
-this wake's token spend into ct_wake_log, kills the watchdog, types /clear when
-the context window is large, then clears the awake marker.
+this wake's token spend into ct_wake_log, kills the watchdog, flags a rotate
+(next wake respawns a fresh window) when the context window is large, then
+clears the awake marker.
 
 The interactive window returns control the moment a note is injected, so the
 wake is NOT over when pacemaker_tick exits — this command (or a proxy) is what
@@ -85,19 +86,17 @@ def lie_down(cfg: dict, force_slept: str | None = None) -> dict:
         cleared = _clear_due_self_schedule(cfg)
         integration.lie_down(conn, cfg)  # floor redraw from now (rewrites state)
         # Publish AFTER the floor redraw's save_state (which drops the key), so the
-        # next wake's Budget line sees this wake's final window-token count.
-        integration.store_window_tokens(conn, tokens)
+        # next wake's Budget line sees this wake's NET spend (cache-miss rewrite +
+        # output — not the full context occupancy `tokens` used for rotate/fuse).
+        integration.store_window_tokens(conn, transcript.net_tokens(cfg))
         _kill_watchdog(cfg)
         rotate = int(cfg["wake"].get("rotate", {}).get("threshold_tokens", 100_000))
         rotated = False
         if tokens and tokens >= rotate:
-            from cortex import window
-            try:
-                window.type_clear(cfg)
-                rotated = True
-                wake_state.set_rotated(cfg)  # next wake reads it -> fresh window
-            except Exception:
-                pass
+            # No typing: flag it, and the NEXT pacemaker wake respawns a fresh
+            # window (SIGTERM claude + fresh spawn) instead of resuming the big one.
+            wake_state.set_rotated(cfg)
+            rotated = True
         wake_state.clear_awake(cfg)
         return {"tokens": tokens, "cleared_due": cleared,
                 "force_slept": force_slept, "rotated": rotated}

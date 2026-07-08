@@ -293,8 +293,9 @@ def test_window_wake_rotate_injects_handoff(monkeypatch, marrow_conn, rot_cfg):
     """Full window-branch: a rotated window (same local day) receives the 碎碎念."""
     monkeypatch.setattr(wake, "_window_rotated", lambda cfg: True)
     captured = {}
-    def fake_window_wake(conn, cfg, note_text, now):
+    def fake_window_wake(conn, cfg, note_text, now, respawn=False):
         captured["text"] = note_text
+        captured["respawn"] = respawn
         return {"mode": "window", "session_id": None, "text": None}
     monkeypatch.setattr(wake, "_window_wake", fake_window_wake)
     # same-day second wake (not rebirth): seed today's session date
@@ -303,6 +304,7 @@ def test_window_wake_rotate_injects_handoff(monkeypatch, marrow_conn, rot_cfg):
     wake.run_wake(marrow_conn, rot_cfg, DECISION, now=DAY1 + timedelta(hours=1))
     assert "碎碎念" in captured["text"]
     assert "carry this to your next self" in captured["text"]
+    assert captured["respawn"] is True  # rotate -> fresh self-arming window
 
 
 def test_window_wake_rebirth_wins_over_rotate(monkeypatch, marrow_conn, rot_cfg):
@@ -314,7 +316,8 @@ def test_window_wake_rebirth_wins_over_rotate(monkeypatch, marrow_conn, rot_cfg)
     monkeypatch.setattr(wake, "_window_rotated", spy_rotated)
     captured = {}
     monkeypatch.setattr(wake, "_window_wake",
-                        lambda conn, cfg, t, now: captured.update(text=t) or
+                        lambda conn, cfg, t, now, respawn=False:
+                        captured.update(text=t, respawn=respawn) or
                         {"mode": "window", "session_id": None, "text": None})
     wake.run_wake(marrow_conn, rot_cfg, DECISION, now=DAY1)  # seed day1
     captured.clear()
@@ -322,6 +325,7 @@ def test_window_wake_rebirth_wins_over_rotate(monkeypatch, marrow_conn, rot_cfg)
     wake.run_wake(marrow_conn, rot_cfg, DECISION, now=DAY2)  # new date -> rebirth
     assert called["rotated"] is False           # rotate short-circuited by rebirth
     assert "碎碎念" in captured["text"]           # rebirth still delivers the handoff
+    assert captured["respawn"] is True          # rebirth respawns a fresh window too
 
 
 def test_window_wake_unrotated_no_handoff(monkeypatch, marrow_conn, rot_cfg):
@@ -329,12 +333,14 @@ def test_window_wake_unrotated_no_handoff(monkeypatch, marrow_conn, rot_cfg):
     monkeypatch.setattr(wake, "_window_rotated", lambda cfg: False)
     captured = {}
     monkeypatch.setattr(wake, "_window_wake",
-                        lambda conn, cfg, t, now: captured.update(text=t) or
+                        lambda conn, cfg, t, now, respawn=False:
+                        captured.update(text=t, respawn=respawn) or
                         {"mode": "window", "session_id": None, "text": None})
     wake.run_wake(marrow_conn, rot_cfg, DECISION, now=DAY1)
     captured.clear()
     wake.run_wake(marrow_conn, rot_cfg, DECISION, now=DAY1 + timedelta(hours=1))
     assert "碎碎念" not in captured["text"]
+    assert captured["respawn"] is False         # live un-rotated window: no respawn
 
 
 # --------------------------------------------------------------------------- #

@@ -1,9 +1,11 @@
 """iTerm2 window control for the resident interactive cortex session. All
 control via iTerm2 AppleScript (works while the screen is locked — no keyboard
-simulation). Primitives: ensure_window, inject_note, inject_line, send_esc,
-type_clear, say, hard_interrupt (process-level SIGINT fallback when esc alone
-may not land, e.g. no focus). The window body is one `claude` running in
-cortex_home with MARROW_CORTEX=1 set explicitly (identity marker).
+simulation). Primitives: ensure_window, respawn, append_wake_signal (the ear),
+inject_note (schedule windows only), send_esc, say, hard_interrupt (process-level
+SIGINT fallback when esc alone may not land, e.g. no focus). The resident window
+is woken by a signal-file ear (a Monitor tailing wake_signal.log), not by typing.
+The window body is one `claude` running in cortex_home with MARROW_CORTEX=1 set
+explicitly (identity marker).
 """
 from __future__ import annotations
 
@@ -11,6 +13,7 @@ import os
 import signal
 import subprocess
 import time
+from datetime import datetime, timezone
 
 from cortex import config, wake_state
 
@@ -101,11 +104,26 @@ def window_effort(cfg: dict) -> str:
     return cfg["wake"].get("window_effort", "")
 
 
+def arm_prompt(cfg: dict) -> str:
+    """The launch-time initial prompt that arms the Monitor ear, reads the
+    handoff, and lies down. Read from arm_prompt_path with {signal_log}
+    substituted for the live signal-log path. Missing/unreadable -> empty
+    string (window still launches, just unarmed)."""
+    path = config.arm_prompt_path(cfg)
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+    return text.replace("{signal_log}", str(config.wake_signal_log_path(cfg)))
+
+
 def launch_command(cfg: dict) -> str:
     # Identity + channel markers set explicitly (hooks derive channel from
     # MARROW_CHANNEL; MARROW_CORTEX=1 = cortex identity / kickout immunity).
     # --model/--effort pin tier + reasoning so the window never rides the
-    # system default. Reused by every cortex window spawn.
+    # system default. Reused by every cortex window spawn. A non-empty arm
+    # prompt is appended as claude's initial positional prompt so a freshly
+    # launched window arms its ear + reads handoff without any typing.
     home = str(config.cortex_home(cfg))
     cmd = cfg["wake"].get("launch_command", "claude")
     flags = f" --model {window_model(cfg)}"
@@ -116,7 +134,31 @@ def launch_command(cfg: dict) -> str:
     # otherwise blocks on the trust prompt). Mirrors marrow's headless call.
     if cfg["wake"].get("skip_permissions", True):
         flags += " --dangerously-skip-permissions"
-    return f"cd {home} && MARROW_CORTEX=1 MARROW_CHANNEL=ct {cmd}{flags}"
+    arm = arm_prompt(cfg)
+    arg = f" {_shq(arm)}" if arm else ""
+    return f"cd {home} && MARROW_CORTEX=1 MARROW_CHANNEL=ct {cmd}{flags}{arg}"
+
+
+def _shq(text: str) -> str:
+    """Single-quote a shell argument (the arm prompt) for the launch command."""
+    return "'" + text.replace("'", "'\\''") + "'"
+
+
+def append_wake_signal(cfg: dict, reason: str, note_path: str | None = None) -> None:
+    """Append one wake-signal line the armed Monitor ear picks up. Format:
+    `<KIND> reason=<reason> note=<path> ts=<iso>`. KIND is WAKE (a wake) unless
+    reason starts with 'nudge' (watchdog wrap-up -> NUDGE). Best-effort: a write
+    failure never crashes the pacemaker."""
+    kind = "NUDGE" if reason.startswith("nudge") else "WAKE"
+    ts = datetime.now(timezone.utc).isoformat()
+    line = f"{kind} reason={reason} note={note_path or ''} ts={ts}\n"
+    p = config.wake_signal_log_path(cfg)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with p.open("a", encoding="utf-8") as f:
+            f.write(line)
+    except OSError:
+        pass
 
 
 _launch_command = launch_command  # back-compat alias
@@ -179,6 +221,35 @@ def spawn_fresh(cfg: dict) -> str:
     no roaming context, no 碎碎念). NOT the resident session: its sid is never
     persisted, so it can't be resumed and cortex ends it itself when done."""
     sid = _spawn(cfg)
+    _wait_ready(sid, cfg)
+    return sid
+
+
+def _close_session(sid: str) -> None:
+    """Close a specific iTerm session (the old resident window's tab)."""
+    try:
+        _osa(_session_stmt(sid, "tell s to close"))
+    except WindowError:
+        pass
+
+
+def respawn(cfg: dict) -> str:
+    """Replace the resident window with a fresh brain: SIGTERM its `claude`
+    process (never SIGKILL), close the old iTerm session, then spawn a new
+    window (which self-arms via the launch-time arm prompt). Persists and
+    returns the new resident sid. Reused for rotate, rebirth and the ear
+    recovery path — one fresh-brain path, no /clear typing."""
+    pid = find_claude_pid(cfg)
+    if pid is not None:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+    old = wake_state.get_session_id(cfg)
+    if old:
+        _close_session(old)
+    sid = _spawn(cfg)
+    wake_state.set_session_id(cfg, sid)
     _wait_ready(sid, cfg)
     return sid
 
@@ -262,25 +333,27 @@ def _submit_prompt(sid: str, text: str) -> None:
     _enter(sid)
 
 
-def inject_line(cfg: dict, text: str) -> None:
-    """Deliver one single-line prompt (submitted as one message)."""
-    prev = _frontmost_bid()
-    sid = ensure_window(cfg)
-    _submit_prompt(sid, text)
-    _guard_focus(prev)
+def write_note(cfg: dict, text: str):
+    """Persist the wakeup note to its file and return the path. The ear-based
+    wake references this path in the signal line (no typing); schedule windows
+    still type a Read line via inject_note."""
+    note_path = wake_state.wakeup_note_path(cfg)
+    note_path.parent.mkdir(parents=True, exist_ok=True)
+    note_path.write_text(text)
+    return note_path
 
 
 def inject_note(cfg: dict, text: str, sid: str | None = None) -> None:
     """Deliver the multi-line wakeup note as ONE prompt: write it to a file,
     then inject a single line telling cortex to read that file. `write text`
     submits each newline separately, so file transit is the reliable path.
-    `sid` targets a specific (e.g. schedule) window; None = the resident one."""
+    `sid` targets a specific (e.g. schedule) window; None = the resident one.
+    Used only by schedule (fresh duty) windows now — the resident window is
+    woken by the signal-file ear, not by typing."""
     prev = _frontmost_bid()
     if sid is None:
         sid = ensure_window(cfg)
-    note_path = wake_state.wakeup_note_path(cfg)
-    note_path.parent.mkdir(parents=True, exist_ok=True)
-    note_path.write_text(text)
+    note_path = write_note(cfg, text)
     line = f"Read {note_path} — this is your wakeup note; act on it"
     _submit_prompt(sid, line)
     _guard_focus(prev)
@@ -383,34 +456,27 @@ def hard_interrupt(cfg: dict) -> int | None:
     return pid
 
 
-def type_clear(cfg: dict) -> None:
-    """Queue a /clear into the window (applies after the current turn ends)."""
-    sid = wake_state.get_session_id(cfg)
-    if sid:
-        prev = _frontmost_bid()
-        _submit_prompt(sid, "/clear")
-        _guard_focus(prev)
-
-
 def say(cfg: dict, note: str | None = None) -> None:
-    """开口 primitive: a quiet, non-focus-stealing attention signal — a macOS
-    notification (user sees it and comes to the cortex window). The words
-    themselves are just the normal in-window reply. `note` overrides the
-    notification body for this call. Bringing the window to the front is opt-in
-    only (wake.say_bring_to_front, default off) and is the sole place the cortex
-    window may take focus."""
-    wcfg = cfg["wake"]
-    if wcfg.get("say_notify", True):
-        title = _esc(wcfg.get("say_title", "cortex"))
-        body = _esc(note or wcfg.get("say_body", "wants your attention"))
-        sound = wcfg.get("front_sound", "")
-        snd = f' sound name "{_esc(sound)}"' if sound else ""
-        try:
-            _osa(f'display notification "{body}" with title "{title}"{snd}')
-        except WindowError:
-            pass
-    if wcfg.get("say_bring_to_front", False):
-        _bring_to_front(wake_state.get_session_id(cfg))
+    """开口 primitive: the attention signal. Fronts the resident cortex iTerm
+    window and plays a sound (the words themselves are the normal in-window
+    reply). This is the SOLE place cortex is allowed to take keyboard focus —
+    every other path guards focus. `note` is accepted for CLI/API symmetry but
+    the words live in the window; only the sound + front happen here."""
+    _play_sound(cfg.get("wake", {}).get("say_sound", ""))
+    _bring_to_front(wake_state.get_session_id(cfg))
+
+
+def _play_sound(name: str) -> None:
+    """Play a named macOS system sound (afplay on the .aiff under System/Library
+    Sounds); empty name -> silent. Best-effort, never raises."""
+    if not name:
+        return
+    path = f"/System/Library/Sounds/{name}.aiff"
+    try:
+        subprocess.Popen(["afplay", path],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        pass
 
 
 def _bring_to_front(sid: str | None) -> None:

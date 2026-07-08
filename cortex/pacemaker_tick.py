@@ -35,8 +35,9 @@ def _handle_awake(conn, cfg: dict, st: dict) -> str:
 
 
 def _rotate_fallback(conn, cfg: dict) -> None:
-    """Asleep + last known window tokens over the rotate line -> type /clear once
-    (belt-and-suspenders behind lie_down's own /clear). Time-cooldown guarded."""
+    """Asleep + last known window tokens over the rotate line -> flag a rotate so
+    the NEXT wake respawns a fresh window (belt-and-suspenders behind lie_down's
+    own flag, e.g. if lie_down never ran). Time-cooldown guarded, no typing."""
     if cfg["wake"].get("mode", "window") != "window":
         return
     rotate = int(cfg["wake"].get("rotate", {}).get("threshold_tokens", 100_000))
@@ -47,12 +48,8 @@ def _rotate_fallback(conn, cfg: dict) -> None:
     st = wake_state.load(cfg)
     if time.time() - float(st.get("rotated_at", 0)) < cooldown:
         return
-    from cortex import window
-    try:
-        window.type_clear(cfg)
-        wake_state.update(cfg, rotated_at=time.time())
-    except Exception:
-        pass
+    wake_state.set_rotated(cfg)
+    wake_state.update(cfg, rotated_at=time.time())
 
 
 def main() -> int:

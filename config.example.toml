@@ -64,16 +64,19 @@ window_model = "opus"          # explicit --model for every cortex window; never
 window_effort = ""             # --effort (low|medium|high|xhigh|max); "" = omit flag
 skip_permissions = true        # add --dangerously-skip-permissions so a fresh dir's
                                # trust dialog never blocks the injected note
-wrap_line = "写碎碎念收尾躺下"   # watchdog self-wrap-up nudge (judgement a)
+wrap_line = "写碎碎念收尾躺下"   # watchdog self-wrap-up nudge (judgement a), sent as a NUDGE ear line
 ready_marker = "accept edits"  # TUI footer text signalling claude is ready for input
 ready_timeout_sec = 30         # max wait for readiness after a fresh spawn
-# say() = quiet, non-focus-stealing attention signal (macOS notification). The
-# window is NEVER brought to front unless say_bring_to_front is on.
-say_notify = true
-say_title = "cortex"
-say_body = "wants your attention"
-front_sound = "Glass"          # notification sound name; "" = silent
-say_bring_to_front = false     # opt-in: the only path that fronts the cortex window
+# The signal-file ear. The resident window arms a persistent Monitor
+# (`tail -n 0 -f <signal_log>`) at launch; the pacemaker appends WAKE/NUDGE
+# lines to it to wake the window (no keyboard typing). ear_timeout_sec = how
+# long a wake is given to land (transcript grows) before respawn + re-append.
+signal_log = ""                # Default: <cortex_home>/wake_signal.log
+arm_prompt_path = ""           # launch-time arm prompt. Default: <cortex_home>/prompts/arm.md
+ear_timeout_sec = 90           # recovery deadline for a wake to land before respawn
+# say() = the ONLY place cortex takes focus: it fronts the resident window and
+# plays a system sound (name of a /System/Library/Sounds/*.aiff; "" = silent).
+say_sound = "Glass"
 
 # Per-wake watchdog thresholds (spawned at injection, killed at lie_down).
 [wake.watchdog]
@@ -87,8 +90,9 @@ fuse_tokens = 150000           # (c) window tokens >= this -> esc + proxy lie_do
 hard_interrupt_enabled = true
 hard_interrupt_grace_sec = 30
 
-# Context-window rotation: lie_down (and the tick fallback) type /clear when the
-# window grows past this. Cooldown guards the tick fallback from repeat-clearing.
+# Context-window rotation: lie_down (and the tick fallback) flag a rotate when the
+# window grows past this, so the NEXT wake respawns a fresh window (SIGTERM claude
+# + fresh spawn — no /clear typing). Cooldown guards the tick fallback from repeats.
 [wake.rotate]
 threshold_tokens = 100000
 cooldown_sec = 600

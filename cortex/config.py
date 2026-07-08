@@ -46,7 +46,17 @@ _DEFAULTS: dict[str, Any] = {
     },
     # Per-wake safety valve: cap tokens spent in one wake; breach or the marrow
     # wall-clock timeout (marrow.call_timeout_s) rebirths a fresh session.
-    "wake": {"token_cap": 150_000},
+    # signal_log = the ear's tail-followed wake signal file (WAKE/NUDGE lines);
+    # arm_prompt_path = the launch-time prompt that arms the Monitor ear;
+    # ear_timeout_sec = how long the pacemaker waits for a wake to land before
+    # respawning; say_sound = the sound say() plays when it fronts the window.
+    "wake": {
+        "token_cap": 150_000,
+        "signal_log": "",
+        "arm_prompt_path": "",
+        "ear_timeout_sec": 90,
+        "say_sound": "Glass",
+    },
     # marrow repo invocation for the wake call (separate venv/deps, C3).
     "marrow": {
         "repo_dir": str(DEFAULT_MARROW_REPO),
@@ -254,3 +264,17 @@ def wake_timing_log_path(cfg: dict) -> Path:
     Default: ~/.config/marrow/logs/wake_timing.log."""
     raw = cfg["paths"].get("wake_timing_log") or ""
     return Path(raw).expanduser() if raw else DEFAULT_WAKE_TIMING_LOG
+
+
+def wake_signal_log_path(cfg: dict) -> Path:
+    """The ear's wake-signal file: the persistent Monitor `tail -f`s it, the
+    pacemaker appends WAKE/NUDGE lines to it. Default: <cortex_home>/wake_signal.log."""
+    raw = cfg["wake"].get("signal_log") or ""
+    return Path(raw).expanduser() if raw else cortex_home(cfg) / "wake_signal.log"
+
+
+def arm_prompt_path(cfg: dict) -> Path:
+    """Launch-time prompt that arms the Monitor ear + reads handoff + lies down.
+    Default: <cortex_home>/prompts/arm.md."""
+    raw = cfg["wake"].get("arm_prompt_path") or ""
+    return Path(raw).expanduser() if raw else cortex_home(cfg) / "prompts" / "arm.md"

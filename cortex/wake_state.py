@@ -79,13 +79,15 @@ def clear_awake(cfg: dict) -> None:
 
 
 def set_rotated(cfg: dict) -> None:
-    """Belt-and-braces rotate flag: lie_down sets it when it types /clear so the
-    next wake treats the window as fresh even before a new transcript exists."""
+    """Rotate flag: lie_down sets it when the window grew past the rotate line so
+    the NEXT pacemaker wake respawns a fresh window (SIGTERM claude + fresh spawn)
+    instead of resuming the oversized one."""
     update(cfg, rotated=True)
 
 
 def take_rotated(cfg: dict) -> bool:
-    """Consume the rotate flag (read-and-clear). True = last lie_down rotated."""
+    """Consume the rotate flag (read-and-clear). True = last lie_down asked the
+    next wake to respawn the window fresh."""
     d = load(cfg)
     val = bool(d.pop("rotated", False))
     if val:

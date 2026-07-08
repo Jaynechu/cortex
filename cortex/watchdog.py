@@ -95,10 +95,11 @@ def run(cfg: dict) -> int:
         tokens = transcript.window_tokens(cfg)
         run_min = _elapsed_min(st.get("awake_since"))
 
-        # Publish the live token count for the next wake's Budget line.
+        # Publish the live NET spend (cache-miss rewrite + output) for the next
+        # wake's Budget line; `tokens` (full occupancy) still drives fuse below.
         conn = db.connect(cfg)
         try:
-            integration.store_window_tokens(conn, tokens)
+            integration.store_window_tokens(conn, transcript.net_tokens(cfg))
         finally:
             conn.close()
 
@@ -115,7 +116,7 @@ def run(cfg: dict) -> int:
             note = _verify_esc_or_hard_interrupt(cfg, grace, "overrun")
             if note:
                 print(f"{db.utcnow_iso()} {note}", flush=True)  # into watchdog.log
-            window.inject_line(cfg, wrap)
+            window.append_wake_signal(cfg, f"nudge {wrap}")  # NUDGE via the ear
             wrap_sent = True  # give the self-wrap-up one chance, then let (b)/(c) act
 
 

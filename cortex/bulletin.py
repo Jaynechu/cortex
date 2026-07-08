@@ -150,8 +150,9 @@ def _rate_limit_kv(conn: sqlite3.Connection) -> dict:
 
 
 def _window_tokens(conn: sqlite3.Connection) -> int | None:
-    """Optional hint the window agent may stash in ct_pacemaker_state JSON.
-    Absent key -> None (segment omitted)."""
+    """NET spend hint (cache-miss rewrite + output) published by lie_down /
+    watchdog into ct_pacemaker_state JSON under 'window_tokens'. Absent -> None
+    (segment omitted). Rendered as the Budget 'net Xk' segment."""
     try:
         row = conn.execute(
             "SELECT state FROM ct_pacemaker_state WHERE id = 1"
@@ -455,23 +456,31 @@ def _render_budget(budget: dict | None) -> str | None:
     if not budget:
         return None
     parts = []
+    # five_h_pct / seven_d_pct are UTILIZATION (fraction USED); the quota-health
+    # signal is what's LEFT, so display remaining = 100 - used (0% used -> 100%
+    # left). Clamped to [0,100] so a slight overshoot never prints a negative.
     five = budget.get("five_h_pct")
     if five is not None:
-        seg = f"5h {five:.0f}%"
+        seg = f"5h {_remaining(five):.0f}% left"
         if budget.get("five_h_reset"):
             seg += f" (reset {budget['five_h_reset']})"
         parts.append(seg)
     seven = budget.get("seven_d_pct")
     if seven is not None:
-        parts.append(f"7d {seven:.0f}%")
+        parts.append(f"7d {_remaining(seven):.0f}% left")
     window = budget.get("window_tokens")
     if window is not None:
-        parts.append(f"window {window // 1000}k")
+        parts.append(f"net {window // 1000}k")
     daily = int(budget.get("daily_budget", 1_000_000))
     today = int(budget.get("today_tokens", 0))
     pct = (today / daily * 100) if daily else 0
     parts.append(f"today {today // 1000}k/{_fmt_budget(daily)} {pct:.0f}%")
     return "Budget: " + " · ".join(parts) if parts else None
+
+
+def _remaining(used_pct: float) -> float:
+    """Utilization (used) -> remaining, clamped to [0, 100]."""
+    return max(0.0, min(100.0, 100.0 - used_pct))
 
 
 def _fmt_budget(n: int) -> str:
