@@ -4,7 +4,11 @@ the awake marker, applying one-dog-three-judgements (plan 07-08):
   (a) running past run_max_min & still active -> esc + wrap-up nudge (self-wrap);
   (b) silent past silent_max_min without lie_down -> proxy lie_down (timeout);
   (c) window tokens >= fuse -> esc + proxy lie_down (fuse).
-Three-layer trace: esc/inject -> ct_wake_log.force_slept -> next note's Last wake.
+On (a) and (c), esc is followed by a grace window (hard_interrupt_grace_sec):
+if the transcript is still growing (esc didn't land, e.g. no focus), SIGINT the
+resident claude process — a guaranteed esc-equivalent, at most once per trigger.
+Three-layer trace: esc/inject/SIGINT -> ct_wake_log.force_slept -> next note's
+Last wake (watchdog.log carries the pid + skip/ambiguous detail).
 """
 from __future__ import annotations
 
@@ -42,6 +46,32 @@ def _elapsed_min(iso: str | None) -> float:
     return (datetime.now(timezone.utc) - t).total_seconds() / 60.0
 
 
+def _verify_esc_or_hard_interrupt(cfg: dict, grace_sec: float, trigger: str) -> str | None:
+    """After an esc, poll the transcript mtime for up to grace_sec. If it's
+    still growing (mid-generation, esc didn't land), SIGINT the resident
+    claude process as a guaranteed fallback. Returns the pid string logged
+    into the wake explanation, or None if esc alone was enough / disabled /
+    discovery was ambiguous."""
+    wcfg = cfg["wake"].get("watchdog", {})
+    if not wcfg.get("hard_interrupt_enabled", True):
+        return None
+    before = transcript.mtime(cfg)
+    if before is None:
+        return None
+    step = 2.0
+    waited = 0.0
+    while waited < grace_sec:
+        time.sleep(min(step, grace_sec - waited))
+        waited += step
+        after = transcript.mtime(cfg)
+        if after is None or after <= before:
+            return None  # stopped growing -> esc landed, no hard interrupt needed
+    pid = window.hard_interrupt(cfg)
+    if pid is None:
+        return f"hard-interrupt-skip:{trigger} (pid discovery ambiguous)"
+    return f"hard-interrupt:{trigger} pid={pid}"
+
+
 def run(cfg: dict) -> int:
     from cortex import lie_down as lie_down_mod
 
@@ -50,6 +80,7 @@ def run(cfg: dict) -> int:
     run_max = float(wcfg.get("run_max_min", 10))
     silent_max = float(wcfg.get("silent_max_min", 5))
     fuse = int(wcfg.get("fuse_tokens", 150_000))
+    grace = float(wcfg.get("hard_interrupt_grace_sec", 30))
     wrap = cfg["wake"].get("wrap_line", _WRAP_LINE)
 
     wrap_sent = False
@@ -73,13 +104,17 @@ def run(cfg: dict) -> int:
 
         if fuse and tokens >= fuse:
             window.send_esc(cfg)
-            lie_down_mod.lie_down(cfg, force_slept="fuse")
+            note = _verify_esc_or_hard_interrupt(cfg, grace, "fuse")
+            lie_down_mod.lie_down(cfg, force_slept="fuse" if not note else f"fuse {note}")
             return 0
         if silent_min >= silent_max:
             lie_down_mod.lie_down(cfg, force_slept="timeout")
             return 0
         if run_min >= run_max and not wrap_sent:
             window.send_esc(cfg)
+            note = _verify_esc_or_hard_interrupt(cfg, grace, "overrun")
+            if note:
+                print(f"{db.utcnow_iso()} {note}", flush=True)  # into watchdog.log
             window.inject_line(cfg, wrap)
             wrap_sent = True  # give the self-wrap-up one chance, then let (b)/(c) act
 

@@ -1,11 +1,14 @@
 """iTerm2 window control for the resident interactive cortex session. All
 control via iTerm2 AppleScript (works while the screen is locked — no keyboard
 simulation). Primitives: ensure_window, inject_note, inject_line, send_esc,
-type_clear, say. The window body is one `claude` running in cortex_home with
-MARROW_CORTEX=1 set explicitly (identity marker).
+type_clear, say, hard_interrupt (process-level SIGINT fallback when esc alone
+may not land, e.g. no focus). The window body is one `claude` running in
+cortex_home with MARROW_CORTEX=1 set explicitly (identity marker).
 """
 from __future__ import annotations
 
+import os
+import signal
 import subprocess
 import time
 
@@ -271,6 +274,94 @@ def send_esc(cfg: dict) -> None:
         prev = _frontmost_bid()
         _osa(_session_stmt(sid, "tell s to write text (character id 27) newline no"))
         _guard_focus(prev)
+
+
+def _session_tty(sid: str) -> str | None:
+    """tty device (e.g. /dev/ttys003) of the resident session, via iTerm2."""
+    try:
+        out = _osa(_session_stmt(sid, "return (tty of s)"))
+    except WindowError:
+        return None
+    return out if out.startswith("/dev/") else None
+
+
+def _ps_tty_claude_pids(ttyname: str) -> list[int]:
+    """pid(s) whose exact command is `claude` on the given tty (name without
+    the /dev/ prefix, e.g. ttys003)."""
+    try:
+        p = subprocess.run(["ps", "-t", ttyname, "-o", "pid=,comm="],
+                           capture_output=True, text=True)
+    except OSError:
+        return []
+    if p.returncode != 0:
+        return []
+    pids = []
+    for line in p.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[-1] == "claude":
+            try:
+                pids.append(int(parts[0]))
+            except ValueError:
+                continue
+    return pids
+
+
+def _pgrep_claude_pids() -> list[int]:
+    try:
+        p = subprocess.run(["pgrep", "-x", "claude"], capture_output=True, text=True)
+    except OSError:
+        return []
+    if p.returncode not in (0, 1):  # 1 = no matches, still a clean run
+        return []
+    return [int(x) for x in p.stdout.split() if x.isdigit()]
+
+
+def _pid_cwd(pid: int) -> str | None:
+    try:
+        p = subprocess.run(["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
+                           capture_output=True, text=True)
+    except OSError:
+        return None
+    if p.returncode != 0:
+        return None
+    for line in p.stdout.splitlines():
+        if line.startswith("n"):
+            return line[1:]
+    return None
+
+
+def find_claude_pid(cfg: dict) -> int | None:
+    """Discover the pid of the resident cortex window's `claude` process.
+    (a) iTerm session tty -> ps -t <tty> for a `claude` command on that tty.
+    (b) fallback: pgrep -x claude, keep the ones whose cwd == cortex_home.
+    Ambiguous (0 or >1 candidates) or undiscoverable -> None (never guess)."""
+    sid = wake_state.get_session_id(cfg)
+    if sid:
+        tty = _session_tty(sid)
+        if tty:
+            pids = _ps_tty_claude_pids(tty.removeprefix("/dev/"))
+            if len(pids) == 1:
+                return pids[0]
+
+    home = str(config.cortex_home(cfg))
+    candidates = [pid for pid in _pgrep_claude_pids() if _pid_cwd(pid) == home]
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
+
+
+def hard_interrupt(cfg: dict) -> int | None:
+    """Guaranteed esc-equivalent: SIGINT the resident window's claude process.
+    Never SIGKILL. Returns the signaled pid, or None if discovery was
+    ambiguous/failed (skip rather than signal an unverified pid)."""
+    pid = find_claude_pid(cfg)
+    if pid is None:
+        return None
+    try:
+        os.kill(pid, signal.SIGINT)
+    except (ProcessLookupError, PermissionError):
+        return None
+    return pid
 
 
 def type_clear(cfg: dict) -> None:

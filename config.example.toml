@@ -81,6 +81,11 @@ poll_sec = 60
 run_max_min = 10               # (a) running this long & still active -> esc + wrap_line
 silent_max_min = 5             # (b) silent this long w/o lie_down -> proxy lie_down (timeout)
 fuse_tokens = 150000           # (c) window tokens >= this -> esc + proxy lie_down (fuse)
+# Process-level hard interrupt (SIGINT), a guaranteed esc-equivalent for when the
+# osascript esc may not land (no window focus). Fires after esc on the fuse and
+# overrun paths, only if the transcript is still growing past the grace window.
+hard_interrupt_enabled = true
+hard_interrupt_grace_sec = 30
 
 # Context-window rotation: lie_down (and the tick fallback) type /clear when the
 # window grows past this. Cooldown guards the tick fallback from repeat-clearing.
