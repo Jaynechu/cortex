@@ -1,32 +1,87 @@
 """Pacemaker tick entry point (launchd, floor+jitter cadence). Log-only in
-dry-run: records the wake decision, never sends. dry_run=false + wake=1 ->
-calls the real cortex session (C3 wake runner)."""
+dry-run. dry_run=false + wake=1 -> real cortex wake (C3 wake runner).
+
+Interactive-window reality (B3v): a wake is NOT over when this tick exits (the
+tick returns the moment the note is injected). The wake-state marker + lie_down
+command replace the dead process-mutex assumption:
+  - awake marker set  -> skip the tick (no double-fire); stale marker -> reap;
+  - window wake        -> watchdog/self owns lie_down (no floor redraw here);
+  - headless / dry-run -> floor redraws here as before.
+"""
 from __future__ import annotations
 
 import sys
 import time
 
-from cortex import config, db
+from cortex import config, db, transcript, wake_state
 from cortex.pacemaker import integration
 from cortex.wake import run_wake
+
+
+def _handle_awake(conn, cfg: dict, st: dict) -> str:
+    """A wake is in progress. Reap it if the transcript has been idle past the
+    stale threshold (watchdog presumed dead -> never leave the marker wedged);
+    otherwise skip this tick so we never double-fire."""
+    stale_min = float(cfg["wake"].get("stale", {}).get("threshold_min", 15))
+    mt = transcript.mtime(cfg)
+    idle = (time.time() - mt) / 60.0 if mt else 1e9
+    if idle >= stale_min:
+        from cortex import lie_down as lie_down_mod
+        r = lie_down_mod.lie_down(cfg, force_slept="stale")
+        sys.stderr.write(
+            f"[cortex] STALE WAKE reaped: idle={idle:.1f}min tokens={r['tokens']}\n")
+        return f"stale wake reaped (idle {idle:.0f}min) -> proxy lie_down"
+    return f"wake in progress (idle {idle:.0f}min) -> tick skipped"
+
+
+def _rotate_fallback(conn, cfg: dict) -> None:
+    """Asleep + last known window tokens over the rotate line -> type /clear once
+    (belt-and-suspenders behind lie_down's own /clear). Time-cooldown guarded."""
+    if cfg["wake"].get("mode", "window") != "window":
+        return
+    rotate = int(cfg["wake"].get("rotate", {}).get("threshold_tokens", 100_000))
+    tokens = transcript.window_tokens(cfg)
+    if tokens < rotate:
+        return
+    cooldown = int(cfg["wake"].get("rotate", {}).get("cooldown_sec", 600))
+    st = wake_state.load(cfg)
+    if time.time() - float(st.get("rotated_at", 0)) < cooldown:
+        return
+    from cortex import window
+    try:
+        window.type_clear(cfg)
+        wake_state.update(cfg, rotated_at=time.time())
+    except Exception:
+        pass
 
 
 def main() -> int:
     cfg = config.load()
     conn = db.connect(cfg)
     try:
+        st = wake_state.load(cfg)
+        if st.get("awake"):
+            msg = _handle_awake(conn, cfg, st)
+            print(f"{db.utcnow_iso()} {msg}", flush=True)
+            return 0
+
         t_tick = time.monotonic()
         decision = integration.run_tick(conn, cfg)
         t_gate = time.monotonic()
         dry_run = bool(cfg["pacemaker"].get("dry_run", True))
+
         if decision["wake"]:
-            try:
-                if not dry_run:
-                    run_wake(conn, cfg, decision, tick_started=t_tick, gate_done=t_gate)
-            finally:
-                # Lie down even on wake failure — the floor clock restarts
-                # here (C-wm) so a crashed wake can't wedge the heartbeat.
-                integration.lie_down(conn, cfg)
+            if dry_run:
+                integration.lie_down(conn, cfg)  # log-only: still advance floor
+            else:
+                result = run_wake(conn, cfg, decision,
+                                  tick_started=t_tick, gate_done=t_gate)
+                if result.get("mode") != "window":
+                    # headless path finished -> wake over, redraw floor now.
+                    integration.lie_down(conn, cfg)
+                # window path: marker set, watchdog owns lie_down.
+        elif not dry_run:
+            _rotate_fallback(conn, cfg)
     finally:
         conn.close()
     print(f"{db.utcnow_iso()} {decision['explanation']}", flush=True)

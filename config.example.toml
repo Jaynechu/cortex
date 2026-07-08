@@ -30,6 +30,13 @@ ny_db_pages = ""
 # Wake-latency probe log (cortex stage marks + marrow stream-event marks).
 # Default: ~/.config/marrow/logs/wake_timing.log
 wake_timing_log = ""
+# Interactive-window (B3v) runtime files. Empty = defaults under cortex_home.
+wake_state_file = ""     # awake marker + resident iTerm session id. Default: <home>/wake_state.json
+wakeup_note_file = ""    # note text the window is told to Read. Default: <home>/wakeup_note.md
+watchdog_pidfile = ""    # per-wake watchdog pid. Default: <home>/watchdog.pid
+# Claude Code transcript dir for the window. Empty = derived from cortex_home
+# (munge non-alphanumeric -> '-'). Default: ~/.claude/projects/<munged cortex_home>
+transcript_dir = ""
 
 # marrow repo invocation for the wake call (separate venv/deps from cortex).
 [marrow]
@@ -45,6 +52,44 @@ call_timeout_s = 600
 # fresh one on the next wake. 0 disables the token cap.
 [wake]
 token_cap = 150000
+# Wake delivery: "window" = resident interactive iTerm cli (B3v, default);
+# "headless" = the marrow-subprocess call (fallback, auto-used if osascript/iTerm
+# fails). The window body = one `claude` in cortex_home with MARROW_CORTEX=1
+# MARROW_CHANNEL=ct set explicitly.
+mode = "window"
+session_name = "cortex"        # iTerm session name for the resident window
+launch_command = "claude"      # command run in the window (env markers prepended)
+window_model = "opus"          # explicit --model for every cortex window; never
+                               # inherit the system default. Not a 1M-context variant.
+window_effort = ""             # --effort (low|medium|high|xhigh|max); "" = omit flag
+wrap_line = "写碎碎念收尾躺下"   # watchdog self-wrap-up nudge (judgement a)
+ready_marker = "accept edits"  # TUI footer text signalling claude is ready for input
+ready_timeout_sec = 30         # max wait for readiness after a fresh spawn
+# say() = quiet, non-focus-stealing attention signal (macOS notification). The
+# window is NEVER brought to front unless say_bring_to_front is on.
+say_notify = true
+say_title = "cortex"
+say_body = "wants your attention"
+front_sound = "Glass"          # notification sound name; "" = silent
+say_bring_to_front = false     # opt-in: the only path that fronts the cortex window
+
+# Per-wake watchdog thresholds (spawned at injection, killed at lie_down).
+[wake.watchdog]
+poll_sec = 60
+run_max_min = 10               # (a) running this long & still active -> esc + wrap_line
+silent_max_min = 5             # (b) silent this long w/o lie_down -> proxy lie_down (timeout)
+fuse_tokens = 150000           # (c) window tokens >= this -> esc + proxy lie_down (fuse)
+
+# Context-window rotation: lie_down (and the tick fallback) type /clear when the
+# window grows past this. Cooldown guards the tick fallback from repeat-clearing.
+[wake.rotate]
+threshold_tokens = 100000
+cooldown_sec = 600
+
+# Stale-wake guard: tick sees the awake marker but the transcript has been idle
+# this long -> presume the watchdog died, proxy lie_down (force_slept=stale).
+[wake.stale]
+threshold_min = 15
 
 [knowledgec]
 # knowledgeC.db ZSTREAMNAME to read app-usage rows from.

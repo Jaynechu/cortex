@@ -1,0 +1,307 @@
+"""iTerm2 window control for the resident interactive cortex session. All
+control via iTerm2 AppleScript (works while the screen is locked — no keyboard
+simulation). Primitives: ensure_window, inject_note, inject_line, send_esc,
+type_clear, say. The window body is one `claude` running in cortex_home with
+MARROW_CORTEX=1 set explicitly (identity marker).
+"""
+from __future__ import annotations
+
+import subprocess
+import time
+
+from cortex import config, wake_state
+
+_APP = "iTerm2"
+_ITERM_BID = "com.googlecode.iterm2"
+# Delay between typing a prompt and pressing Enter. Claude's TUI treats a
+# text+newline `write text` as one bracketed paste and swallows the submit, so
+# the prompt is typed first (no newline) then Enter is sent as a separate key.
+_SUBMIT_DELAY_S = 0.6
+
+
+class WindowError(Exception):
+    pass
+
+
+def _osa(script: str) -> str:
+    p = subprocess.run(["osascript", "-"], input=script,
+                       capture_output=True, text=True)
+    if p.returncode != 0:
+        raise WindowError(p.stderr.strip() or "osascript failed")
+    return p.stdout.strip()
+
+
+def _esc(text: str) -> str:
+    return text.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def is_running() -> bool:
+    # Plain `application ... is running` never launches the app (unlike `tell`).
+    return _osa('return (application "iTerm2" is running)') == "true"
+
+
+def _frontmost_bid() -> str | None:
+    """Bundle id of the current frontmost app, so window creation can restore
+    focus (spawn must never steal keyboard focus)."""
+    try:
+        bid = _osa('tell application "System Events" to get bundle identifier '
+                   'of first process whose frontmost is true')
+        return bid or None
+    except WindowError:
+        return None
+
+
+def _activate_bid(bid: str | None) -> None:
+    if bid:
+        try:
+            _osa(f'tell application id "{bid}" to activate')
+        except WindowError:
+            pass
+
+
+def _guard_focus(prev: str | None) -> None:
+    """`write text` intermittently raises the iTerm window. If it grabbed focus
+    from another app, hand focus back. Only say() is allowed to front cortex."""
+    if not prev or prev == _ITERM_BID:
+        return
+    if _frontmost_bid() == _ITERM_BID:
+        _activate_bid(prev)
+
+
+def _session_alive(sid: str) -> bool:
+    script = f'''
+tell application "{_APP}"
+  repeat with w in windows
+    repeat with t in tabs of w
+      repeat with s in sessions of t
+        if (id of s) is "{sid}" then return "yes"
+      end repeat
+    end repeat
+  end repeat
+end tell
+return "no"
+'''
+    try:
+        return _osa(script) == "yes"
+    except WindowError:
+        return False
+
+
+def window_model(cfg: dict) -> str:
+    """Explicit model for cortex windows — never inherit the (expensive top-tier)
+    system default. Reused by every cortex window spawn (schedule/review too)."""
+    return cfg["wake"].get("window_model", "opus")
+
+
+def window_effort(cfg: dict) -> str:
+    """Reasoning effort (low|medium|high|xhigh|max). Empty -> omit the flag."""
+    return cfg["wake"].get("window_effort", "")
+
+
+def launch_command(cfg: dict) -> str:
+    # Identity + channel markers set explicitly (hooks derive channel from
+    # MARROW_CHANNEL; MARROW_CORTEX=1 = cortex identity / kickout immunity).
+    # --model/--effort pin tier + reasoning so the window never rides the
+    # system default. Reused by every cortex window spawn.
+    home = str(config.cortex_home(cfg))
+    cmd = cfg["wake"].get("launch_command", "claude")
+    flags = f" --model {window_model(cfg)}"
+    eff = window_effort(cfg)
+    if eff:
+        flags += f" --effort {eff}"
+    return f"cd {home} && MARROW_CORTEX=1 MARROW_CHANNEL=ct {cmd}{flags}"
+
+
+_launch_command = launch_command  # back-compat alias
+
+
+def _spawn(cfg: dict) -> str:
+    name = _esc(cfg["wake"].get("session_name", "cortex"))
+    launch = _esc(launch_command(cfg))
+    # No `activate` — spawning must not steal keyboard focus. Creating a window
+    # still brings iTerm forward, so capture the frontmost app and restore it.
+    prev = _frontmost_bid()
+    script = f'''
+tell application "{_APP}"
+  set w to (create window with default profile)
+  tell current session of w
+    set name to "{name}"
+    write text "{launch}"
+    return id
+  end tell
+end tell
+'''
+    sid = _osa(script)
+    _activate_bid(prev)
+    return sid
+
+
+def ensure_window(cfg: dict) -> str:
+    """Return the live cortex session id, spawning the window if iTerm is not
+    running or the persisted session is gone/dead."""
+    sid = wake_state.get_session_id(cfg)
+    if sid and is_running() and _session_alive(sid):
+        return sid
+    sid = _spawn(cfg)
+    wake_state.set_session_id(cfg, sid)
+    _wait_ready(sid, cfg)  # let the TUI finish booting before the first inject
+    return sid
+
+
+def _read_session(sid: str) -> str:
+    script = f'''
+tell application "{_APP}"
+  repeat with w in windows
+    repeat with t in tabs of w
+      repeat with s in sessions of t
+        if (id of s) is "{sid}" then return (text of s)
+      end repeat
+    end repeat
+  end repeat
+end tell
+return ""
+'''
+    try:
+        return _osa(script)
+    except WindowError:
+        return ""
+
+
+def _wait_ready(sid: str, cfg: dict) -> None:
+    """Block until the freshly spawned claude TUI is ready for input (its footer
+    marker appears), so the first injection never types into a booting shell."""
+    marker = cfg["wake"].get("ready_marker", "accept edits")
+    timeout = float(cfg["wake"].get("ready_timeout_sec", 30))
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if marker in _read_session(sid):
+            return
+        time.sleep(1.0)
+
+
+def _session_stmt(sid: str, stmt: str) -> str:
+    return f'''
+tell application "{_APP}"
+  repeat with w in windows
+    repeat with t in tabs of w
+      repeat with s in sessions of t
+        if (id of s) is "{sid}" then
+          {stmt}
+          return "ok"
+        end if
+      end repeat
+    end repeat
+  end repeat
+end tell
+return "no"
+'''
+
+
+def _type(sid: str, text: str) -> None:
+    """Type text into the session WITHOUT a trailing newline (no submit)."""
+    if _osa(_session_stmt(sid, f'tell s to write text "{_esc(text)}" newline no')) != "ok":
+        raise WindowError(f"session {sid} not found for write")
+
+
+def _enter(sid: str) -> None:
+    """Send a bare carriage return (submit the current input)."""
+    _osa(_session_stmt(sid, "tell s to write text (character id 13) newline no"))
+
+
+def _submit_prompt(sid: str, text: str) -> None:
+    # Type once (avoid double-typing), then Enter twice: a first-run startup
+    # notice can swallow the first Enter, leaving the prompt unsubmitted; the
+    # second Enter is a harmless no-op on an already-empty input line.
+    _type(sid, text)
+    time.sleep(_SUBMIT_DELAY_S)
+    _enter(sid)
+    time.sleep(0.3)
+    _enter(sid)
+
+
+def inject_line(cfg: dict, text: str) -> None:
+    """Deliver one single-line prompt (submitted as one message)."""
+    prev = _frontmost_bid()
+    sid = ensure_window(cfg)
+    _submit_prompt(sid, text)
+    _guard_focus(prev)
+
+
+def inject_note(cfg: dict, text: str) -> None:
+    """Deliver the multi-line wakeup note as ONE prompt: write it to a file,
+    then inject a single line telling cortex to read that file. `write text`
+    submits each newline separately, so file transit is the reliable path."""
+    prev = _frontmost_bid()
+    sid = ensure_window(cfg)
+    note_path = wake_state.wakeup_note_path(cfg)
+    note_path.parent.mkdir(parents=True, exist_ok=True)
+    note_path.write_text(text)
+    line = f"Read {note_path} — this is your wakeup note; act on it"
+    _submit_prompt(sid, line)
+    _guard_focus(prev)
+
+
+def send_esc(cfg: dict) -> None:
+    """Interrupt the current turn (ESC, char id 27, no trailing newline)."""
+    sid = wake_state.get_session_id(cfg)
+    if sid:
+        prev = _frontmost_bid()
+        _osa(_session_stmt(sid, "tell s to write text (character id 27) newline no"))
+        _guard_focus(prev)
+
+
+def type_clear(cfg: dict) -> None:
+    """Queue a /clear into the window (applies after the current turn ends)."""
+    sid = wake_state.get_session_id(cfg)
+    if sid:
+        prev = _frontmost_bid()
+        _submit_prompt(sid, "/clear")
+        _guard_focus(prev)
+
+
+def say(cfg: dict) -> None:
+    """开口 primitive: a quiet, non-focus-stealing attention signal — a macOS
+    notification (user sees it and comes to the cortex window). The words
+    themselves are just the normal in-window reply. Bringing the window to the
+    front is opt-in only (wake.say_bring_to_front, default off) and is the sole
+    place the cortex window may take focus."""
+    wcfg = cfg["wake"]
+    if wcfg.get("say_notify", True):
+        title = _esc(wcfg.get("say_title", "cortex"))
+        body = _esc(wcfg.get("say_body", "wants your attention"))
+        sound = wcfg.get("front_sound", "")
+        snd = f' sound name "{_esc(sound)}"' if sound else ""
+        try:
+            _osa(f'display notification "{body}" with title "{title}"{snd}')
+        except WindowError:
+            pass
+    if wcfg.get("say_bring_to_front", False):
+        _bring_to_front(wake_state.get_session_id(cfg))
+
+
+def _bring_to_front(sid: str | None) -> None:
+    """Opt-in only: front the cortex window (the sole allowed activate of it)."""
+    if not sid:
+        return
+    script = f'''
+tell application "{_APP}"
+  activate
+  repeat with w in windows
+    repeat with t in tabs of w
+      repeat with s in sessions of t
+        if (id of s) is "{sid}" then
+          select w
+          tell t to select
+          tell s to select
+          return "ok"
+        end if
+      end repeat
+    end repeat
+  end repeat
+end tell
+return "no"
+'''
+    try:
+        _osa(script)
+    except WindowError:
+        pass

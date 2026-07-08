@@ -43,6 +43,19 @@ def _iso(dt: datetime | None) -> str | None:
     return dt.isoformat() if dt is not None else None
 
 
+def parse_due_at(value: str | None, tz: ZoneInfo) -> datetime | None:
+    """Parse a self-schedule due_at. Accepts tz-aware ISO and offset-free (naive)
+    ISO; naive is interpreted as local wall time in `tz` (DST-correct). The
+    convention is offset-free local — no hardcoded UTC offset (breaks under DST)."""
+    if not value:
+        return None
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt.replace(tzinfo=tz) if dt.tzinfo is None else dt
+
+
 # --------------------------------------------------------------------------
 # state persistence (ct_pacemaker_state, single row id=1)
 # --------------------------------------------------------------------------
@@ -129,9 +142,10 @@ def _read_json_file(path, default):
 
 def _self_scheduled(cfg: dict) -> list[dict]:
     items = _read_json_file(config.self_schedule_path(cfg), [])
+    tz = ZoneInfo(cfg["core"]["timezone"])
     out = []
     for item in items if isinstance(items, list) else []:
-        due = _parse_dt(item.get("due_at")) if isinstance(item, dict) else None
+        due = parse_due_at(item.get("due_at"), tz) if isinstance(item, dict) else None
         if due is not None:
             out.append({**item, "due_at": due})
     return out

@@ -55,10 +55,13 @@ def _now(cfg: dict) -> datetime:
     return datetime.now(ZoneInfo(cfg["core"]["timezone"]))
 
 
-def assemble_bulletin(conn: sqlite3.Connection, cfg: dict, now: datetime, decision: dict | None = None) -> str:
-    """Thin wrapper: gather() + render(), cal_next_3h not wired yet (schedule.py
-    ownership transfers at C6) — bulletin honestly renders 'Calendar (3h): none'."""
-    data = bulletin.gather(conn, cfg, now, decision=decision)
+def assemble_bulletin(conn: sqlite3.Connection, cfg: dict, now: datetime,
+                      decision: dict | None = None, fresh: bool = False,
+                      wake_kind: str | None = None) -> str:
+    """Thin wrapper: gather() + render(). `fresh`/`wake_kind` gate the handoff
+    (碎碎念) section — only a fresh window (rebirth/rotate) receives it."""
+    data = bulletin.gather(conn, cfg, now, decision=decision,
+                           fresh=fresh, wake_kind=wake_kind)
     return bulletin.render(cfg, now, data)
 
 
@@ -114,6 +117,33 @@ def _force_fresh_next(conn: sqlite3.Connection, state, today: str) -> None:
         conn, replace(state, cortex_session_id=None, cortex_session_date=today))
 
 
+def _latest_wake_log_id(conn: sqlite3.Connection) -> int | None:
+    row = conn.execute(
+        "SELECT id FROM ct_wake_log WHERE wake = 1 ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+    return row["id"] if row else None
+
+
+def _window_wake(conn, cfg, note_text, now) -> dict | None:
+    """Interactive wake: ensure the resident iTerm window is alive, inject the
+    note as one prompt, set the awake marker, and light a per-wake watchdog.
+    Returns a result dict on success, None if the window path failed (caller
+    then falls back to headless). The wake is NOT over here — lie_down (self or
+    watchdog proxy) ends it; that is why this returns immediately."""
+    from cortex import transcript, wake_state, watchdog, window
+
+    try:
+        window.ensure_window(cfg)
+        window.inject_note(cfg, note_text)
+    except window.WindowError:
+        return None
+    tpath = transcript.newest(cfg)
+    wake_state.set_awake(cfg, _latest_wake_log_id(conn),
+                         str(tpath) if tpath else None)
+    watchdog.spawn(cfg)
+    return {"mode": "window", "session_id": None, "text": None}
+
+
 def run_wake(
     conn: sqlite3.Connection,
     cfg: dict,
@@ -164,9 +194,26 @@ def run_wake(
         day_log.new_day(path, today)
     timer.mark("rebirth" if rebirth else "resume")
 
-    bulletin_text = assemble_bulletin(conn, cfg, now, decision=decision)
+    bulletin_text = assemble_bulletin(
+        conn, cfg, now, decision=decision,
+        fresh=rebirth, wake_kind="rebirth" if rebirth else None)
     home = str(config.cortex_home(cfg))
     timer.mark("bulletin")
+
+    # Interactive path (B3v): the resident iTerm window is the cortex body. Only
+    # taken for the real wake (default caller) in window mode; explicit `caller`
+    # (tests / headless callers) always runs the marrow-subprocess path below.
+    if cfg["wake"].get("mode", "window") == "window" and caller is call_marrow_cortex:
+        win = _window_wake(conn, cfg, bulletin_text, now)
+        if win is not None:
+            state = replace(state, cortex_session_date=today)
+            integration.save_state(conn, state)
+            day_log.update(path, conn, cfg, now)
+            timer.mark("window_injected")
+            timer.mark("wake_complete")
+            return win
+        # osascript / iTerm failed -> fall through to headless fallback.
+        _audit_wake(conn, wake_id, "window path failed -> headless fallback")
 
     timer.mark("spawn_marrow")
     try:
