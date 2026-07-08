@@ -1,6 +1,8 @@
 """One-time idempotent symlinks: day_log.md + wishlist.md into NY db-pages
 (Decided 07-03 eve). Fixed source paths + archive-move-recreate on day_log
-keep the link zero-maintenance. Never touches any other NY file.
+keep the link zero-maintenance. Never touches any other NY file. Also installs
+the cortex-only slash commands (say / lie-down) into <home>/.claude/commands/ so
+they are self-discoverable inside the cortex window (and invisible elsewhere).
 """
 from __future__ import annotations
 
@@ -9,6 +11,10 @@ from pathlib import Path
 from cortex import config
 
 WISHLIST_HEADER = "# Wishlist\n\n(owed treats / her wants / her self-rewards — append-only)\n"
+
+# Repo source of truth for the cortex-home slash commands (project-scoped: only
+# a session whose cwd is cortex_home sees them).
+_COMMANDS_SRC = Path(__file__).resolve().parent.parent / "deploy" / "commands"
 
 
 def ensure_wishlist(path: Path) -> None:
@@ -31,6 +37,17 @@ def _ensure_symlink(source: Path, target: Path) -> None:
     target.symlink_to(source)
 
 
+def ensure_commands(cfg: dict) -> None:
+    """Symlink each deploy/commands/*.md into <cortex_home>/.claude/commands/.
+    Project-scoped commands: only visible to a session with that cwd (the cortex
+    window), never to normal sessions. Refuses to clobber a real file."""
+    if not _COMMANDS_SRC.is_dir():
+        return
+    dest_dir = config.cortex_home(cfg) / ".claude" / "commands"
+    for src in sorted(_COMMANDS_SRC.glob("*.md")):
+        _ensure_symlink(src, dest_dir / src.name)
+
+
 def ensure_all(cfg: dict) -> None:
     """Idempotent: safe to call on every wake."""
     ny_dir = config.ny_db_pages_dir(cfg)
@@ -40,3 +57,4 @@ def ensure_all(cfg: dict) -> None:
     ensure_wishlist(wishlist_source)
     _ensure_symlink(day_log_source, ny_dir / "day_log.md")
     _ensure_symlink(wishlist_source, ny_dir / "wishlist.md")
+    ensure_commands(cfg)

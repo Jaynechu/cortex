@@ -152,6 +152,23 @@ def ensure_window(cfg: dict) -> str:
     return sid
 
 
+def spawn_fresh(cfg: dict) -> str:
+    """Spawn a brand-new cortex window (attention hygiene for schedule duties —
+    no roaming context, no 碎碎念). NOT the resident session: its sid is never
+    persisted, so it can't be resumed and cortex ends it itself when done."""
+    sid = _spawn(cfg)
+    _wait_ready(sid, cfg)
+    return sid
+
+
+def submit_prompt_to(sid: str, cfg: dict, text: str) -> None:
+    """Inject one prompt into a specific (non-resident) session, restoring
+    focus afterwards. Used for schedule windows keyed by their own sid."""
+    prev = _frontmost_bid()
+    _submit_prompt(sid, text)
+    _guard_focus(prev)
+
+
 def _read_session(sid: str) -> str:
     script = f'''
 tell application "{_APP}"
@@ -231,12 +248,14 @@ def inject_line(cfg: dict, text: str) -> None:
     _guard_focus(prev)
 
 
-def inject_note(cfg: dict, text: str) -> None:
+def inject_note(cfg: dict, text: str, sid: str | None = None) -> None:
     """Deliver the multi-line wakeup note as ONE prompt: write it to a file,
     then inject a single line telling cortex to read that file. `write text`
-    submits each newline separately, so file transit is the reliable path."""
+    submits each newline separately, so file transit is the reliable path.
+    `sid` targets a specific (e.g. schedule) window; None = the resident one."""
     prev = _frontmost_bid()
-    sid = ensure_window(cfg)
+    if sid is None:
+        sid = ensure_window(cfg)
     note_path = wake_state.wakeup_note_path(cfg)
     note_path.parent.mkdir(parents=True, exist_ok=True)
     note_path.write_text(text)
@@ -263,16 +282,17 @@ def type_clear(cfg: dict) -> None:
         _guard_focus(prev)
 
 
-def say(cfg: dict) -> None:
+def say(cfg: dict, note: str | None = None) -> None:
     """开口 primitive: a quiet, non-focus-stealing attention signal — a macOS
     notification (user sees it and comes to the cortex window). The words
-    themselves are just the normal in-window reply. Bringing the window to the
-    front is opt-in only (wake.say_bring_to_front, default off) and is the sole
-    place the cortex window may take focus."""
+    themselves are just the normal in-window reply. `note` overrides the
+    notification body for this call. Bringing the window to the front is opt-in
+    only (wake.say_bring_to_front, default off) and is the sole place the cortex
+    window may take focus."""
     wcfg = cfg["wake"]
     if wcfg.get("say_notify", True):
         title = _esc(wcfg.get("say_title", "cortex"))
-        body = _esc(wcfg.get("say_body", "wants your attention"))
+        body = _esc(note or wcfg.get("say_body", "wants your attention"))
         sound = wcfg.get("front_sound", "")
         snd = f' sound name "{_esc(sound)}"' if sound else ""
         try:

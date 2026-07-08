@@ -60,10 +60,11 @@ def parse_due_at(value: str | None, tz: ZoneInfo) -> datetime | None:
 # state persistence (ct_pacemaker_state, single row id=1)
 # --------------------------------------------------------------------------
 
-def _state_to_json(state: PacemakerState) -> str:
+def _state_to_json(state: PacemakerState, base: dict | None = None) -> str:
     d = state.desire
     er = state.expect_reply
-    return json.dumps({
+    obj = dict(base or {})  # preserve side-channel keys (window_tokens, schedule_fired)
+    obj.update({
         "desire": {
             "attachment": d.attachment, "curiosity": d.curiosity,
             "worry": d.worry, "duty": d.duty, "last_tick_at": _iso(d.last_tick_at),
@@ -81,6 +82,7 @@ def _state_to_json(state: PacemakerState) -> str:
         "cortex_session_id": state.cortex_session_id,
         "cortex_session_date": state.cortex_session_date,
     })
+    return json.dumps(obj)
 
 
 def _state_from_json(text: str) -> PacemakerState:
@@ -131,11 +133,41 @@ def store_window_tokens(conn: sqlite3.Connection, tokens: int | None) -> None:
     conn.commit()
 
 
-def save_state(conn: sqlite3.Connection, state: PacemakerState) -> None:
+def _raw_state(conn: sqlite3.Connection) -> dict:
+    row = conn.execute("SELECT state FROM ct_pacemaker_state WHERE id = 1").fetchone()
+    try:
+        return json.loads(row["state"]) if row else {}
+    except (ValueError, TypeError):
+        return {}
+
+
+def load_schedule_fired(conn: sqlite3.Connection) -> dict:
+    """{duty name: last-fired local date} — kept on the raw state JSON (not the
+    pure PacemakerState) so it survives tick saves independently."""
+    val = _raw_state(conn).get("schedule_fired")
+    return dict(val) if isinstance(val, dict) else {}
+
+
+def mark_schedule_fired(conn: sqlite3.Connection, name: str, date: str) -> None:
+    obj = _raw_state(conn)
+    fired = obj.get("schedule_fired")
+    fired = dict(fired) if isinstance(fired, dict) else {}
+    fired[name] = date
+    obj["schedule_fired"] = fired
     conn.execute(
         "INSERT INTO ct_pacemaker_state (id, state, updated_at) VALUES (1, ?, ?)"
         " ON CONFLICT(id) DO UPDATE SET state=excluded.state, updated_at=excluded.updated_at",
-        (_state_to_json(state), db.utcnow_iso()),
+        (json.dumps(obj), db.utcnow_iso()),
+    )
+    conn.commit()
+
+
+def save_state(conn: sqlite3.Connection, state: PacemakerState) -> None:
+    base = _raw_state(conn)  # keep side-channel keys (window_tokens, schedule_fired)
+    conn.execute(
+        "INSERT INTO ct_pacemaker_state (id, state, updated_at) VALUES (1, ?, ?)"
+        " ON CONFLICT(id) DO UPDATE SET state=excluded.state, updated_at=excluded.updated_at",
+        (_state_to_json(state, base), db.utcnow_iso()),
     )
     conn.commit()
 
@@ -147,6 +179,31 @@ def save_state(conn: sqlite3.Connection, state: PacemakerState) -> None:
 def _latest_activity_at(conn: sqlite3.Connection) -> datetime | None:
     row = conn.execute("SELECT MAX(ts) AS ts FROM ct_activity").fetchone()
     return _parse_dt(row["ts"]) if row and row["ts"] else None
+
+
+def _today_tokens(conn: sqlite3.Connection, now: datetime) -> int:
+    """SUM(ct_wake_log.tokens) for `now`'s local date. ts is stored UTC ISO;
+    filter from local midnight (converted to UTC) then confirm the local date so
+    the daily-budget gate resets naturally at local midnight."""
+    tz = now.tzinfo
+    start_utc = now.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(
+        ZoneInfo("UTC")).isoformat()
+    try:
+        rows = conn.execute(
+            "SELECT ts, tokens FROM ct_wake_log WHERE tokens IS NOT NULL AND ts >= ?",
+            (start_utc,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return 0
+    total = 0
+    today = now.date()
+    for row in rows:
+        try:
+            if _parse_dt(row["ts"]).astimezone(tz).date() == today:
+                total += int(row["tokens"])
+        except (TypeError, ValueError, AttributeError):
+            continue
+    return total
 
 
 def _read_json_file(path, default):
@@ -169,6 +226,14 @@ def _self_scheduled(cfg: dict) -> list[dict]:
     return out
 
 
+def _schedule_due(conn: sqlite3.Connection, cfg: dict, now: datetime) -> list[dict]:
+    from cortex.pacemaker import schedule as schedule_mod
+
+    entries = cfg.get("schedule", []) or []
+    fired = load_schedule_fired(conn)
+    return schedule_mod.due_duties(entries, now, fired)
+
+
 def build_context(conn: sqlite3.Connection, cfg: dict, now: datetime, state: PacemakerState) -> dict:
     pm = cfg["pacemaker"]
     last_activity = _latest_activity_at(conn)
@@ -186,6 +251,8 @@ def build_context(conn: sqlite3.Connection, cfg: dict, now: datetime, state: Pac
         "at_home": pm.get("at_home_default", True),
         "affect_flag": _read_json_file(config.affect_flag_path(cfg), None),
         "self_scheduled": _self_scheduled(cfg),
+        "schedule": _schedule_due(conn, cfg, now),
+        "today_tokens": _today_tokens(conn, now),
         "events": [],
     }
 

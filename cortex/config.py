@@ -87,10 +87,12 @@ _DEFAULTS: dict[str, Any] = {
         "duty": {"base_rate_per_min": 0.001, "decay_rate_per_min": 0.0005},
     },
     "gates": {
-        # Night mode (C-wm, replaces fatigue windows): desire/floor/expect_reply
-        # wakes capped per night; self_scheduled + rule triggers pierce.
-        # Static window until sleep data lands (then dynamic).
-        "night": {"start": "00:00", "end": "06:00", "cap": 1},
+        # Night window (plan 07-08): zero self-wakes 23-06 — floor/desire/
+        # self_scheduled/affect_flag all silent; only schedule (duty) pierces.
+        "night": {"start": "23:00", "end": "06:00", "cap": 0},
+        # Daily wake-token budget: once today's SUM(ct_wake_log.tokens) reaches
+        # this, self-wakes stop; schedule pierces; resets at local midnight.
+        "daily_budget": {"tokens": 1_000_000},
     },
     "triggers": {
         "desire_thresholds": {"attachment": 0.8, "curiosity": 0.8, "worry": 0.7, "duty": 0.8},
@@ -168,6 +170,11 @@ def load(path: Path | None = None) -> dict[str, Any]:
     loaded_categories = loaded.get("knowledgec", {}).get("categories", {})
     categories.update(loaded_categories)
     cfg["knowledgec"]["categories"] = categories
+
+    # Schedule (duty) blocks: an array of tables ([[schedule]]), not a merged
+    # section — pass the user's list straight through (empty when unset).
+    sched = loaded.get("schedule", [])
+    cfg["schedule"] = sched if isinstance(sched, list) else []
 
     return cfg
 

@@ -169,11 +169,11 @@ def test_tick_pierce_wake_does_not_increment_night_counter():
         night_wake_count=0,
         next_floor_due_at=NIGHT_NOW + timedelta(hours=1),
     )
-    context = {"events": [{"id": 1}]}
+    context = {"schedule": [{"name": "duty"}]}
     decision, new_state = tick(state, context, base_config(), NIGHT_NOW, random.Random(1))
     assert decision["wake"] is True
-    assert any(r.kind == "event" for r in decision["reasons"])
-    assert new_state.night_wake_count == 0  # event pierces, doesn't consume cap
+    assert any(r.kind == "schedule" for r in decision["reasons"])
+    assert new_state.night_wake_count == 0  # schedule pierces, doesn't consume cap
 
 
 def test_tick_night_counter_untouched_outside_window():

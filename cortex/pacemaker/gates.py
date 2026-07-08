@@ -1,15 +1,18 @@
 """Gate chain: each gate is a pure function (state, context, config, now)
--> GateResult. A wake is allowed only if every gate allows. Night mode is the
-sole gate — spend protection lives in the 150k per-wake fuse + bulletin battery
-gauge, not here.
+-> GateResult. A wake is allowed only if every gate allows. Two gates: the
+night window (23-06 zero self-wakes) and the daily token budget — both let
+schedule (duty) wakes pierce; every other spend protection is the 150k
+per-wake fuse + bulletin battery gauge.
 
 Expected config shape (config["gates"]):
     {
-        "night": {"start": "00:00", "end": "06:00", "cap": 1},
+        "night": {"start": "23:00", "end": "06:00", "cap": 0},
+        "daily_budget": {"tokens": 1_000_000},
     }
 
 Expected context keys used here:
     "trigger_kinds": list[str]           # fired TriggerReason kinds, set by core.tick
+    "today_tokens": int                  # SUM(ct_wake_log.tokens) for today (integration)
 """
 
 from __future__ import annotations
@@ -17,9 +20,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 
-# Trigger kinds that pierce night mode (C-wm: schedule + rules pierce; only
-# desire/floor/expect_reply consume the nightly cap).
-PIERCE_KINDS = frozenset({"event", "affect_flag", "self_scheduled"})
+# Trigger kinds that pierce every gate (night window + daily budget). Only a
+# fixed duty (schedule) is exempt: floor/desire/self_scheduled/affect_flag all
+# fall silent at night and once the daily budget is spent (plan 07-08).
+PIERCE_KINDS = frozenset({"schedule"})
 
 
 @dataclass(frozen=True)
@@ -61,17 +65,17 @@ def night_key(config: dict, now: datetime) -> str | None:
 
 
 def gate_night_mode(state, context: dict, config: dict, now: datetime) -> GateResult:
-    """Night window (replaces fatigue gate): desire/floor/expect_reply wakes
-    capped per night; self_scheduled and rule-type triggers pierce."""
+    """Night window (23-06, cap 0 by default): every self-wake stays silent;
+    only a schedule (duty) trigger pierces."""
     key = night_key(config, now)
     if key is None:
         return GateResult("night-mode", True, "outside night window")
 
     kinds = set(context.get("trigger_kinds", []))
     if kinds & PIERCE_KINDS:
-        return GateResult("night-mode", True, "pierced by schedule/rule trigger")
+        return GateResult("night-mode", True, "pierced by schedule trigger")
 
-    cap = _night_cfg(config).get("cap", 1)
+    cap = _night_cfg(config).get("cap", 0)
     count = getattr(state, "night_wake_count", 0)
     if getattr(state, "night_cap_key", None) != key:
         count = 0  # counter belongs to a previous night
@@ -80,8 +84,25 @@ def gate_night_mode(state, context: dict, config: dict, now: datetime) -> GateRe
     return GateResult("night-mode", True, f"night wake {count}/{cap} used")
 
 
+def gate_daily_budget(state, context: dict, config: dict, now: datetime) -> GateResult:
+    """Daily token budget: once today's wake-token spend (SUM ct_wake_log.tokens,
+    supplied as context["today_tokens"]) reaches the cap, all self-wakes fall
+    silent; schedule (duty) pierces. Resets at local midnight (SUM is per-day)."""
+    cap = int(config.get("gates", {}).get("daily_budget", {}).get("tokens", 1_000_000))
+    if cap <= 0:
+        return GateResult("daily_budget", True, "budget disabled")
+    kinds = set(context.get("trigger_kinds", []))
+    if kinds & PIERCE_KINDS:
+        return GateResult("daily_budget", True, "pierced by schedule trigger")
+    spent = int(context.get("today_tokens", 0) or 0)
+    if spent >= cap:
+        return GateResult("daily_budget", False, f"daily budget spent ({spent}/{cap})")
+    return GateResult("daily_budget", True, f"budget {spent}/{cap} used")
+
+
 ALL_GATES = (
     gate_night_mode,
+    gate_daily_budget,
 )
 
 

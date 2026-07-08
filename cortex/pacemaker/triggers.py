@@ -63,6 +63,17 @@ def _affect_flag_trigger(context: dict) -> list[TriggerReason]:
     return [TriggerReason(kind="affect_flag", detail=f"affect flag: {flag}", facts=dict(flag))]
 
 
+def _schedule_triggers(context: dict) -> list[TriggerReason]:
+    """Fixed recurring duties already resolved to due-and-unfired by the
+    integration layer (see pacemaker.schedule.due_duties)."""
+    items = context.get("schedule") or []
+    return [
+        TriggerReason(kind="schedule", detail=f"schedule: {item.get('name')}", facts=dict(item))
+        for item in items
+        if isinstance(item, dict)
+    ]
+
+
 def _self_scheduled_triggers(context: dict, now: datetime) -> list[TriggerReason]:
     items = context.get("self_scheduled") or []
     reasons = []
@@ -108,6 +119,7 @@ def evaluate(
     pierce.extend(_event_triggers(context))
     pierce.extend(_affect_flag_trigger(context))
     pierce.extend(_self_scheduled_triggers(context, now))
+    pierce.extend(_schedule_triggers(context))
 
     floor_due = next_floor_due_at is None or now >= next_floor_due_at
     if not floor_due:

@@ -124,6 +124,44 @@ def _latest_wake_log_id(conn: sqlite3.Connection) -> int | None:
     return row["id"] if row else None
 
 
+def _schedule_reasons(decision: dict) -> list[dict]:
+    """Fired schedule (duty) reasons as fact dicts (name/prompt_path)."""
+    out = []
+    for r in decision.get("reasons", []) or []:
+        kind = r.get("kind") if isinstance(r, dict) else getattr(r, "kind", "")
+        if kind == "schedule":
+            facts = r.get("facts", {}) if isinstance(r, dict) else getattr(r, "facts", {})
+            out.append(dict(facts or {}))
+    return out
+
+
+def _schedule_wake(conn, cfg, decision, now, duties) -> dict:
+    """Schedule (duty) wake: a fresh iTerm window per duty (attention hygiene —
+    no roaming context, no 碎碎念). Not the resident session and not resumed;
+    cortex ends it itself when the duty is done. A quiet say() requests
+    attention on spawn. Budget/night-exempt (schedule pierces the gates)."""
+    from cortex import window
+
+    home = str(config.cortex_home(cfg))
+    for duty in duties:
+        name = duty.get("name") or "duty"
+        note = assemble_bulletin(conn, cfg, now, decision=decision,
+                                 fresh=False, wake_kind="schedule")
+        try:
+            sid = window.spawn_fresh(cfg)
+            window.inject_note(cfg, note, sid=sid)
+            window.say(cfg)  # quiet attention request (notification), no focus steal
+        except window.WindowError:
+            _audit_wake(conn, wake_id_of(now), f"schedule window failed: {name}")
+            continue
+        integration.mark_schedule_fired(conn, name, now.date().isoformat())
+    return {"mode": "schedule", "session_id": None, "text": None, "duties": duties}
+
+
+def wake_id_of(now: datetime) -> str:
+    return f"{now.strftime('%Y%m%dT%H%M%S')}-{os.getpid()}"
+
+
 def _window_wake(conn, cfg, note_text, now) -> dict | None:
     """Interactive wake: ensure the resident iTerm window is alive, inject the
     note as one prompt, set the awake marker, and light a per-wake watchdog.
@@ -173,6 +211,15 @@ def run_wake(
 
     symlinks.ensure_all(cfg)
     timer.mark("symlinks")
+
+    # Schedule (duty) wakes short-circuit here: a fresh window per duty, never
+    # the resident session, never resumed, no day_log rollover — pure干活.
+    duties = _schedule_reasons(decision)
+    if duties and cfg["wake"].get("mode", "window") == "window" and caller is call_marrow_cortex:
+        result = _schedule_wake(conn, cfg, decision, now, duties)
+        timer.mark("schedule_spawned")
+        timer.mark("wake_complete")
+        return result
 
     state = integration.load_state(conn)
     rebirth = state.cortex_session_date != today

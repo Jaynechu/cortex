@@ -14,6 +14,7 @@ def scfg(tmp_path):
             "day_log": str(tmp_path / "day_log.md"),
             "wishlist_file": str(tmp_path / "cortex_home" / "wishlist.md"),
             "ny_db_pages": str(tmp_path / "ny"),
+            "cortex_home": str(tmp_path / "cortex_home"),
         }
     }
 
@@ -61,3 +62,18 @@ def test_ensure_all_refuses_to_clobber_foreign_file(scfg, tmp_path):
         symlinks.ensure_all(scfg)
 
     assert (ny / "day_log.md").read_text() == "her own unrelated file\n"
+
+
+def test_ensure_commands_symlinks_into_home(scfg, tmp_path):
+    symlinks.ensure_commands(scfg)
+    cmd_dir = Path(scfg["paths"]["cortex_home"]) / ".claude" / "commands"
+    names = {p.name for p in cmd_dir.glob("*.md")}
+    assert {"say.md", "lie-down.md"} <= names
+    for p in cmd_dir.glob("*.md"):
+        assert p.is_symlink()
+        assert p.read_text().startswith("---")  # valid frontmatter
+
+
+def test_ensure_commands_idempotent(scfg):
+    symlinks.ensure_commands(scfg)
+    symlinks.ensure_commands(scfg)  # no error on second run

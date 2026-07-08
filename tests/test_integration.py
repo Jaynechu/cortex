@@ -173,13 +173,57 @@ def test_second_tick_no_wake_while_floor_not_due(conn, cfg):
     assert conn.execute("SELECT COUNT(*) AS n FROM ct_wake_log").fetchone()["n"] == 2
 
 
-def test_night_mode_gates_wake_once_cap_reached(conn, cfg):
-    now = datetime(2026, 7, 4, 2, 0, tzinfo=MEL)  # inside default 00:00-06:00 window
+def test_schedule_due_wakes_and_pierces_night(conn, cfg):
+    # 23:30 (night, cap 0) — a due duty still wakes; floor would be silenced.
+    now = datetime(2026, 7, 8, 23, 30, tzinfo=MEL)
+    cfg["schedule"] = [{"name": "review+plan", "time": "20:30", "enabled": True}]
+    decision = integration.run_tick(conn, cfg, now=now, rng=random.Random(1))
+    assert decision["wake"] is True
+    assert any(r.kind == "schedule" for r in decision["reasons"])
+    assert decision["gated_by"] == []
+
+
+def test_schedule_disabled_does_not_wake(conn, cfg):
+    now = datetime(2026, 7, 8, 21, 0, tzinfo=MEL)
+    cfg["schedule"] = [{"name": "wp", "time": "08:00", "enabled": False}]
+    integration.save_state(conn, PacemakerState(next_floor_due_at=now + timedelta(hours=1)))
+    decision = integration.run_tick(conn, cfg, now=now, rng=random.Random(1))
+    assert not any(r.kind == "schedule" for r in decision["reasons"])
+
+
+def test_schedule_fired_persists_across_save_state(conn, cfg):
+    integration.mark_schedule_fired(conn, "review+plan", "2026-07-08")
+    # A plain tick save must not wipe the side-channel key.
+    integration.save_state(conn, PacemakerState(night_wake_count=3))
+    assert integration.load_schedule_fired(conn) == {"review+plan": "2026-07-08"}
+
+
+def test_daily_budget_gates_floor_and_schedule_pierces(conn, cfg):
+    now = datetime(2026, 7, 8, 12, 0, tzinfo=MEL)  # daytime, outside night
+    start_utc = now.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(
+        timezone.utc).isoformat()
+    conn.execute("INSERT INTO ct_wake_log (ts, wake, dry_run, tokens) VALUES (?,1,0,?)",
+                 (start_utc, cfg["gates"]["daily_budget"]["tokens"]))
+    conn.commit()
+    # floor is gated by daily budget
+    integration.save_state(conn, PacemakerState(next_floor_due_at=now - timedelta(minutes=1)))
+    decision = integration.run_tick(conn, cfg, now=now, rng=random.Random(1))
+    assert decision["wake"] is False
+    assert any(g.name == "daily_budget" for g in decision["gated_by"])
+    # schedule pierces the same budget
+    cfg["schedule"] = [{"name": "wp", "time": "08:00", "enabled": True}]
+    decision2 = integration.run_tick(conn, cfg, now=now + timedelta(minutes=5), rng=random.Random(1))
+    assert decision2["wake"] is True
+    assert any(r.kind == "schedule" for r in decision2["reasons"])
+
+
+def test_night_mode_gates_floor_wake(conn, cfg):
+    now = datetime(2026, 7, 4, 2, 0, tzinfo=MEL)  # inside default 23:00-06:00 window
     night_key = gates.night_key(cfg, now)
     state = PacemakerState(
         next_floor_due_at=now - timedelta(minutes=1),  # force a floor trigger
         night_cap_key=night_key,
-        night_wake_count=1,  # cap (default 1) already reached
+        night_wake_count=0,  # cap is 0 -> any self-wake is silenced at night
     )
     integration.save_state(conn, state)
     decision = integration.run_tick(conn, cfg, now=now, rng=random.Random(1))

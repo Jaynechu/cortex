@@ -76,7 +76,10 @@ def main() -> int:
             else:
                 result = run_wake(conn, cfg, decision,
                                   tick_started=t_tick, gate_done=t_gate)
-                if result.get("mode") != "window":
+                mode = result.get("mode")
+                if mode == "schedule":
+                    pass  # fresh duty window is self-contained; floor untouched.
+                elif mode != "window":
                     # headless path finished -> wake over, redraw floor now.
                     integration.lie_down(conn, cfg)
                 # window path: marker set, watchdog owns lie_down.

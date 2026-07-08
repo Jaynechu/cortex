@@ -138,13 +138,25 @@ base_rate_per_min = 0.001
 decay_rate_per_min = 0.0005
 
 [gates]
-# Night mode (replaces fatigue windows): desire/floor/expect_reply wakes
-# capped per night; self_scheduled + rule triggers pierce. Static window
-# until sleep data lands (then dynamic).
+# Night window: zero self-wakes 23-06 (floor/desire/self_scheduled/affect_flag
+# all silent); only schedule (duty) pierces. cap = 0 = no self-wake at night.
 [gates.night]
-start = "00:00"
+start = "23:00"
 end = "06:00"
-cap = 1
+cap = 0
+# Daily wake-token budget: once today's SUM(ct_wake_log.tokens) reaches tokens,
+# self-wakes stop; schedule pierces; resets naturally at local midnight.
+[gates.daily_budget]
+tokens = 1000000
+
+# Schedule (duty) blocks: fixed recurring duties, rare + explicit. Each fires
+# once per day at its local time in a FRESH iTerm window (no 碎碎念), pierces
+# night + daily budget. Add a block per duty; enabled = false keeps it inert.
+# [[schedule]]
+# name = "review+plan"
+# time = "20:30"
+# enabled = true
+# prompt_path = "~/.config/marrow/cortex/prompts/review.md"  # optional
 
 [triggers]
 floor_min_min = 10             # floor wake draw from lie-down, minutes (uniform lo)
