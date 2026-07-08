@@ -257,6 +257,27 @@ def test_pending_missing_file(cfg, tmp_path, monkeypatch):
     assert bulletin._pending(cfg, NOW) == []
 
 
+def test_pending_naive_aware_and_garbage_mixed(cfg, tmp_path, monkeypatch):
+    """Regression: a naive (offset-free local) due_at used to raise TypeError
+    comparing naive vs aware datetimes, crashing the whole note. Naive + aware
+    + garbage entries in one file -> the two valid ones render, garbage
+    skipped, no exception."""
+    sp = tmp_path / "ss.json"
+    naive_due = (NOW + timedelta(minutes=5)).replace(tzinfo=None).isoformat()
+    aware_due = (NOW + timedelta(minutes=10)).isoformat()
+    sp.write_text(json.dumps([
+        {"due_at": naive_due, "intent": "naive"},
+        {"due_at": aware_due, "intent": "aware"},
+        {"due_at": "not-a-date", "intent": "garbage"},
+    ]), encoding="utf-8")
+    monkeypatch.setattr(config, "self_schedule_path", lambda c: sp)
+    pend = bulletin._pending(cfg, NOW)
+    assert pend == [
+        {"hm": (NOW + timedelta(minutes=5)).strftime("%H:%M"), "intent": "naive"},
+        {"hm": (NOW + timedelta(minutes=10)).strftime("%H:%M"), "intent": "aware"},
+    ]
+
+
 def test_frontmost_app_locked_returns_none(monkeypatch):
     class FakeProc:
         returncode = 0
@@ -350,3 +371,26 @@ def test_gather_end_to_end(marrow_conn, cfg, monkeypatch):
     assert data["handoff"] is None  # fresh defaults False
     text = bulletin.render(cfg, NOW, data)
     assert text.startswith("Wake: 巡回")
+
+
+def test_gather_survives_naive_due_at_self_schedule(marrow_conn, cfg, tmp_path, monkeypatch):
+    """Live-repro regression: a self_schedule.json entry with an offset-free
+    (naive) due_at must not crash gather()/render() end-to-end."""
+    make_events_table(marrow_conn)
+    marrow_conn.commit()
+
+    monkeypatch.setattr(bulletin, "_frontmost_app", lambda: None)
+    monkeypatch.setattr(bulletin, "_cal_line", lambda c, n: None)
+    monkeypatch.setattr(bulletin, "_rem_last_done", lambda c: None)
+
+    sp = tmp_path / "ss.json"
+    naive_due = (NOW + timedelta(minutes=5)).replace(tzinfo=None).isoformat()
+    sp.write_text(json.dumps([{"due_at": naive_due, "intent": "x"}]), encoding="utf-8")
+    monkeypatch.setattr(config, "self_schedule_path", lambda c: sp)
+
+    data = bulletin.gather(marrow_conn, cfg, NOW)
+    assert data["pending"] == [
+        {"hm": (NOW + timedelta(minutes=5)).strftime("%H:%M"), "intent": "x"}
+    ]
+    text = bulletin.render(cfg, NOW, data)
+    assert "Pending self-schedule" in text

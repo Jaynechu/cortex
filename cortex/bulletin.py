@@ -19,6 +19,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from cortex import config
+from cortex.pacemaker.integration import parse_due_at
 
 # ct_rate_limit is a flat kv table (key, value, updated_at) the marrow-side
 # writer owns (parses rate_limit_event off the cortex claude stream). Keys used
@@ -293,7 +294,9 @@ def _read_handoff(cfg: dict, fresh: bool, wake_kind: str | None) -> str | None:
 
 
 def _pending(cfg: dict, now: datetime) -> list[dict]:
-    """self_schedule.json entries due within pending_window_min from now."""
+    """self_schedule.json entries due within pending_window_min from now.
+    due_at may be tz-aware or offset-free local ISO (parse_due_at handles
+    both); a garbage/unparseable entry is skipped, never crashes the note."""
     path = config.self_schedule_path(cfg)
     try:
         items = json.loads(path.read_text(encoding="utf-8"))
@@ -303,26 +306,37 @@ def _pending(cfg: dict, now: datetime) -> list[dict]:
         return []
     window = _bulletin_cfg(cfg).get("pending_window_min", 15)
     horizon = now + timedelta(minutes=window)
+    tz = _tz(cfg)
     out = []
     for item in items:
-        raw = (item or {}).get("due_at")
-        if not raw:
+        if not isinstance(item, dict):
             continue
         try:
-            due = datetime.fromisoformat(raw)
-        except (ValueError, TypeError):
-            continue
-        if due <= horizon:
+            due = parse_due_at(item.get("due_at"), tz)
+            if due is None or due > horizon:
+                continue
             out.append({
-                "hm": due.astimezone(_tz(cfg)).strftime("%H:%M"),
+                "hm": due.astimezone(tz).strftime("%H:%M"),
                 "intent": item.get("intent", ""),
             })
+        except (ValueError, TypeError):
+            continue
     return out
 
 
 # --------------------------------------------------------------------------- #
 # gather / render
 # --------------------------------------------------------------------------- #
+
+def _safe(fn, *args, default=None):
+    """Run one gather section; any exception -> default (section omitted).
+    Belt-and-braces on top of each helper's own try/except: no data failure
+    may crash note assembly (module design: best-effort throughout)."""
+    try:
+        return fn(*args)
+    except Exception:
+        return default
+
 
 def gather(
     conn: sqlite3.Connection,
@@ -338,23 +352,24 @@ def gather(
     bcfg = _bulletin_cfg(cfg)
     ncfg = _note_cfg(cfg)
 
-    kv = _rate_limit_kv(conn)
-    budget = _build_budget(conn, cfg, now, kv, bcfg)
+    kv = _safe(_rate_limit_kv, conn, default={})
+    budget = _safe(_build_budget, conn, cfg, now, kv, bcfg)
 
     return {
-        "wake_parts": _wake_parts(decision),
-        "last_wake": _last_wake(conn, now),
+        "wake_parts": _safe(_wake_parts, decision, default=["巡回"]),
+        "last_wake": _safe(_last_wake, conn, now),
         "budget": budget,
-        "active_app": _frontmost_app(),
-        "cal": _cal_line(cfg, now),
-        "rem_last_done": _rem_last_done(cfg),
-        "pending": _pending(cfg, now),
-        "handoff": _read_handoff(cfg, fresh, wake_kind),
+        "active_app": _safe(_frontmost_app),
+        "cal": _safe(_cal_line, cfg, now),
+        "rem_last_done": _safe(_rem_last_done, cfg),
+        "pending": _safe(_pending, cfg, now, default=[]),
+        "handoff": _safe(_read_handoff, cfg, fresh, wake_kind),
         "handoff_title": ncfg.get("handoff_title", "阿屿の碎碎念"),
-        "replay": _replay_events(
-            conn, cfg,
+        "replay": _safe(
+            _replay_events, conn, cfg,
             bcfg.get("replay_events", 6),
             bcfg.get("replay_event_chars", 300),
+            default=[],
         ),
         "replay_title": ncfg.get("replay_title", "最近对话回放"),
     }

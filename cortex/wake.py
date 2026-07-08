@@ -18,6 +18,7 @@ import sqlite3
 import time
 from dataclasses import replace
 from datetime import datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from cortex import bulletin, config, day_log, db, symlinks
@@ -135,11 +136,31 @@ def _schedule_reasons(decision: dict) -> list[dict]:
     return out
 
 
+def _duty_prompt(duty: dict) -> str | None:
+    """Read the duty's prompt_path (the actual task instructions for a
+    schedule/duty wake). Missing/unreadable file -> None, never crashes."""
+    raw = duty.get("prompt_path")
+    if not raw:
+        return None
+    path = Path(os.path.expanduser(str(raw)))
+    try:
+        text = path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return text or None
+
+
 def _schedule_wake(conn, cfg, decision, now, duties) -> dict:
     """Schedule (duty) wake: a fresh iTerm window per duty (attention hygiene —
     no roaming context, no 碎碎念). Not the resident session and not resumed;
     cortex ends it itself when the duty is done. A quiet say() requests
-    attention on spawn. Budget/night-exempt (schedule pierces the gates)."""
+    attention on spawn. Budget/night-exempt (schedule pierces the gates).
+
+    The wakeup note (Wake/budget line) gives minimal orientation; the duty's
+    prompt_path (if set and readable) carries the actual task instructions and
+    is appended after it — schedule wakes are pure-work windows, so the duty
+    prompt is the main payload. Missing/unreadable prompt file -> generic note
+    only, logged, never crashes."""
     from cortex import window
 
     home = str(config.cortex_home(cfg))
@@ -147,6 +168,12 @@ def _schedule_wake(conn, cfg, decision, now, duties) -> dict:
         name = duty.get("name") or "duty"
         note = assemble_bulletin(conn, cfg, now, decision=decision,
                                  fresh=False, wake_kind="schedule")
+        duty_prompt = _duty_prompt(duty)
+        if duty.get("prompt_path") and duty_prompt is None:
+            _audit_wake(conn, wake_id_of(now),
+                        f"schedule duty prompt_path unreadable: {name}")
+        if duty_prompt:
+            note = f"{note}\n\n{duty_prompt}"
         try:
             sid = window.spawn_fresh(cfg)
             window.inject_note(cfg, note, sid=sid)
