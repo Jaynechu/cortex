@@ -239,6 +239,7 @@ def test_window_rotated_flag_path(monkeypatch, rot_cfg):
     wake_state.set_rotated(rot_cfg)
     monkeypatch.setattr(window, "is_running", lambda: True)
     monkeypatch.setattr(window, "_session_alive", lambda sid: True)
+    monkeypatch.setattr(window, "find_claude_pid", lambda cfg: 4242)
     monkeypatch.setattr(transcript, "newest", lambda cfg: None)
     assert wake._window_rotated(rot_cfg) is True
     # flag consumed (read-and-clear): a second check without a new signal is False
@@ -251,6 +252,7 @@ def test_window_rotated_transcript_diff_path(monkeypatch, rot_cfg):
     wake_state.update(rot_cfg, transcript="/t/old.jsonl")
     monkeypatch.setattr(window, "is_running", lambda: True)
     monkeypatch.setattr(window, "_session_alive", lambda sid: True)
+    monkeypatch.setattr(window, "find_claude_pid", lambda cfg: 4242)
     monkeypatch.setattr(transcript, "newest", lambda cfg: Path("/t/new.jsonl"))
     assert wake._window_rotated(rot_cfg) is True
 
@@ -263,6 +265,17 @@ def test_window_rotated_dead_window_is_fresh(monkeypatch, rot_cfg):
     assert wake._window_rotated(rot_cfg) is True
 
 
+def test_window_rotated_claude_dead_is_fresh(monkeypatch, rot_cfg):
+    """Session exists but its `claude` process died (SIGINT/crash) -> bare
+    shell -> treated as fresh so ensure_window's relaunch gets the handoff."""
+    from cortex import wake_state, window
+    wake_state.set_session_id(rot_cfg, "sid-1")
+    monkeypatch.setattr(window, "is_running", lambda: True)
+    monkeypatch.setattr(window, "_session_alive", lambda sid: True)
+    monkeypatch.setattr(window, "find_claude_pid", lambda cfg: None)
+    assert wake._window_rotated(rot_cfg) is True
+
+
 def test_window_unrotated_resume_stays_non_fresh(monkeypatch, rot_cfg):
     """Plain wake into a live, un-rotated window: same transcript, no flag ->
     NOT fresh (no 碎碎念; replay continuity lives in the window's own context)."""
@@ -271,6 +284,7 @@ def test_window_unrotated_resume_stays_non_fresh(monkeypatch, rot_cfg):
     wake_state.update(rot_cfg, transcript="/t/same.jsonl")
     monkeypatch.setattr(window, "is_running", lambda: True)
     monkeypatch.setattr(window, "_session_alive", lambda sid: True)
+    monkeypatch.setattr(window, "find_claude_pid", lambda cfg: 4242)
     monkeypatch.setattr(transcript, "newest", lambda cfg: Path("/t/same.jsonl"))
     assert wake._window_rotated(rot_cfg) is False
 

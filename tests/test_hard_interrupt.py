@@ -194,3 +194,66 @@ def test_verify_hard_interrupt_no_transcript_skips(cfg, monkeypatch):
     note = watchdog._verify_esc_or_hard_interrupt(cfg, grace_sec=5, trigger="fuse")
     assert note is None
     assert called == []
+
+
+# --- ensure_window: session-alive-but-claude-dead relaunch ---------------------
+
+def test_ensure_window_reuses_when_session_and_claude_both_alive(cfg, monkeypatch):
+    monkeypatch.setattr(window.wake_state, "get_session_id", lambda c: "SID-1")
+    monkeypatch.setattr(window, "is_running", lambda: True)
+    monkeypatch.setattr(window, "_session_alive", lambda sid: True)
+    monkeypatch.setattr(window, "find_claude_pid", lambda c: 4242)
+    called = []
+    monkeypatch.setattr(window, "_relaunch", lambda sid, c: called.append(sid))
+    monkeypatch.setattr(window, "_spawn", lambda c: (_ for _ in ()).throw(
+        AssertionError("must not respawn when claude is alive")))
+
+    assert window.ensure_window(cfg) == "SID-1"
+    assert called == []
+
+
+def test_ensure_window_relaunches_when_session_alive_claude_dead(cfg, monkeypatch):
+    """Session exists (bare shell) but claude died -> relaunch in place, same sid,
+    no respawn."""
+    monkeypatch.setattr(window.wake_state, "get_session_id", lambda c: "SID-1")
+    monkeypatch.setattr(window, "is_running", lambda: True)
+    monkeypatch.setattr(window, "_session_alive", lambda sid: True)
+    monkeypatch.setattr(window, "find_claude_pid", lambda c: None)
+    relaunched = []
+    monkeypatch.setattr(window, "_relaunch", lambda sid, c: relaunched.append(sid))
+    monkeypatch.setattr(window, "_spawn", lambda c: (_ for _ in ()).throw(
+        AssertionError("must not respawn when the session itself is alive")))
+
+    assert window.ensure_window(cfg) == "SID-1"
+    assert relaunched == ["SID-1"]
+
+
+def test_ensure_window_respawns_when_session_dead(cfg, monkeypatch):
+    """Both session and claude gone -> respawn a brand-new window."""
+    monkeypatch.setattr(window.wake_state, "get_session_id", lambda c: "SID-OLD")
+    monkeypatch.setattr(window, "is_running", lambda: True)
+    monkeypatch.setattr(window, "_session_alive", lambda sid: False)
+    monkeypatch.setattr(window, "_spawn", lambda c: "SID-NEW")
+    monkeypatch.setattr(window, "_wait_ready", lambda sid, c: None)
+    saved = []
+    monkeypatch.setattr(window.wake_state, "set_session_id",
+                         lambda c, sid: saved.append(sid))
+
+    assert window.ensure_window(cfg) == "SID-NEW"
+    assert saved == ["SID-NEW"]
+
+
+def test_relaunch_types_launch_command_and_waits_ready(cfg, monkeypatch):
+    typed = []
+    entered = []
+    waited = []
+    monkeypatch.setattr(window, "_type", lambda sid, text: typed.append((sid, text)))
+    monkeypatch.setattr(window, "_enter", lambda sid: entered.append(sid))
+    monkeypatch.setattr(window, "_wait_ready", lambda sid, c: waited.append(sid))
+    monkeypatch.setattr(window.time, "sleep", lambda s: None)
+
+    window._relaunch("SID-1", cfg)
+
+    assert typed == [("SID-1", window.launch_command(cfg))]
+    assert entered == ["SID-1"]
+    assert waited == ["SID-1"]

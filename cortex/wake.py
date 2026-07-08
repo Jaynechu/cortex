@@ -196,7 +196,12 @@ def _window_rotated(cfg) -> bool:
     newest transcript differs from the one recorded at set_awake; a respawned or
     first-ever window has no recorded hint. The rotate flag (set by lie_down when
     it types /clear) is the belt-and-braces path for the crash/respawn case where
-    the transcript may not have rolled yet. Either signal -> rotated."""
+    the transcript may not have rolled yet. A session that exists but whose
+    `claude` process died (SIGINT/crash/manual ctrl-C -> bare shell) is caught
+    here too: ensure_window relaunches it AFTER this check runs, so the
+    transcript diff alone would still see the stale (dead) transcript at this
+    point -- checked directly instead of relying on that diff. Either signal ->
+    rotated."""
     from cortex import transcript, wake_state, window
 
     if wake_state.take_rotated(cfg):
@@ -204,6 +209,8 @@ def _window_rotated(cfg) -> bool:
     sid = wake_state.get_session_id(cfg)
     if not sid or not window.is_running() or not window._session_alive(sid):
         return True  # window died / never existed -> respawn is a fresh brain
+    if window.find_claude_pid(cfg) is None:
+        return True  # session alive but claude dead -> ensure_window relaunches
     prev = wake_state.load(cfg).get("transcript")
     cur = transcript.newest(cfg)
     cur = str(cur) if cur else None

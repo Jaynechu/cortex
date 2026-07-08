@@ -145,14 +145,33 @@ end tell
 
 def ensure_window(cfg: dict) -> str:
     """Return the live cortex session id, spawning the window if iTerm is not
-    running or the persisted session is gone/dead."""
+    running or the persisted session is gone/dead. A session that still exists
+    but whose `claude` process died (SIGINT/crash/manual ctrl-C leaves a bare
+    shell) is relaunched in place rather than respawned — cheaper, keeps the
+    window/geometry, and the shell is otherwise idle so typing the launch
+    command is safe. Either path is a new brain; wake.py's _window_rotated
+    detects both cases itself (session-dead / claude-dead) BEFORE this runs,
+    so no rotate flag is set here (this fn also fires mid-wake for the
+    watchdog wrap nudge, where setting it would wrongly mark the NEXT wake)."""
     sid = wake_state.get_session_id(cfg)
     if sid and is_running() and _session_alive(sid):
+        if find_claude_pid(cfg) is not None:
+            return sid
+        _relaunch(sid, cfg)
         return sid
     sid = _spawn(cfg)
     wake_state.set_session_id(cfg, sid)
     _wait_ready(sid, cfg)  # let the TUI finish booting before the first inject
     return sid
+
+
+def _relaunch(sid: str, cfg: dict) -> None:
+    """Type the launch command into a session sitting at a bare shell (its
+    `claude` process died) and wait for the TUI to come back up."""
+    _type(sid, launch_command(cfg))
+    time.sleep(_SUBMIT_DELAY_S)
+    _enter(sid)
+    _wait_ready(sid, cfg)
 
 
 def spawn_fresh(cfg: dict) -> str:
