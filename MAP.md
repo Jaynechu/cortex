@@ -41,7 +41,7 @@ Pure decision core — no I/O, no wall-clock; `now`/`rng` injected.
 ## 4. Wake runner (`wake.py`)
 
 run_wake: daily rebirth (session_date≠today) → archive day_log → new_day → persist date/None sid BEFORE call (retry-safe). symlinks.ensure_all every wake. assemble_bulletin → call_marrow_cortex (subprocess, inner timeout 600s config, outer=inner+30s). After: save sid+date → day_log.update.
-CLI: --print-bulletin | --force (bypass gates).
+CLI: --print-note | --force (bypass gates).
 Marrow side (`llm.py:call_cortex`): NO isolation (full persona/rules/MCP/agents), MARROW_CORTEX=1, bypassPermissions, --resume. Tier top (opus).
 
 ## 5. day_log.md v2 (`day_log.py`)

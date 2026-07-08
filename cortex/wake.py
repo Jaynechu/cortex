@@ -251,15 +251,15 @@ def run_wake(
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Manual cortex wake entry point (supervised)")
     parser.add_argument("--force", action="store_true", help="bypass pacemaker gates, wake now")
-    parser.add_argument("--print-bulletin", action="store_true",
-                         help="assemble + print the real bulletin only, no marrow call")
+    parser.add_argument("--print-note", action="store_true",
+                         help="assemble + print the real wakeup note only, no marrow call")
     args = parser.parse_args(argv)
 
     cfg = config.load()
     conn = db.connect(cfg)
     try:
         now = _now(cfg)
-        if args.print_bulletin:
+        if args.print_note:
             text = assemble_bulletin(conn, cfg, now)
             print(text)
             print(f"\n[{len(text)} chars]", file=sys.stderr)

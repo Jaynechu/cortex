@@ -14,7 +14,8 @@ import sys
 import time
 from datetime import datetime, timezone
 
-from cortex import config, transcript, wake_state, window
+from cortex import config, db, transcript, wake_state, window
+from cortex.pacemaker import integration
 
 _WRAP_LINE = "写碎碎念收尾躺下"
 
@@ -62,6 +63,13 @@ def run(cfg: dict) -> int:
         silent_min = (time.time() - mt) / 60.0 if mt else 0.0
         tokens = transcript.window_tokens(cfg)
         run_min = _elapsed_min(st.get("awake_since"))
+
+        # Publish the live token count for the next wake's Budget line.
+        conn = db.connect(cfg)
+        try:
+            integration.store_window_tokens(conn, tokens)
+        finally:
+            conn.close()
 
         if fuse and tokens >= fuse:
             window.send_esc(cfg)

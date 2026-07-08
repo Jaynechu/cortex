@@ -165,3 +165,21 @@ def test_lie_down_records_tokens(cfg):
     conn.close()
     assert row["tokens"] == 123 and row["force_slept"] == "timeout"
     assert wake_state.is_awake(cfg) is False  # marker cleared
+
+
+def test_store_window_tokens_reaches_budget_line(cfg):
+    """store_window_tokens publishes to ct_pacemaker_state; bulletin reads it back
+    (Budget line 'window Xk'). Survives lie_down's own floor-redraw save_state."""
+    from cortex import bulletin
+    from cortex.pacemaker import integration
+
+    conn = db.connect(cfg)
+    try:
+        integration.store_window_tokens(conn, 88_000)
+        assert bulletin._window_tokens(conn) == 88_000
+        # a later floor-redraw save must NOT wipe it out of order
+        integration.lie_down(conn, cfg)
+        integration.store_window_tokens(conn, 90_000)
+        assert bulletin._window_tokens(conn) == 90_000
+    finally:
+        conn.close()

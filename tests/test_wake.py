@@ -54,7 +54,7 @@ class FakeCaller:
 def test_assemble_bulletin_real_data(marrow_conn, wcfg):
     text = wake.assemble_bulletin(marrow_conn, wcfg, DAY1)
     assert "Now:" in text
-    assert "Trigger: none" in text
+    assert "Wake:" in text  # new note format leads with the Wake (trigger) line
     assert len(text) < 1000
 
 
@@ -215,11 +215,11 @@ def test_token_cap_breach_forces_fresh_no_rearchive(marrow_conn, wcfg):
     assert not (Path(wcfg["paths"]["day_log_archive_dir"]) / "2026-07-03.md").exists()
 
 
-def test_main_print_bulletin_no_marrow_call(monkeypatch, marrow_conn, wcfg, capsys):
+def test_main_print_note_no_marrow_call(monkeypatch, marrow_conn, wcfg, capsys):
     monkeypatch.setattr(wake.config, "load", lambda: wcfg)
     monkeypatch.setattr(wake.db, "connect", lambda cfg: marrow_conn)
 
-    rc = wake.main(["--print-bulletin"])
+    rc = wake.main(["--print-note"])
 
     assert rc == 0
     out = capsys.readouterr().out

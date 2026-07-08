@@ -81,7 +81,10 @@ def lie_down(cfg: dict, force_slept: str | None = None) -> dict:
         state = wake_state.load(cfg)
         tokens = _record_tokens(conn, cfg, state, force_slept)
         cleared = _clear_due_self_schedule(cfg)
-        integration.lie_down(conn, cfg)  # floor redraw from now
+        integration.lie_down(conn, cfg)  # floor redraw from now (rewrites state)
+        # Publish AFTER the floor redraw's save_state (which drops the key), so the
+        # next wake's Budget line sees this wake's final window-token count.
+        integration.store_window_tokens(conn, tokens)
         _kill_watchdog(cfg)
         rotate = int(cfg["wake"].get("rotate", {}).get("threshold_tokens", 100_000))
         rotated = False

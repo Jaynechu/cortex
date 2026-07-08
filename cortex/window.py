@@ -109,6 +109,10 @@ def launch_command(cfg: dict) -> str:
     eff = window_effort(cfg)
     if eff:
         flags += f" --effort {eff}"
+    # Skip the workspace-trust dialog so the injected note lands (a fresh dir
+    # otherwise blocks on the trust prompt). Mirrors marrow's headless call.
+    if cfg["wake"].get("skip_permissions", True):
+        flags += " --dangerously-skip-permissions"
     return f"cd {home} && MARROW_CORTEX=1 MARROW_CHANNEL=ct {cmd}{flags}"
 
 

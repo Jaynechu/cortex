@@ -62,6 +62,8 @@ launch_command = "claude"      # command run in the window (env markers prepende
 window_model = "opus"          # explicit --model for every cortex window; never
                                # inherit the system default. Not a 1M-context variant.
 window_effort = ""             # --effort (low|medium|high|xhigh|max); "" = omit flag
+skip_permissions = true        # add --dangerously-skip-permissions so a fresh dir's
+                               # trust dialog never blocks the injected note
 wrap_line = "写碎碎念收尾躺下"   # watchdog self-wrap-up nudge (judgement a)
 ready_marker = "accept edits"  # TUI footer text signalling claude is ready for input
 ready_timeout_sec = 30         # max wait for readiness after a fresh spawn

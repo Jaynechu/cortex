@@ -113,6 +113,24 @@ def load_state(conn: sqlite3.Connection) -> PacemakerState:
     return _state_from_json(row["state"]) if row else PacemakerState()
 
 
+def store_window_tokens(conn: sqlite3.Connection, tokens: int | None) -> None:
+    """Stash the live window-token count on the ct_pacemaker_state JSON so the
+    wakeup note's Budget line can read it (bulletin._window_tokens). Merged into
+    the raw JSON (not the dataclass) so it survives independently of tick saves."""
+    row = conn.execute("SELECT state FROM ct_pacemaker_state WHERE id = 1").fetchone()
+    try:
+        obj = json.loads(row["state"]) if row else {}
+    except (ValueError, TypeError):
+        obj = {}
+    obj["window_tokens"] = int(tokens) if tokens else None
+    conn.execute(
+        "INSERT INTO ct_pacemaker_state (id, state, updated_at) VALUES (1, ?, ?)"
+        " ON CONFLICT(id) DO UPDATE SET state=excluded.state, updated_at=excluded.updated_at",
+        (json.dumps(obj), db.utcnow_iso()),
+    )
+    conn.commit()
+
+
 def save_state(conn: sqlite3.Connection, state: PacemakerState) -> None:
     conn.execute(
         "INSERT INTO ct_pacemaker_state (id, state, updated_at) VALUES (1, ?, ?)"
