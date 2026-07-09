@@ -67,8 +67,8 @@ def _verify_esc_or_hard_interrupt(cfg: dict, grace_sec: float, trigger: str) -> 
 
 
 _DEFAULT_FUSE_PROMPT = (
-    "Append to handoff.md now (format follow md), call lie_down(rotate=True) "
-    "when you done."
+    "Append your section to handoff.md now — follow the format and style of "
+    "the preceding sections. Call lie_down(rotate=True) when done."
 )
 
 
