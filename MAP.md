@@ -79,7 +79,7 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
 - Exposed as env-gated MCP tools in marrow daemon (MARROW_CORTEX=1), subprocess `-m cortex.<mod>`; also CLI mains for watchdog proxy use.
 - lie_down (lie_down.py:86-111): record tokens+net into ct_wake_log (sole writer of those columns; bare `except: pass` — known silent-drop finding) → clear due self_schedule entries → integration.lie_down floor redraw from now (explicit next_wake_min clamped, or dice) → publish net via store_window_tokens → kill watchdog (SIGTERM, skip if self) → optional set_rotated → clear_awake.
 - wait (wait.py:23-35): one-shot watchdog silence extension; cap wake.wait_max_per_wake (2) per wake; minutes clamped via triggers floor_min_min/floor_max_min (10/55 defaults — shared with the wake-window bounds, retuning one retunes both); writes deadline + bumps counter (two separate RMW writes).
-- say (say.py, window.py:476-483): sound + front resident window; --note flag accepted but ignored (CLI symmetry only).
+- say (say.py, window.py:476-483): sound + front resident window — urgent-only attention ping (marrow 4c6209a), everything else stays silent; --note flag accepted but ignored (CLI symmetry only).
 
 ## 6. Wakeup note (`note.py`)
 
