@@ -19,7 +19,7 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
 
 - Own repo/venv `~/CC-Lab/cortex/`; ct_ tables live on shared marrow DB (`~/.config/marrow/marrow.db`).
 - DB contract: journal_mode owned by marrow (DELETE, marrow/storage.py:399); cortex sets busy_timeout=30000 only (db.py:100). Comment-only contract, no runtime assert.
-- migrate() (8 CREATE IF NOT EXISTS + 3 guarded ALTERs on ct_wake_log: tokens/force_slept/net_tokens) runs on every connect; each tick process connects once (db.py:98-129).
+- migrate() (9 CREATE IF NOT EXISTS + 3 guarded ALTERs on ct_wake_log: tokens/force_slept/net_tokens) runs on every connect; each tick process connects once (db.py:98-129).
 - Config: TOML `~/.config/marrow/cortex.toml` (env CORTEX_CONFIG), tolerant deep-merge over _DEFAULTS; legacy [bulletin]→note; [[schedule]] passed raw (config.py:165-193).
 
 ## 2. Collectors (`collect_tick.py`, `collectors/`)
@@ -47,24 +47,25 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
 
 ## 4. Wake runner (`wake.py`)
 
-- run_wake (wake.py:281-382): schedule wakes short-circuit before resident/day_log; then daily rebirth (session_date≠today → archive intent, fresh session), symlinks.ensure_all, assemble_note, window path (cfg wake.mode='window' default AND real caller) else marrow subprocess.
+- run_wake (wake.py:281-382): schedule wakes short-circuit first (only when duties present AND mode='window' AND real caller, wake.py:313); then symlinks.ensure_all, assemble_note, window path (mode='window' AND real caller) else marrow subprocess. No date comparison in run_wake — freshness comes from the rotate flag (night_close sets it once/night; next-morning first wake respawns fresh = the rebirth).
+- WakeTimer latency probe always-on: wake_id + CORTEX_WAKE_ID / CORTEX_WAKE_TIMING_LOG env; marks tick_fire→gate_eval→symlinks→note→window_injected/wake_complete into wake_timing log; marrow subprocess shares origin via env (timing.py, wake.py:297-305).
 - Schedule path _schedule_wake (wake.py:155-187): per duty spawn_fresh (never resident, sid unpersisted) → inject_note(note + duty prompt_path) → say() ping → mark_schedule_fired; window failure audited + skipped.
-- Window path _window_wake (wake.py:240-268): write note file → respawn if _window_rotated (rotate flag | sid dead | claude pid gone | newest transcript ≠ recorded) → append WAKE line to signal log (resident's armed Monitor tails it) → _signal_landed polls transcript mtime 3s up to ear_timeout 90s → on miss: respawn + re-append once → set_awake(wake_log_id, transcript) + watchdog.spawn. Rotate assembles a second fresh note (wake_kind='rotate' → 碎碎念).
-- Headless fallback: window path returning None falls through to call_marrow_cortex — marrow venv subprocess, inner timeout marrow.call_timeout_s 600s, outer +30s margin, CORTEX_WAKE_ID/TIMING_LOG via env; non-zero rc or bad JSON tail → WakeError (wake.py:71-99, 349-350).
+- Window path _window_wake (wake.py:240-268): write note file → respawn if _window_rotated (rotate flag | sid dead | claude pid gone | newest transcript ≠ recorded) → append WAKE line to signal log (resident's armed Monitor tails it) → _signal_landed polls transcript mtime 3s up to ear_timeout 90s → on miss: respawn + re-append once → set_awake(wake_log_id, transcript) + watchdog.spawn. Rotate assembles a second note with fresh=True/wake_kind='rotate' — compat args today; the handoff (碎碎念) itself injects at marrow SessionStart, not via note.
+- Headless fallback: window path returning None falls through to call_marrow_cortex — marrow venv subprocess, inner timeout marrow.call_timeout_s 600s, outer +30s margin; non-zero rc or bad JSON tail → WakeError (wake.py:71-99, 349-350).
 - Token-cap breach (result.capped) → _force_fresh_next (clear sid keep date) + audit + day_log.update, no sid persist (wake.py:362-370).
 - _audit_wake best-effort inserts audit_log rows on shared DB, swallows all (wake.py:102-112). CLI: --force (bypass gates) | --print-note (wake.py:385-409).
 
 ### window.py — iTerm control
 
 - Focus discipline: say() is the sole allowed focus-taker (sound + bring-to-front, window.py:476-483). All typing paths wrap _frontmost_bid/_guard_focus (conditional: restores only if iTerm actually stole front, window.py:67-73). _spawn has internal save/restore (window.py:167-185). _relaunch (window.py:210-216) has no own guard but is only reachable via inject_note's guarded frame, and is unreached in production (sole caller passes explicit sid).
-- launch_command: `cd <cortex_home> && MARROW_CORTEX=1 MARROW_CHANNEL=ct claude --model <wake.window_model, default opus> [--effort] [--dangerously-skip-permissions, default true] [arm prompt]` (window.py:119-138). arm prompt from deploy/prompts/arm.md with {signal_log} substituted: arm a persistent Monitor tailing the signal log, lie_down, stay silent (window.py:106-116).
+- launch_command: `cd <cortex_home> && MARROW_CORTEX=1 MARROW_CHANNEL=ct claude --model <wake.window_model, default opus> [--effort] [--dangerously-skip-permissions, default true] [arm prompt]` (window.py:119-138). arm prompt via config.arm_prompt_path (default <cortex_home>/prompts/arm.md, live ~/.config/marrow/cortex/prompts/; repo template deploy/prompts/arm.md) with {signal_log} substituted: arm a persistent Monitor tailing the signal log, lie_down, stay silent (window.py:106-116).
 - _wait_ready polls session text for wake.ready_marker ('accept edits') up to 30s (window.py:284-293).
 - respawn = fresh-brain path (rotate/rebirth/ear-recovery): SIGTERM old claude, close session, _spawn, persist sid (window.py:236-254).
 - find_claude_pid: session tty → ps exact-match, fallback pgrep -x + cwd filter; 0 or >1 candidates → None, never guess (window.py:388-459). hard_interrupt = SIGINT on discovered pid only (window.py:462-473).
 
 ### wake_state.json (`wake_state.py`)
 
-- Keys: awake/awake_since/wake_log_id/transcript (cleared as a set), session id, wait_count (reset on set_awake), silence_wait_until (one-shot), rotated (read-and-clear via take_rotated).
+- Keys: awake/awake_since/wake_log_id/transcript (cleared as a set), session id, wait_count (reset on set_awake), silence_wait_until (one-shot), rotated (read-and-clear via take_rotated), night_wrap_key/night_rotated_key (once-per-night dedup, pacemaker_tick.py:38/47).
 - load tolerates missing/corrupt → {}; _save/update = whole-file read-modify-write, no lock, no atomic rename (wake_state.py:34-54 — confirmed cross-process lost-update window, see priority queue).
 
 ### watchdog (`watchdog.py`)
@@ -92,7 +93,7 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
 ## 7. transcript.py — token/liveness probe
 
 - _munge replicates CC cwd→projects dirname; transcript_dir overridable via paths.transcript_dir (transcript.py:14-26). newest() = latest-mtime top-level *.jsonl (subagent files live in subagents/ subdir, naturally excluded).
-- window_tokens = LAST usage line's input+cache_read+cache_creation+output → current context occupancy; drives rotate/fuse (transcript.py:42-64).
+- window_tokens = LAST usage line's input+cache_read+cache_creation+output → current context occupancy; drives watchdog fuse only (rotate is flag/liveness-based, not token) (transcript.py:42-64, watchdog.py:153).
 - net_tokens = SUM of cache_creation+output across session → real spend; drives budget gate + note (transcript.py:67-91).
 - Both return 0 silently on read errors; mtime() drives rotation detection + ear polling.
 
@@ -115,7 +116,7 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
 
 ## 10. Tests
 
-- 24 per-module test files under tests/; pure cores (pacemaker, day_log render, note, geofence cursor) well covered.
+- 22 per-module test files under tests/; pure cores (pacemaker, day_log render, note, geofence cursor) well covered.
 - Known gaps: install.py (untested entirely), dry_run schedule-dedup path, geofence same-minute-same-text dup, day_log concurrent write.
 
 ## 11. Status
