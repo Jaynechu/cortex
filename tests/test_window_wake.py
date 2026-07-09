@@ -349,9 +349,9 @@ def test_launch_command_no_arm_prompt_when_missing(cfg):
 
 # --- rotate = flag for respawn, no /clear typing ------------------------------
 
-def test_lie_down_over_rotate_sets_flag_no_typing(cfg, monkeypatch):
-    """Over the rotate line, lie_down flags a rotate (next wake respawns) and
-    does NOT type /clear (type_clear is gone). rotated=True in the result."""
+def test_lie_down_explicit_rotate_sets_flag_no_typing(cfg, monkeypatch):
+    """rotate=True flags a respawn for the next wake (session's explicit call)
+    and does NOT type /clear (type_clear is gone). rotated=True in the result."""
     from cortex import window
 
     # type_clear must not exist anymore
@@ -367,15 +367,36 @@ def test_lie_down_over_rotate_sets_flag_no_typing(cfg, monkeypatch):
 
     d = transcript.transcript_dir(cfg)
     d.mkdir(parents=True)
-    # occupancy over the default 100k rotate line
     (d / "s.jsonl").write_text(json.dumps({"type": "assistant", "message": {
         "usage": {"input_tokens": 120_000, "cache_read_input_tokens": 0,
                   "cache_creation_input_tokens": 0, "output_tokens": 500}}}))
     wake_state.set_awake(cfg, wid, str(d / "s.jsonl"))
 
-    r = lie_down.lie_down(cfg)
+    r = lie_down.lie_down(cfg, rotate=True)
     assert r["rotated"] is True
     assert wake_state.take_rotated(cfg) is True  # flag set for the next wake
+
+
+def test_lie_down_no_auto_rotate_over_line(cfg):
+    """A big window no longer auto-rotates on lie_down (rotate is explicit)."""
+    conn = db.connect(cfg)
+    conn.execute(
+        "INSERT INTO ct_wake_log (ts, wake, dry_run, explanation) VALUES (?,1,0,?)",
+        (db.utcnow_iso(), "norot"))
+    conn.commit()
+    wid = conn.execute("SELECT MAX(id) AS id FROM ct_wake_log").fetchone()["id"]
+    conn.close()
+
+    d = transcript.transcript_dir(cfg)
+    d.mkdir(parents=True)
+    (d / "s.jsonl").write_text(json.dumps({"type": "assistant", "message": {
+        "usage": {"input_tokens": 200_000, "cache_read_input_tokens": 0,
+                  "cache_creation_input_tokens": 0, "output_tokens": 500}}}))
+    wake_state.set_awake(cfg, wid, str(d / "s.jsonl"))
+
+    r = lie_down.lie_down(cfg)  # no rotate flag
+    assert r["rotated"] is False
+    assert wake_state.take_rotated(cfg) is False
 
 
 def test_lie_down_publishes_net_not_total(cfg):
