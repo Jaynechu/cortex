@@ -12,7 +12,7 @@ from pathlib import Path
 
 from cortex import config
 
-_AWAKE_KEYS = ("awake", "awake_since", "wake_log_id", "transcript")
+_AWAKE_KEYS = ("awake", "awake_since", "wake_log_id", "transcript", "silence_wait_until")
 
 
 def wake_state_path(cfg: dict) -> Path:
@@ -76,6 +76,35 @@ def clear_awake(cfg: dict) -> None:
     for k in _AWAKE_KEYS:
         d.pop(k, None)
     _save(cfg, d)
+
+
+def set_wait_until(cfg: dict, until_iso: str) -> None:
+    """Declare a one-shot silence window: the watchdog holds off its routine
+    timeout lie-down until this UTC instant (the model is e.g. waiting for the
+    user to come back). Cleared once the watchdog acts on it (take_wait_until)."""
+    update(cfg, silence_wait_until=until_iso)
+
+
+def get_wait_until(cfg: dict) -> datetime | None:
+    """Peek the declared silence deadline (UTC-aware) or None — the watchdog
+    reads this every poll: still-future = keep holding; past/absent = the
+    routine silent_max_min threshold applies. Non-destructive; the watchdog
+    calls clear_wait_until() once it acts, so the extension fires only once."""
+    raw = load(cfg).get("silence_wait_until")
+    if raw is None:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+
+
+def clear_wait_until(cfg: dict) -> None:
+    """Reset the silence window to default (no permanent extension)."""
+    d = load(cfg)
+    if d.pop("silence_wait_until", None) is not None:
+        _save(cfg, d)
 
 
 def set_rotated(cfg: dict) -> None:

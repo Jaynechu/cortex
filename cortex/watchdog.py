@@ -17,6 +17,7 @@ import os
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 
 from cortex import config, db, transcript, wake_state, window
 from cortex.pacemaker import integration
@@ -95,6 +96,14 @@ def run(cfg: dict) -> int:
             lie_down_mod.lie_down(cfg, force_slept="fuse" if not note else f"fuse {note}")
             return 0
         if silent_min >= silent_max:
+            # Model may declare a one-shot silence window (cortex.wait): hold the
+            # routine timeout until the deadline, then reset to default (fires
+            # once). The fuse above is never held.
+            wait_until = wake_state.get_wait_until(cfg)
+            if wait_until is not None and datetime.now(timezone.utc) < wait_until:
+                continue
+            if wait_until is not None:
+                wake_state.clear_wait_until(cfg)
             lie_down_mod.lie_down(cfg, force_slept="timeout")
             return 0
 

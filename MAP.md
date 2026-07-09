@@ -30,12 +30,10 @@ Registry COLLECTORS = {knowledgec, geofence, health}; `run_all` catches per-sour
 ## 3. Pacemaker (`pacemaker/`)
 
 Pure decision core — no I/O, no wall-clock; `now`/`rng` injected.
-- State (`core.py`): desire 4-float, expect_reply, next_floor_due_at, last_wake_at, last_lie_down_at, night_cap_key/count, cortex session fields (sid+date, opaque to tick).
-- Desire (`desire.py`): attachment/curiosity/worry/duty, base_rate-decay [0,1]. Attachment modulated: cal_busy→0; home+free+gap→2x; else 1x.
-- Triggers (`triggers.py`): event (always [] — unwired) · affect_flag · desire threshold · self_scheduled · floor (10-55min uniform from lie-down). Facts only, no pre-written motive. Collision: floor governs desire+floor only (desire held behind floor, accrues meanwhile); event/affect_flag(trigger)/self_scheduled(schedule) pierce anytime, trigger>schedule; coincident→one wake; plain floor silent when any other source fires.
-- Expect-reply (`expect_reply.py`): pending→check 30min→escalate tone+worry. Unwired (no outbound, C5).
-- Gates (`gates.py`): night mode 00-06 cap 1 (desire/floor/expect_reply consume cap; event/affect_flag/self_scheduled pierce) is the SOLE gate. No cooldown/daily-cap/token-budget/fatigue/active-suspend — spend protection = 150k per-wake fuse + wakeup note battery gauge.
-- Integration (`integration.py`): I/O owner. build_context: active_session (5min window), cal_busy/at_home (config defaults), affect_flag + self_schedule files. State = ct_pacemaker_state single-row JSON. run_tick→tick→save→ct_wake_log (always, even dry_run). lie_down redraws floor from lie-down time.
+- State (`core.py`): next_floor_due_at, last_wake_at, last_lie_down_at, night_cap_key/count, cortex session fields (sid+date, opaque to tick). Desire + expect_reply retired 07-09 (full retirement, no scoring/thresholds); legacy state keys ignored on load.
+- Triggers (`triggers.py`): event (always [] — unwired) · affect_flag · self_scheduled · schedule · floor (wake window from lie-down). Facts only, no pre-written motive. Collision: event/affect_flag(trigger)/self_scheduled+schedule pierce anytime, trigger>schedule; coincident→one wake; plain floor silent when any other source fires. reschedule_floor(minutes=None) = uniform dice draw; minutes=X = explicit choice clamped to [floor_min_min, floor_max_min]. clamp_window_minutes shared with cortex.wait.
+- Gates (`gates.py`): night mode 00-06 cap 1 (floor consumes cap; event/affect_flag/self_scheduled pierce via schedule only) + daily token budget. Spend protection = 150k per-wake fuse + wakeup note battery gauge.
+- Integration (`integration.py`): I/O owner. build_context: active_session (5min window), cal_busy/at_home (config defaults), affect_flag + self_schedule files. State = ct_pacemaker_state single-row JSON. run_tick→tick→save→ct_wake_log (always, even dry_run). lie_down(minutes=None) redraws the wake window from lie-down time — the next internal wake is chosen at lie-down (explicit minutes or dice).
 - Entry: `pacemaker_tick.py` (300s); wake.run_wake only when wake=true AND dry_run=false.
 
 ## 4. Wake runner (`wake.py`)
@@ -65,7 +63,8 @@ render sections: Now · Trigger · Last activity · Calendar "none" · Usage · 
 
 Config (`config.py`): TOML ~/.config/marrow/cortex.toml, deep-merge over _DEFAULTS.
 Symlinks (`symlinks.py`): day_log.md + wishlist.md → ~/Desktop/NY/db-pages. Creates wishlist if missing, refuses non-symlink clobber.
-lie_down / say: env-gated MCP tools in marrow daemon (subprocess `-m cortex.lie_down|say` from repo_root), registered only when MARROW_CORTEX set. Not slash commands.
+lie_down / wait / say: env-gated MCP tools in marrow daemon (subprocess `-m cortex.lie_down|wait|say` from repo_root), registered only when MARROW_CORTEX set. Not slash commands. lie_down(next_wake_min=None) picks the next internal wake (explicit minutes clamped to window, or dice). wait(minutes) declares a one-shot watchdog silence window (clamped to window max); watchdog holds its routine timeout until the deadline then resets to silent_max_min default (fuse untouched).
+Watchdog (`watchdog.py`): per-wake, killed at lie_down. Routine end = transcript mtime idle ≥ silent_max_min → proxy lie_down(timeout), unless a cortex.wait deadline is still future. Fuse = window tokens ≥ 150k → esc + proxy lie_down(fuse), never held.
 Install (`install.py`): 2 plists (com.cortex.collect-tick, com.cortex.pacemaker-tick), template tokens from config.
 Safety: pacemaker.dry_run=true default — flip at C5.
 

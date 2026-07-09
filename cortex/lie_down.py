@@ -83,13 +83,17 @@ def _record_tokens(conn, cfg: dict, state: dict, force_slept: str | None) -> tup
     return tokens, net
 
 
-def lie_down(cfg: dict, force_slept: str | None = None, rotate: bool = False) -> dict:
+def lie_down(cfg: dict, force_slept: str | None = None, rotate: bool = False,
+             next_wake_min: float | None = None) -> dict:
+    """End the current wake. `next_wake_min` picks the next internal wake:
+    an explicit minutes-from-now (clamped to the wake window), or None = a
+    uniform "dice" draw within the window (preserves prior behaviour)."""
     conn = db.connect(cfg)
     try:
         state = wake_state.load(cfg)
         tokens, net = _record_tokens(conn, cfg, state, force_slept)
         cleared = _clear_due_self_schedule(cfg)
-        integration.lie_down(conn, cfg)  # floor redraw from now (rewrites state)
+        integration.lie_down(conn, cfg, minutes=next_wake_min)  # wake redraw from now
         # Publish AFTER the floor redraw's save_state (which drops the key), so the
         # next wake's Plan Used line sees this wake's NET spend (cache-miss rewrite
         # + output — not the full context occupancy `tokens` used for rotate/fuse).
@@ -113,9 +117,13 @@ def main(argv: list[str] | None = None) -> int:
                         help="mark a proxy lie-down (timeout|fuse|stale)")
     parser.add_argument("--rotate", action="store_true",
                         help="respawn a fresh window on the next wake")
+    parser.add_argument("--next-wake-min", type=float, default=None,
+                        help="minutes until the next internal wake (clamped to "
+                             "the wake window); omit for a uniform dice draw")
     args = parser.parse_args(argv)
     cfg = config.load()
-    lie_down(cfg, force_slept=args.force_slept, rotate=args.rotate)
+    lie_down(cfg, force_slept=args.force_slept, rotate=args.rotate,
+             next_wake_min=args.next_wake_min)
     return 0
 
 
