@@ -176,4 +176,4 @@ handoff_title = "阿屿の碎碎念"   # title of the handoff-note section
 replay_title = "最近对话回放"     # title of the conversation-replay section
 handoff_wake_kinds = ["rebirth", "rotate"]  # wake kinds that get the handoff (fresh window only)
 cadence_bin = ""             # cadence CLI for cal/rem lines; empty = packaged default path
-turn_end_text = "NOTE: choose wait time or next wake time at the end of each turn. Wait: empty (default) /  wait(N) [N=11-55]; sleep: lie_down(next_wake_min=N, or omit = dice). Pls leave empty during casual chat with user."  # one-line reminder appended at the end of every rendered note; "" omits it
+turn_end_text = "NOTE: choose wait time or next wake time at the end of each turn. Wait: empty (default) / wait(N) [N=11-55]; sleep: lie_down(next_wake_min=N, or omit = dice). Pls leave empty during casual chat with user."  # one-line reminder appended at the end of every rendered note; "" omits it

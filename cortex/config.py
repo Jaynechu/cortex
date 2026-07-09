@@ -125,7 +125,7 @@ _DEFAULTS: dict[str, Any] = {
         # note. "" omits it.
         "turn_end_text":
             "NOTE: choose wait time or next wake time at the end of each turn. "
-            "Wait: empty (default) /  wait(N) [N=11-55]; sleep: "
+            "Wait: empty (default) / wait(N) [N=11-55]; sleep: "
             "lie_down(next_wake_min=N, or omit = dice). Pls leave empty during "
             "casual chat with user.",
     },

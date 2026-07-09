@@ -79,7 +79,7 @@ def test_render_turn_end_line_appears_every_render(cfg):
     text = note.render(cfg, NOW, {"wake_parts": ["wander"]})
     assert text.rstrip().endswith(
         "NOTE: choose wait time or next wake time at the end of each turn. "
-        "Wait: empty (default) /  wait(N) [N=11-55]; sleep: "
+        "Wait: empty (default) / wait(N) [N=11-55]; sleep: "
         "lie_down(next_wake_min=N, or omit = dice). Pls leave empty during "
         "casual chat with user.")
 
