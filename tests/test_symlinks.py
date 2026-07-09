@@ -21,16 +21,16 @@ def scfg(tmp_path):
 
 def test_ensure_wishlist_creates_minimal_header(tmp_path):
     path = tmp_path / "wishlist.md"
-    symlinks.ensure_wishlist(path)
+    symlinks.ensure_wishlist(path, "# Wishlist\n")
     assert path.exists()
     assert "# Wishlist" in path.read_text()
 
 
 def test_ensure_wishlist_never_overwrites_existing(tmp_path):
     path = tmp_path / "wishlist.md"
-    path.write_text("her own content\n")
-    symlinks.ensure_wishlist(path)
-    assert path.read_text() == "her own content\n"
+    path.write_text("existing content\n")
+    symlinks.ensure_wishlist(path, "# Wishlist\n")
+    assert path.read_text() == "existing content\n"
 
 
 def test_ensure_all_creates_both_symlinks(scfg, tmp_path):

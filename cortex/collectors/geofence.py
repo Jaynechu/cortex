@@ -10,10 +10,10 @@ ASSUMPTION (unverified against multi-day data): each collector run reads
 only newly-appended bytes since the last run (byte-offset cursor per
 file), and stamps those new lines with the local date at ingest time.
 This is accurate because the Shortcut write latency is near-zero
-(dependency #3 verified ~0s in docs/archives/mw-cortex-v1.md:134), so a
+(verified ~0s), so a
 line only sits unread across a collector tick, not across days -- unless
 the collector is down for a full day, in which case backlog lines would
-be mis-dated to the catch-up day. Flag to Lumi if that gap matters.
+be mis-dated to the catch-up day. Flag to the user if that gap matters.
 """
 from __future__ import annotations
 

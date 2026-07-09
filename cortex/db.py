@@ -7,6 +7,7 @@ strings, never naive datetime.now().
 from __future__ import annotations
 
 import sqlite3
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -99,6 +100,16 @@ def connect_path(path: Path) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path))
     conn.execute("PRAGMA busy_timeout=30000")
     conn.row_factory = sqlite3.Row
+    # Journal mode is owned by marrow (DELETE convention). Cortex must never set
+    # it; a WAL-mode DB here means marrow's contract broke. Warn, never raise —
+    # a brand-new (unjournalled) DB reports 'memory'/'delete' and must survive.
+    mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+    if mode.lower() == "wal":
+        print(
+            f"cortex.db: WARNING journal_mode={mode!r} on {path} — "
+            "expected 'delete' (owned by marrow, see marrow/storage.py)",
+            file=sys.stderr,
+        )
     migrate(conn)
     return conn
 

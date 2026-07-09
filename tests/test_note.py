@@ -243,17 +243,17 @@ def test_replay_excludes_cortex_self_talk(marrow_conn, cfg):
     marrow_conn.executemany(
         "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
         [
-            ("s", "2026-07-08T03:00:00+00:00", "user", "念念说的话", "cli"),
+            ("s", "2026-07-08T03:00:00+00:00", "user", "user message", "cli"),
             ("s", "2026-07-08T03:01:00+00:00", "assistant", "cortex自言自语", "ct"),
             ("s", "2026-07-08T03:02:00+00:00", "user", "cortex醒来读note", "ct"),
-            ("s", "2026-07-08T03:03:00+00:00", "assistant", "阿屿回复", "cli"),
+            ("s", "2026-07-08T03:03:00+00:00", "assistant", "assistant reply", "cli"),
         ],
     )
     marrow_conn.commit()
     ev = note._replay_events(marrow_conn, cfg, 6, 300)
     # ct channel (cortex wake monologue) excluded; real cli exchange kept.
     assert [(e["channel"], e["content"]) for e in ev] == [
-        ("cli", "念念说的话"), ("cli", "阿屿回复")]
+        ("cli", "user message"), ("cli", "assistant reply")]
 
 
 def test_replay_strips_media_markers(marrow_conn, cfg):

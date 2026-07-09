@@ -19,8 +19,8 @@ ONLY — the HTML-comment zone marker IDs below (TODAY_START/END,
 REMINDERS_START/END) and the python constant names are unchanged on
 purpose, so existing day_log.md files and any marker-based reader survive
 the rename untouched.
-Zone Stellan's Notes — cortex free text; everything after the marker is
-  carried over byte-for-byte on re-render, so her edits are never clobbered.
+Zone Notes — cortex free text; everything after the marker is
+  carried over byte-for-byte on re-render, so hand edits are never clobbered.
 
 Zone boundaries are stable HTML comment markers so the file survives
 round-trips even if the surrounding prose changes.
@@ -55,7 +55,7 @@ DEFAULT_REMINDERS_BODY = (
     "(no reminder data collected yet)"
 )
 DEFAULT_TRACK_BODY = "## Track\n(pending category-bucket + sleep inference wiring)"
-DEFAULT_NOTES_BODY = "## Stellan's Notes\n"
+DEFAULT_NOTES_BODY = "## Notes\n"
 
 _HM_PREFIX = re.compile(r"^(\d{2}:\d{2})")
 

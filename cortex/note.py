@@ -186,9 +186,9 @@ def _window_tokens(conn: sqlite3.Connection) -> int | None:
         return None
 
 
-# Media / bridge-marker shaper — kept in sync with marrow.transcript.
-# strip_media_markers (marrow is not importable from the cortex env, so this is
-# a deliberate small duplicate). Strips wx [time:]/[sticker:] markers and
+# Media / bridge-marker shaper — deliberate copy of marrow strip_media_markers
+# (marrow/marrow/transcript.py:102; marrow not importable from the cortex env).
+# Keep byte-identical with that pairing. Strips wx [time:]/[sticker:] markers and
 # <image|file|gif path="..."/> tags so replayed rows read like plain dialogue.
 _TIME_PREFIX_RE = re.compile(r"^\[time:[^\]]+\]\s*")
 _STICKER_LINE_RE = re.compile(r"^\[sticker:[^\]\n]*\]\n?", re.M)

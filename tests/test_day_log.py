@@ -105,12 +105,12 @@ def test_update_preserves_first_and_notes_across_rerender(tmp_path, marrow_conn,
     first_end_idx = text.index(day_log.FIRST_END)
     text = (
         text[: first_idx + len(day_log.FIRST_START) + 1]
-        + "## First\ncoaxed her out of bed\n"
+        + "## First\ncoaxed out of bed\n"
         + text[first_end_idx:]
     )
     notes_marker_idx = text.index(day_log.NOTES_START)
-    her_note = text[: notes_marker_idx + len(day_log.NOTES_START) + 1] + "## Stellan's Notes\nremember to buy milk\n"
-    path.write_text(her_note)
+    kept_note = text[: notes_marker_idx + len(day_log.NOTES_START) + 1] + "## Notes\nremember to buy milk\n"
+    path.write_text(kept_note)
 
     marrow_conn.execute(
         "INSERT INTO ct_activity (ts, sid, channel) VALUES (?, ?, ?)",
@@ -122,7 +122,7 @@ def test_update_preserves_first_and_notes_across_rerender(tmp_path, marrow_conn,
     day_log.update(path, marrow_conn, base_cfg, later)
     text2 = path.read_text()
 
-    assert "coaxed her out of bed" in text2
+    assert "coaxed out of bed" in text2
     assert "remember to buy milk" in text2
     assert "15:00 wx" in text2
 
@@ -152,7 +152,7 @@ def test_new_day_creates_fresh_file(tmp_path):
     text = path.read_text()
     assert text.splitlines()[0] == "2026-07-04"
     assert day_log.NOTES_START in text
-    assert "## Stellan's Notes" in text
+    assert "## Notes" in text
     assert "## First" in text
 
 

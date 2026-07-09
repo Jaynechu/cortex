@@ -19,7 +19,7 @@ health_export = ""
 affect_flag_file = ""
 # Pacemaker self-schedule queue (JSON list of {due_at}). Default: ~/.config/marrow/cortex/self_schedule.json
 self_schedule_file = ""
-# Handoff note the next fresh window reads (阿屿の碎碎念). Default: ~/.config/marrow/cortex/handoff.md
+# Handoff note the next fresh window reads (assistant's 碎碎念). Default: ~/.config/marrow/cortex/handoff.md
 handoff_file = ""
 # Cortex session cwd (own CLAUDE.md lives here). Default: ~/.config/marrow/cortex
 cortex_home = ""
@@ -178,8 +178,10 @@ replay_event_chars = 300     # per-event truncation in the replay section
 replay_exclude_channels = ["ct"]  # channels excluded from replay (ct = cortex self-talk); [] to include all
 daily_budget = 1000000       # daily wake-token (NET spend) budget the "today X/Y" line renders against; must match gates.daily_budget.tokens
 pending_window_min = 15      # surface a self-schedule entry only when due within this window
-handoff_title = "阿屿の碎碎念"   # title of the handoff-note section
+handoff_title = "碎碎念"   # title of the handoff-note section (customisable display name)
 replay_title = "最近对话回放"     # title of the conversation-replay section
 handoff_wake_kinds = ["rotate"]  # wake kinds that get the handoff (fresh window only)
 cadence_bin = ""             # cadence CLI for cal/rem lines; empty = packaged default path
 turn_end_text = "NOTE: choose wait time or next wake time at the end of each turn. Wait: empty (default) / wait(N) [N=11-55]; sleep: lie_down(next_wake_min=N, or omit = dice). Pls leave empty during casual chat with user."  # one-line reminder appended at the end of every rendered note; "" omits it
+# Header written into a freshly-created wishlist.md (append-only; never overwritten). Display text — customise freely.
+wishlist_header = "# Wishlist\n\n(owed treats / wants / self-rewards — append-only)\n"

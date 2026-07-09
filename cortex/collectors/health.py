@@ -1,7 +1,6 @@
 """Health export ingest — tolerant skeleton.
 
-Fields are UNKNOWN yet (waits on Lumi's export shortcut/app, see
-docs/plans/ct-cortex-v1.md §Open). Philosophy: show what exists. Every
+Fields are UNKNOWN yet (waits on the user's export shortcut/app). Philosophy: show what exists. Every
 top-level key in the JSON export becomes one raw row, date-stamped by the
 export's own date (or file mtime if the export has none), so a fresh
 session can tell a stale export from a fresh one. No field-specific

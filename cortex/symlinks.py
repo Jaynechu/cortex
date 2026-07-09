@@ -8,16 +8,14 @@ from pathlib import Path
 
 from cortex import config
 
-WISHLIST_HEADER = "# Wishlist\n\n(owed treats / her wants / her self-rewards — append-only)\n"
 
-
-def ensure_wishlist(path: Path) -> None:
+def ensure_wishlist(path: Path, header: str) -> None:
     """Create wishlist.md with a minimal header if missing. Never overwrites
-    an existing file (pure md, one-way, her hand edits are the source of truth)."""
+    an existing file (pure md, one-way, hand edits are the source of truth)."""
     if path.exists():
         return
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(WISHLIST_HEADER)
+    path.write_text(header)
 
 
 def _ensure_symlink(source: Path, target: Path) -> None:
@@ -37,6 +35,6 @@ def ensure_all(cfg: dict) -> None:
     day_log_source = config.day_log_path(cfg)
     wishlist_source = config.wishlist_path(cfg)
 
-    ensure_wishlist(wishlist_source)
+    ensure_wishlist(wishlist_source, config.wishlist_header(cfg))
     _ensure_symlink(day_log_source, ny_dir / "day_log.md")
     _ensure_symlink(wishlist_source, ny_dir / "wishlist.md")

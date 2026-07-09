@@ -137,6 +137,10 @@ _DEFAULTS: dict[str, Any] = {
             "Wait: empty (default) / wait(N) [N=11-55]; sleep: "
             "lie_down(next_wake_min=N, or omit = dice). Pls leave empty during "
             "casual chat with user.",
+        # Header written into a freshly-created wishlist.md (append-only file,
+        # never overwritten). Display text — customise freely.
+        "wishlist_header":
+            "# Wishlist\n\n(owed treats / wants / self-rewards — append-only)\n",
     },
 }
 
@@ -254,6 +258,11 @@ def wishlist_path(cfg: dict) -> Path:
 def ny_db_pages_dir(cfg: dict) -> Path:
     raw = cfg["paths"].get("ny_db_pages") or ""
     return Path(raw).expanduser() if raw else DEFAULT_NY_DB_PAGES
+
+
+def wishlist_header(cfg: dict) -> str:
+    """Header written into a freshly-created wishlist.md. Display text; config-driven."""
+    return cfg.get("note", {}).get("wishlist_header") or _DEFAULTS["note"]["wishlist_header"]
 
 
 def wake_timing_log_path(cfg: dict) -> Path:
