@@ -1,8 +1,8 @@
 """cortex.lie_down — the command cortex runs to end a wake (the watchdog runs
 it as proxy). It: clears due self-schedule entries, redraws the floor, records
 this wake's token spend into ct_wake_log, kills the watchdog, flags a rotate
-(next wake respawns a fresh window) when the context window is large, then
-clears the awake marker.
+(next wake respawns a fresh window) when --rotate is passed, then clears the
+awake marker. Rotate is an explicit session decision, no auto token judgement.
 
 The interactive window returns control the moment a note is injected, so the
 wake is NOT over when pacemaker_tick exits — this command (or a proxy) is what
@@ -83,7 +83,7 @@ def _record_tokens(conn, cfg: dict, state: dict, force_slept: str | None) -> tup
     return tokens, net
 
 
-def lie_down(cfg: dict, force_slept: str | None = None) -> dict:
+def lie_down(cfg: dict, force_slept: str | None = None, rotate: bool = False) -> dict:
     conn = db.connect(cfg)
     try:
         state = wake_state.load(cfg)
@@ -91,20 +91,18 @@ def lie_down(cfg: dict, force_slept: str | None = None) -> dict:
         cleared = _clear_due_self_schedule(cfg)
         integration.lie_down(conn, cfg)  # floor redraw from now (rewrites state)
         # Publish AFTER the floor redraw's save_state (which drops the key), so the
-        # next wake's Budget line sees this wake's NET spend (cache-miss rewrite +
-        # output — not the full context occupancy `tokens` used for rotate/fuse).
+        # next wake's Plan Used line sees this wake's NET spend (cache-miss rewrite
+        # + output — not the full context occupancy `tokens` used for rotate/fuse).
         integration.store_window_tokens(conn, net)
         _kill_watchdog(cfg)
-        rotate = int(cfg["wake"].get("rotate", {}).get("threshold_tokens", 100_000))
-        rotated = False
-        if tokens and tokens >= rotate:
-            # No typing: flag it, and the NEXT pacemaker wake respawns a fresh
-            # window (SIGTERM claude + fresh spawn) instead of resuming the big one.
+        # Rotate is now an explicit session decision (the --rotate flag), not an
+        # auto token judgement — set it and the NEXT pacemaker wake respawns a
+        # fresh window (SIGTERM claude + fresh spawn) that reads the handoff.
+        if rotate:
             wake_state.set_rotated(cfg)
-            rotated = True
         wake_state.clear_awake(cfg)
         return {"tokens": tokens, "cleared_due": cleared,
-                "force_slept": force_slept, "rotated": rotated}
+                "force_slept": force_slept, "rotated": rotate}
     finally:
         conn.close()
 
@@ -113,11 +111,11 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="End the current cortex wake")
     parser.add_argument("--force-slept", default=None,
                         help="mark a proxy lie-down (timeout|fuse|stale)")
+    parser.add_argument("--rotate", action="store_true",
+                        help="respawn a fresh window on the next wake")
     args = parser.parse_args(argv)
     cfg = config.load()
-    r = lie_down(cfg, force_slept=args.force_slept)
-    print(f"lie_down tokens={r['tokens']} cleared_due={r['cleared_due']} "
-          f"rotated={r['rotated']} force_slept={r['force_slept']}")
+    lie_down(cfg, force_slept=args.force_slept, rotate=args.rotate)
     return 0
 
 

@@ -1,14 +1,13 @@
 """Wakeup note: the床头字条 (bedside note) handed to a cortex session on wake.
 
-gather() is the I/O layer — DB reads plus best-effort external facts (cadence
-CLI calendar/reminders, macOS frontmost app, handoff file). Every external
-source is a module-level helper wrapped in try/except so a missing tool or a
-locked screen omits its line rather than crashing the wake. render() is pure —
-no I/O, no DB — so it can be unit-tested with synthetic data.
+gather() is the I/O layer — DB reads plus a best-effort macOS frontmost-app
+probe. Every external source is wrapped in try/except so a failure omits its
+line rather than crashing the wake. render() is pure — no I/O, no DB — so it
+can be unit-tested with synthetic data.
 
-Language: English labels throughout; the only localized text is the handoff
-note content and the two section titles (both configurable — persona strings
-live in config, never hardcoded here).
+Layout: a header block (Wake / Now / Plan Used / Active), then `---`-separated
+blocks for pending self-schedule and Replay. The handoff (碎碎念) injects at
+SessionStart (marrow), not here. Cal/Rem lines retired (global inject pending).
 """
 from __future__ import annotations
 
@@ -22,10 +21,12 @@ from cortex import config
 from cortex.pacemaker.integration import parse_due_at
 
 # ct_rate_limit is a flat kv table (key, value, updated_at) the marrow-side
-# writer owns (parses rate_limit_event off the cortex claude stream). Keys used
-# here: five_hour_pct / five_hour_reset_at, seven_day_pct. Missing -> omitted.
+# collector owns (usage_snapshot). Keys read here: five_hour_pct /
+# five_hour_reset_at, seven_day_pct / seven_day_reset_at, today_net_tokens.
+# Any missing key -> that segment is omitted.
 _FIVE_HOUR = ("five_hour_pct", "five_hour_reset_at")
-_SEVEN_DAY = ("seven_day_pct", None)
+_SEVEN_DAY = ("seven_day_pct", "seven_day_reset_at")
+_TODAY_NET_KEY = "today_net_tokens"
 
 # A wake row younger than this many seconds is treated as *this* wake (the tick
 # logs it before the note is assembled), so "Last wake" reports the one before.
@@ -63,26 +64,26 @@ def _reason_kind_detail(reason) -> tuple[str, str, dict]:
 
 
 def _wake_parts(decision: dict | None) -> list[str]:
-    """Map decision reasons to display fragments (plan §wakeup note):
-    floor -> 巡回, self_scheduled -> Self-schedule(<intent>),
-    schedule -> Schedule(<name>). Unknown kinds fall back to their detail."""
+    """Map decision reasons to English display fragments (plan §wakeup note):
+    floor -> wander, self_scheduled -> self-scheduled(<intent>),
+    schedule -> scheduled(<name>). Unknown kinds fall back to their detail."""
     if not decision:
-        return ["巡回"]
+        return ["wander"]
     parts: list[str] = []
     for reason in decision.get("reasons", []) or []:
         kind, detail, facts = _reason_kind_detail(reason)
         if kind == "floor":
-            parts.append("巡回")
+            parts.append("wander")
         elif kind == "self_scheduled":
-            parts.append(f"Self-schedule({facts.get('intent') or detail})")
+            parts.append(f"self-scheduled({facts.get('intent') or detail})")
         elif kind == "schedule":
-            parts.append(f"Schedule({facts.get('name') or detail})")
+            parts.append(f"scheduled({facts.get('name') or detail})")
         elif detail:
             parts.append(detail)
     if parts:
         return parts
     explanation = decision.get("explanation")
-    return [explanation] if explanation else ["巡回"]
+    return [explanation] if explanation else ["wander"]
 
 
 # --------------------------------------------------------------------------- #
@@ -174,7 +175,8 @@ def _window_tokens(conn: sqlite3.Connection) -> int | None:
 
 def _replay_events(conn: sqlite3.Connection, cfg: dict, limit: int, per_chars: int) -> list[dict]:
     """Last `limit` user/assistant events (cross-session, chronological), each
-    tagged [channel HH:mm] and capped at per_chars. Excludes role='tl'."""
+    tagged [channel HH:mm] + role marker (N=user, Y=assistant) and capped at
+    per_chars. Excludes role='tl'."""
     if limit <= 0:
         return []
     try:
@@ -191,6 +193,7 @@ def _replay_events(conn: sqlite3.Connection, cfg: dict, limit: int, per_chars: i
         events.append({
             "channel": row["channel"] or "?",
             "hm": _local_hm(ts, cfg) if ts else "??:??",
+            "role": "N" if row["role"] == "user" else "Y",
             "content": _truncate(row["content"], per_chars),
         })
     return events
@@ -216,82 +219,6 @@ def _frontmost_app() -> str | None:
     if out.returncode != 0 or not name or name in ("loginwindow",):
         return None
     return name
-
-
-def _cadence_json(cfg: dict, args: list[str]) -> list | None:
-    binp = config.cadence_bin_path(cfg)
-    if not binp.exists():
-        return None
-    try:
-        out = subprocess.run(
-            [str(binp), *args, "--json"],
-            capture_output=True, text=True, timeout=15,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if out.returncode != 0:
-        return None
-    try:
-        data = json.loads(out.stdout)
-    except (ValueError, TypeError):
-        return None
-    return data if isinstance(data, list) else None
-
-
-def _cal_line(cfg: dict, now: datetime) -> dict | None:
-    """Current timed event (start<=now<=end) + next timed event today. All-day
-    entries are skipped (they'd always read as 'current')."""
-    data = _cadence_json(cfg, ["cal", "read", now.date().isoformat()])
-    if data is None:
-        return None
-    current = None
-    nxt = None
-    nxt_start = None
-    for ev in data:
-        if ev.get("all_day"):
-            continue
-        title = ev.get("title") or ev.get("summary")
-        try:
-            start = datetime.fromisoformat(ev["start"])
-            end = datetime.fromisoformat(ev["end"])
-        except (KeyError, ValueError, TypeError):
-            continue
-        if start <= now <= end and current is None:
-            current = title
-        elif start > now and (nxt_start is None or start < nxt_start):
-            nxt, nxt_start = title, start
-    if current is None and nxt is None:
-        return None
-    return {"current": current, "next": nxt}
-
-
-def _rem_last_done(cfg: dict) -> str | None:
-    """Title of the most recently completed reminder."""
-    data = _cadence_json(cfg, ["rem", "read", "--done"])
-    if not data:
-        return None
-    best = None
-    best_key = None
-    for rem in data:
-        key = rem.get("completion_date")
-        if key and (best_key is None or key > best_key):
-            best, best_key = rem.get("title"), key
-    return best
-
-
-def _read_handoff(cfg: dict, fresh: bool, wake_kind: str | None) -> str | None:
-    """Handoff note content — only on a fresh window whose wake kind opts in."""
-    if not fresh:
-        return None
-    kinds = _note_cfg(cfg).get("handoff_wake_kinds", [])
-    if wake_kind is not None and wake_kind not in kinds:
-        return None
-    path = config.handoff_path(cfg)
-    try:
-        text = path.read_text(encoding="utf-8").strip()
-    except OSError:
-        return None
-    return text or None
 
 
 def _pending(cfg: dict, now: datetime) -> list[dict]:
@@ -349,44 +276,62 @@ def gather(
     wake_kind: str | None = None,
 ) -> dict:
     """Assemble the wakeup note data dict. conn must use sqlite3.Row factory.
-    `fresh`/`wake_kind` gate the handoff section (fresh windows only)."""
+    `fresh`/`wake_kind` are accepted for caller compatibility; the handoff
+    (碎碎念) now injects at SessionStart, not here."""
     ncfg = _note_cfg(cfg)
 
     kv = _safe(_rate_limit_kv, conn, default={})
     budget = _safe(_build_budget, conn, cfg, now, kv, ncfg)
 
     return {
-        "wake_parts": _safe(_wake_parts, decision, default=["巡回"]),
+        "wake_parts": _safe(_wake_parts, decision, default=["wander"]),
         "last_wake": _safe(_last_wake, conn, now),
         "budget": budget,
         "active_app": _safe(_frontmost_app),
-        "cal": _safe(_cal_line, cfg, now),
-        "rem_last_done": _safe(_rem_last_done, cfg),
         "pending": _safe(_pending, cfg, now, default=[]),
-        "handoff": _safe(_read_handoff, cfg, fresh, wake_kind),
-        "handoff_title": ncfg.get("handoff_title", "阿屿の碎碎念"),
         "replay": _safe(
             _replay_events, conn, cfg,
-            ncfg.get("replay_events", 6),
+            ncfg.get("replay_events", 4),
             ncfg.get("replay_event_chars", 300),
             default=[],
         ),
-        "replay_title": ncfg.get("replay_title", "最近对话回放"),
     }
 
 
 def _build_budget(conn, cfg, now, kv, ncfg) -> dict:
     five = kv.get(_FIVE_HOUR[0])
     seven = kv.get(_SEVEN_DAY[0])
-    reset = kv.get(_FIVE_HOUR[1])
+    five_reset = kv.get(_FIVE_HOUR[1])
+    seven_reset = kv.get(_SEVEN_DAY[1])
     return {
         "five_h_pct": _as_float(five),
-        "five_h_reset": _local_hm(reset, cfg) if reset else None,
+        "five_h_reset": _local_hm(five_reset, cfg) if five_reset else None,
         "seven_d_pct": _as_float(seven),
+        "seven_d_countdown": _countdown(seven_reset, now) if seven_reset else None,
         "window_tokens": _window_tokens(conn),
         "today_tokens": _today_tokens(conn, now),
         "daily_budget": int(ncfg.get("daily_budget", 1_000_000)),
     }
+
+
+def _countdown(reset_iso: str, now: datetime) -> str | None:
+    """Remaining time until an ISO reset moment as a compact `1d2h`/`5h`/`12m`
+    string. Past/unparseable -> None (segment omitted)."""
+    try:
+        delta = _parse_utc(reset_iso) - now.astimezone(ZoneInfo("UTC"))
+    except (TypeError, ValueError):
+        return None
+    secs = int(delta.total_seconds())
+    if secs <= 0:
+        return None
+    days, rem = divmod(secs, 86400)
+    hours, rem = divmod(rem, 3600)
+    mins = rem // 60
+    if days:
+        return f"{days}d{hours}h" if hours else f"{days}d"
+    if hours:
+        return f"{hours}h{mins}m" if mins else f"{hours}h"
+    return f"{mins}m"
 
 
 def _as_float(raw):
@@ -397,10 +342,14 @@ def _as_float(raw):
 
 
 def render(cfg: dict, now: datetime, data: dict) -> str:
-    """Pure assembly: data dict -> wakeup note text. No DB / no I/O."""
-    lines: list[str] = []
+    """Pure assembly: data dict -> wakeup note text. No DB / no I/O.
 
-    lines.append("Wake: " + " | ".join(data.get("wake_parts") or ["巡回"]))
+    Layout (plan §一): a header block (Wake / Now / Plan Used / Active), then
+    `---`-separated blocks for pending self-schedule and Replay. Handoff (碎碎念)
+    no longer lives here — it is injected at SessionStart on a fresh window."""
+    header: list[str] = []
+
+    header.append("Wake: " + " | ".join(data.get("wake_parts") or ["wander"]))
 
     now_seg = f"Now: {now.strftime('%H:%M %a')}"
     last = data.get("last_wake")
@@ -409,77 +358,69 @@ def render(cfg: dict, now: datetime, data: dict) -> str:
         if last.get("force_slept"):
             seg += " (force-slept mid-task)"
         now_seg += f" | {seg}"
-    lines.append(now_seg)
+    header.append(now_seg)
 
     budget_line = _render_budget(data.get("budget"))
     if budget_line:
-        lines.append(budget_line)
+        header.append(budget_line)
 
     app = data.get("active_app")
     if app:
-        lines.append(f"Active (Mac): {app}")
+        header.append(f"Active (Mac): {app}")
 
-    cal = data.get("cal")
-    if cal:
-        segs = []
-        if cal.get("current"):
-            segs.append(f"Current {cal['current']}")
-        if cal.get("next"):
-            segs.append(f"Next {cal['next']}")
-        if segs:
-            lines.append("Cal: " + " | ".join(segs))
+    # Prior window was force-slept without writing its handoff -> tell this
+    # window to backfill from DB events (recall/tl), never from raw jsonl.
+    if last and last.get("force_slept"):
+        catchup = _note_cfg(cfg).get("force_slept_catchup_text", "")
+        if catchup:
+            header.append(catchup)
 
-    rem = data.get("rem_last_done")
-    if rem:
-        lines.append(f"Rem: {rem}")
+    blocks: list[str] = ["\n".join(header)]
 
     pending = data.get("pending") or []
     if pending:
         segs = [f"due {p['hm']} {p['intent']}".rstrip() for p in pending]
-        lines.append("Pending self-schedule: " + " · ".join(segs))
-
-    handoff = data.get("handoff")
-    if handoff:
-        lines.append(f"{data.get('handoff_title', '阿屿の碎碎念')}: {handoff}")
+        blocks.append("Pending self-schedule: " + " · ".join(segs))
 
     replay = data.get("replay") or []
     if replay:
-        lines.append(f"{data.get('replay_title', '最近对话回放')}:")
+        rlines = ["### Replay"]
         for ev in replay:
-            lines.append(f"  [{ev['channel']} {ev['hm']}] {ev['content']}")
+            role = ev.get("role", "")
+            content = " ".join((ev.get("content") or "").split())
+            rlines.append(f"[{ev['channel']} {ev['hm']}] {role}: {content}")
+        blocks.append("\n".join(rlines))
 
-    return "\n".join(lines)
+    return "\n\n---\n\n".join(blocks)
 
 
 def _render_budget(budget: dict | None) -> str | None:
+    """Plan Used line — shows utilization (USED %, statusline口径), pipe-joined:
+    `Plan Used: 5h 5% (04:50) | 7d 50% (1d2h) | Cortex Today 250k/1M 25% |
+    Net Session Token: 50k`. Any missing datum drops just its segment."""
     if not budget:
         return None
     parts = []
-    # five_h_pct / seven_d_pct are UTILIZATION (fraction USED); the quota-health
-    # signal is what's LEFT, so display remaining = 100 - used (0% used -> 100%
-    # left). Clamped to [0,100] so a slight overshoot never prints a negative.
     five = budget.get("five_h_pct")
     if five is not None:
-        seg = f"5h {_remaining(five):.0f}% left"
+        seg = f"5h {five:.0f}%"
         if budget.get("five_h_reset"):
-            seg += f" (reset {budget['five_h_reset']})"
+            seg += f" ({budget['five_h_reset']})"
         parts.append(seg)
     seven = budget.get("seven_d_pct")
     if seven is not None:
-        parts.append(f"7d {_remaining(seven):.0f}% left")
-    window = budget.get("window_tokens")
-    if window is not None:
-        parts.append(f"net {window // 1000}k")
+        seg = f"7d {seven:.0f}%"
+        if budget.get("seven_d_countdown"):
+            seg += f" ({budget['seven_d_countdown']})"
+        parts.append(seg)
     daily = int(budget.get("daily_budget", 1_000_000))
     today = int(budget.get("today_tokens", 0))
     pct = (today / daily * 100) if daily else 0
-    parts.append(f"today {today // 1000}k/{_fmt_budget(daily)} {pct:.0f}%")
-    return "Budget: " + " · ".join(parts) if parts else None
-
-
-def _remaining(used_pct: float) -> float:
-    """Utilization (used) -> remaining, clamped to [0, 100]."""
-    return max(0.0, min(100.0, 100.0 - used_pct))
+    parts.append(f"Cortex Today {today // 1000}k/{_fmt_budget(daily)} {pct:.0f}%")
+    window = budget.get("window_tokens")
+    if window is not None:
+        parts.append(f"Net Session Token: {window // 1000}k")
+    return "Plan Used: " + " | ".join(parts) if parts else None
 
 
 def _fmt_budget(n: int) -> str:

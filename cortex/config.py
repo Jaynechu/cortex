@@ -22,7 +22,6 @@ DEFAULT_AFFECT_FLAG = Path.home() / ".config" / "marrow" / "cortex" / "affect_fl
 DEFAULT_SELF_SCHEDULE = Path.home() / ".config" / "marrow" / "cortex" / "self_schedule.json"
 DEFAULT_HANDOFF = Path.home() / ".config" / "marrow" / "cortex" / "handoff.md"
 DEFAULT_CORTEX_HOME = Path.home() / ".config" / "marrow" / "cortex"
-DEFAULT_CADENCE_BIN = Path.home() / "CC-Lab" / "cadence" / ".build" / "debug" / "cadence"
 DEFAULT_NY_DB_PAGES = Path.home() / "Desktop" / "NY" / "db-pages"
 DEFAULT_MARROW_REPO = Path.home() / "CC-Lab" / "marrow"
 DEFAULT_WAKE_TIMING_LOG = Path.home() / ".config" / "marrow" / "logs" / "wake_timing.log"
@@ -121,23 +120,20 @@ _DEFAULTS: dict[str, Any] = {
     # max_chars cap is gone; per-source limits below keep each line bounded.
     # OSS: identity/display strings stay in config, never hardcoded in .py.
     "note": {
-        # Trailing conversation events force-appended to the replay section
-        # (cross-session, uniform, no decay).
-        "replay_events": 6,
-        # Per-event truncation inside the replay section.
+        # Trailing conversation events force-appended to the Replay block
+        # (cross-session, uniform, no decay). 4 = two round-trips.
+        "replay_events": 4,
+        # Per-event truncation inside the Replay block.
         "replay_event_chars": 300,
-        # Daily wake-token (NET spend) budget the "today X/Y" line renders
-        # against — must match gates.daily_budget.tokens (display and gate agree).
+        # Daily wake-token (NET spend) budget the "Cortex Today X/Y" segment
+        # renders against — must match gates.daily_budget.tokens (display=gate).
         "daily_budget": 1_000_000,
         # Pending self-schedule entries surface only when due within this window.
         "pending_window_min": 15,
-        # Display titles for the two localized sections.
-        "handoff_title": "阿屿の碎碎念",
-        "replay_title": "最近对话回放",
-        # Wake kinds that receive the handoff note (only on a fresh window).
-        "handoff_wake_kinds": ["rebirth", "rotate"],
-        # cadence CLI binary for cal/rem lines. Empty -> those lines are omitted.
-        "cadence_bin": "",
+        # Prior window force-slept without a handoff -> backfill hint line.
+        "force_slept_catchup_text":
+            "Prior window was force-slept without a handoff — backfill from DB "
+            "(recall/events + tl), not raw jsonl, before you carry on.",
     },
 }
 
@@ -237,13 +233,6 @@ def self_schedule_path(cfg: dict) -> Path:
 def handoff_path(cfg: dict) -> Path:
     raw = cfg["paths"].get("handoff_file") or ""
     return Path(raw).expanduser() if raw else DEFAULT_HANDOFF
-
-
-def cadence_bin_path(cfg: dict) -> Path:
-    """cadence CLI for cal/rem note lines. Empty -> packaged default path; a
-    missing/non-executable binary simply omits those lines (best-effort)."""
-    raw = (cfg.get("note", {}) or {}).get("cadence_bin") or ""
-    return Path(raw).expanduser() if raw else DEFAULT_CADENCE_BIN
 
 
 def cortex_home(cfg: dict) -> Path:

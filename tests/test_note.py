@@ -33,67 +33,54 @@ def make_events_table(conn):
 
 def test_render_full_note(cfg):
     data = {
-        "wake_parts": ["巡回"],
+        "wake_parts": ["wander"],
         "last_wake": {"minutes_ago": 12, "force_slept": None},
         "budget": {
-            "five_h_pct": 42.0, "five_h_reset": "14:30", "seven_d_pct": 15.0,
-            "window_tokens": 26000, "today_tokens": 123000, "daily_budget": 1_000_000,
+            "five_h_pct": 5.0, "five_h_reset": "04:50",
+            "seven_d_pct": 50.0, "seven_d_countdown": "1d2h",
+            "window_tokens": 50000, "today_tokens": 250000, "daily_budget": 1_000_000,
         },
-        "active_app": "WeChat",
-        "cal": {"current": "Grand round", "next": "Gym"},
-        "rem_last_done": "剪脚指甲",
-        "pending": [{"hm": "14:40", "intent": "问午饭"}],
-        "handoff": "三点半，老婆在学习。",
-        "handoff_title": "阿屿の碎碎念",
-        "replay": [{"channel": "wx", "hm": "14:04", "content": "笨鸭子"}],
-        "replay_title": "最近对话回放",
+        "active_app": "Google Chrome",
+        "pending": [{"hm": "00:18", "intent": "去看看老婆睡了没"}],
+        "replay": [
+            {"channel": "cli", "hm": "00:30", "role": "N", "content": "笨鸭子"},
+            {"channel": "cli", "hm": "00:31", "role": "Y", "content": "在呢"},
+        ],
     }
     text = note.render(cfg, NOW, data)
-    assert "Wake: 巡回" in text
+    assert "Wake: wander" in text
     assert "Now: 14:30 Wed | Last wake: 12min ago" in text
-    # usage shown as REMAINING (100-used); window renamed to NET spend
-    assert "Budget: 5h 58% left (reset 14:30) · 7d 85% left · net 26k · today 123k/1M 12%" in text
-    assert "Active (Mac): WeChat" in text
-    assert "Cal: Current Grand round | Next Gym" in text
-    assert "Rem: 剪脚指甲" in text
-    assert "Pending self-schedule: due 14:40 问午饭" in text
-    assert "阿屿の碎碎念: 三点半，老婆在学习。" in text
-    assert "最近对话回放:" in text
-    assert "  [wx 14:04] 笨鸭子" in text
+    # Plan Used line: USED %, pipe-joined, template口径
+    assert ("Plan Used: 5h 5% (04:50) | 7d 50% (1d2h) | "
+            "Cortex Today 250k/1M 25% | Net Session Token: 50k") in text
+    assert "Active (Mac): Google Chrome" in text
+    assert "Pending self-schedule: due 00:18 去看看老婆睡了没" in text
+    assert "### Replay" in text
+    assert "[cli 00:30] N: 笨鸭子" in text
+    assert "[cli 00:31] Y: 在呢" in text
+    # block separators
+    assert "\n\n---\n\n" in text
+    # cal/rem retired
+    assert "Cal:" not in text and "Rem:" not in text
 
 
 def test_render_omits_absent_lines(cfg):
-    text = note.render(cfg, NOW, {"wake_parts": ["巡回"]})
-    assert text.startswith("Wake: 巡回")
+    text = note.render(cfg, NOW, {"wake_parts": ["wander"]})
+    assert text.startswith("Wake: wander")
     assert "Now: 14:30 Wed" in text
     assert "Last wake:" not in text
-    assert "Budget:" not in text
+    assert "Plan Used:" not in text
     assert "Active (Mac):" not in text
-    assert "Cal:" not in text
-    assert "Rem:" not in text
     assert "Pending" not in text
-    assert "阿屿" not in text
-    assert "最近对话回放" not in text
+    assert "### Replay" not in text
 
 
-def test_render_force_slept_marker(cfg):
-    data = {"wake_parts": ["巡回"], "last_wake": {"minutes_ago": 40, "force_slept": "timeout"}}
+def test_render_force_slept_marker_and_catchup(cfg):
+    data = {"wake_parts": ["wander"], "last_wake": {"minutes_ago": 40, "force_slept": "timeout"}}
     text = note.render(cfg, NOW, data)
     assert "Last wake: 40min ago (force-slept mid-task)" in text
-
-
-def test_render_cal_partial(cfg):
-    text = note.render(cfg, NOW, {"wake_parts": ["巡回"], "cal": {"current": None, "next": "Gym"}})
-    assert "Cal: Next Gym" in text
-    assert "Current" not in text
-
-
-def test_render_no_whole_note_truncation(cfg):
-    # Old max_chars cap removed: a long handoff is not clipped.
-    long = "字" * 5000
-    text = note.render(cfg, NOW, {"wake_parts": ["巡回"], "handoff": long,
-                                      "handoff_title": "阿屿の碎碎念"})
-    assert long in text
+    # catch-up backfill hint appears only on a force-slept prior window
+    assert "backfill from DB" in text
 
 
 # --------------------------------------------------------------------------- #
@@ -102,28 +89,28 @@ def test_render_no_whole_note_truncation(cfg):
 
 def test_wake_parts_floor():
     d = {"reasons": [TriggerReason(kind="floor", detail="floor check due")]}
-    assert note._wake_parts(d) == ["巡回"]
+    assert note._wake_parts(d) == ["wander"]
 
 
 def test_wake_parts_self_scheduled_uses_intent():
     d = {"reasons": [TriggerReason(kind="self_scheduled", detail="x",
                                    facts={"intent": "问午饭吃了什么"})]}
-    assert note._wake_parts(d) == ["Self-schedule(问午饭吃了什么)"]
+    assert note._wake_parts(d) == ["self-scheduled(问午饭吃了什么)"]
 
 
 def test_wake_parts_schedule_uses_name():
     d = {"reasons": [TriggerReason(kind="schedule", detail="x", facts={"name": "week para"})]}
-    assert note._wake_parts(d) == ["Schedule(week para)"]
+    assert note._wake_parts(d) == ["scheduled(week para)"]
 
 
 def test_wake_parts_none_defaults():
-    assert note._wake_parts(None) == ["巡回"]
+    assert note._wake_parts(None) == ["wander"]
     assert note._wake_parts({"reasons": [], "explanation": "manual --force"}) == ["manual --force"]
 
 
 def test_wake_parts_dict_reason():
     d = {"reasons": [{"kind": "floor", "detail": "floor check due"}]}
-    assert note._wake_parts(d) == ["巡回"]
+    assert note._wake_parts(d) == ["wander"]
 
 
 # --------------------------------------------------------------------------- #
@@ -132,25 +119,30 @@ def test_wake_parts_dict_reason():
 
 def test_render_budget_segments_optional(cfg):
     b = {"five_h_pct": None, "five_h_reset": None, "seven_d_pct": None,
-         "window_tokens": None, "today_tokens": 50000, "daily_budget": 1_000_000}
-    assert note._render_budget(b) == "Budget: today 50k/1M 5%"
+         "seven_d_countdown": None, "window_tokens": None,
+         "today_tokens": 50000, "daily_budget": 1_000_000}
+    assert note._render_budget(b) == "Plan Used: Cortex Today 50k/1M 5%"
 
 
-def test_render_budget_usage_shown_as_remaining(cfg):
-    """five_h_pct/seven_d_pct are UTILIZATION (used); the note shows remaining
-    (100-used) with a 'left' label, so 0% used reads as 100% left."""
-    b = {"five_h_pct": 0.0, "five_h_reset": None, "seven_d_pct": 30.0,
-         "window_tokens": None, "today_tokens": 0, "daily_budget": 1_000_000}
+def test_render_budget_shows_used_pct():
+    """five_h_pct/seven_d_pct are UTILIZATION (used); the Plan Used line shows
+    the used % verbatim (statusline 口径), reset in parens."""
+    b = {"five_h_pct": 5.0, "five_h_reset": "04:50", "seven_d_pct": 50.0,
+         "seven_d_countdown": "1d2h", "window_tokens": None,
+         "today_tokens": 0, "daily_budget": 1_000_000}
     line = note._render_budget(b)
-    assert "5h 100% left" in line   # 0 used -> full
-    assert "7d 70% left" in line    # 30 used -> 70 left
+    assert "5h 5% (04:50)" in line
+    assert "7d 50% (1d2h)" in line
 
 
-def test_remaining_clamps():
-    assert note._remaining(0.0) == 100.0
-    assert note._remaining(100.0) == 0.0
-    assert note._remaining(150.0) == 0.0   # overshoot never negative
-    assert note._remaining(-5.0) == 100.0
+def test_countdown_compact():
+    now = datetime(2026, 7, 8, 0, 0, tzinfo=MEL)
+    reset = (now + timedelta(days=1, hours=2)).astimezone(ZoneInfo("UTC")).isoformat()
+    assert note._countdown(reset, now) == "1d2h"
+    reset2 = (now + timedelta(hours=5)).astimezone(ZoneInfo("UTC")).isoformat()
+    assert note._countdown(reset2, now) == "5h"
+    past = (now - timedelta(hours=1)).astimezone(ZoneInfo("UTC")).isoformat()
+    assert note._countdown(past, now) is None
 
 
 def test_fmt_budget():
@@ -213,8 +205,9 @@ def test_replay_events_channel_time_and_truncation(marrow_conn, cfg):
     marrow_conn.commit()
     ev = note._replay_events(marrow_conn, cfg, 6, 300)
     assert len(ev) == 2  # tl excluded
-    assert ev[0] == {"channel": "wx", "hm": "13:00", "content": "hi"}
+    assert ev[0] == {"channel": "wx", "hm": "13:00", "role": "N", "content": "hi"}
     assert ev[1]["channel"] == "cli"
+    assert ev[1]["role"] == "Y"  # assistant -> Y
     assert len(ev[1]["content"]) == 300 and ev[1]["content"].endswith("…")
 
 
@@ -237,25 +230,6 @@ def test_window_tokens_reads_hint(marrow_conn):
 # --------------------------------------------------------------------------- #
 # external best-effort facts (monkeypatched)
 # --------------------------------------------------------------------------- #
-
-def test_read_handoff_gated_by_fresh_and_kind(cfg, tmp_path, monkeypatch):
-    hp = tmp_path / "handoff.md"
-    hp.write_text("碎碎念内容", encoding="utf-8")
-    monkeypatch.setattr(config, "handoff_path", lambda c: hp)
-    # not fresh -> omitted
-    assert note._read_handoff(cfg, fresh=False, wake_kind="rebirth") is None
-    # fresh + allowed kind -> included
-    assert note._read_handoff(cfg, fresh=True, wake_kind="rebirth") == "碎碎念内容"
-    # fresh + excluded kind -> omitted
-    assert note._read_handoff(cfg, fresh=True, wake_kind="resume") is None
-    # fresh + kind unknown to gate (None) -> included
-    assert note._read_handoff(cfg, fresh=True, wake_kind=None) == "碎碎念内容"
-
-
-def test_read_handoff_missing_file(cfg, tmp_path, monkeypatch):
-    monkeypatch.setattr(config, "handoff_path", lambda c: tmp_path / "nope.md")
-    assert note._read_handoff(cfg, fresh=True, wake_kind="rebirth") is None
-
 
 def test_pending_within_window(cfg, tmp_path, monkeypatch):
     sp = tmp_path / "ss.json"
@@ -319,45 +293,6 @@ def test_frontmost_app_ok(monkeypatch):
     assert note._frontmost_app() == "WeChat"
 
 
-def test_cal_line_picks_current_and_next_skips_all_day(cfg, monkeypatch):
-    events = [
-        {"all_day": True, "title": "birthday", "start": "2026-07-08T00:00:00+10:00",
-         "end": "2026-07-09T00:00:00+10:00"},
-        {"all_day": False, "title": "Grand round", "start": "2026-07-08T14:00:00+10:00",
-         "end": "2026-07-08T15:00:00+10:00"},
-        {"all_day": False, "title": "Gym", "start": "2026-07-08T18:00:00+10:00",
-         "end": "2026-07-08T19:00:00+10:00"},
-    ]
-    monkeypatch.setattr(note, "_cadence_json", lambda c, a: events)
-    assert note._cal_line(cfg, NOW) == {"current": "Grand round", "next": "Gym"}
-
-
-def test_cal_line_none_when_no_timed_events(cfg, monkeypatch):
-    monkeypatch.setattr(note, "_cadence_json", lambda c, a: [
-        {"all_day": True, "title": "x", "start": "2026-07-08T00:00:00+10:00",
-         "end": "2026-07-09T00:00:00+10:00"}])
-    assert note._cal_line(cfg, NOW) is None
-
-
-def test_cal_line_cadence_unavailable(cfg, monkeypatch):
-    monkeypatch.setattr(note, "_cadence_json", lambda c, a: None)
-    assert note._cal_line(cfg, NOW) is None
-
-
-def test_rem_last_done_picks_latest_completion(cfg, monkeypatch):
-    monkeypatch.setattr(note, "_cadence_json", lambda c, a: [
-        {"title": "old", "completion_date": "2026-07-01T10:00:00+10:00"},
-        {"title": "newest", "completion_date": "2026-07-08T09:00:00+10:00"},
-        {"title": "mid", "completion_date": "2026-07-05T10:00:00+10:00"},
-    ])
-    assert note._rem_last_done(cfg) == "newest"
-
-
-def test_rem_last_done_empty(cfg, monkeypatch):
-    monkeypatch.setattr(note, "_cadence_json", lambda c, a: [])
-    assert note._rem_last_done(cfg) is None
-
-
 # --------------------------------------------------------------------------- #
 # gather integration (external facts stubbed)
 # --------------------------------------------------------------------------- #
@@ -376,19 +311,17 @@ def test_gather_end_to_end(marrow_conn, cfg, monkeypatch):
     marrow_conn.commit()
 
     monkeypatch.setattr(note, "_frontmost_app", lambda: None)
-    monkeypatch.setattr(note, "_cal_line", lambda c, n: None)
-    monkeypatch.setattr(note, "_rem_last_done", lambda c: None)
 
     data = note.gather(marrow_conn, cfg, NOW, decision={
         "reasons": [TriggerReason(kind="floor", detail="floor check due")]})
-    assert data["wake_parts"] == ["巡回"]
+    assert data["wake_parts"] == ["wander"]
     assert data["budget"]["five_h_pct"] == 40.0
     assert data["budget"]["five_h_reset"] == "14:30"  # 04:30Z -> AEST
     assert data["budget"]["seven_d_pct"] == 12.0
     assert len(data["replay"]) == 1
-    assert data["handoff"] is None  # fresh defaults False
+    assert "handoff" not in data  # handoff moved to SessionStart
     text = note.render(cfg, NOW, data)
-    assert text.startswith("Wake: 巡回")
+    assert text.startswith("Wake: wander")
 
 
 def test_gather_survives_naive_due_at_self_schedule(marrow_conn, cfg, tmp_path, monkeypatch):
@@ -398,8 +331,6 @@ def test_gather_survives_naive_due_at_self_schedule(marrow_conn, cfg, tmp_path, 
     marrow_conn.commit()
 
     monkeypatch.setattr(note, "_frontmost_app", lambda: None)
-    monkeypatch.setattr(note, "_cal_line", lambda c, n: None)
-    monkeypatch.setattr(note, "_rem_last_done", lambda c: None)
 
     sp = tmp_path / "ss.json"
     naive_due = (NOW + timedelta(minutes=5)).replace(tzinfo=None).isoformat()
