@@ -14,8 +14,41 @@ import sys
 import time
 
 from cortex import config, db, transcript, wake_state
-from cortex.pacemaker import integration
+from cortex.pacemaker import integration, gates
 from cortex.wake import run_wake
+
+
+def _night_close(cfg: dict, now, st: dict) -> str | None:
+    """Night close (replaces daily rebirth). When the night window opens and the
+    resident window is still up, send it a one-shot wrap-up instruction (the
+    existing inject-after-turn path) telling it to write its handoff and lie_down.
+    Once it is down (or if it was already down at the window open), the session is
+    marked non-resumable via the rotate flag, so the first post-night wake is a
+    plain fresh spawn that reads the handoff via SessionStart. Returns a log line
+    when it acts, else None. No SIGINT; the watchdog fuse ladder is untouched."""
+    from cortex import window
+
+    key = gates.night_key(cfg, now)
+    if key is None:
+        return None
+    ncfg = cfg.get("gates", {}).get("night", {}) or {}
+    if st.get("awake"):
+        # Still awake in the night window -> ask it once to wrap up (after the
+        # current turn). Marking non-resumable waits until it actually lies down.
+        if st.get("night_wrap_key") == key:
+            return None
+        prompt = ncfg.get("close_prompt") or ""
+        wake_state.update(cfg, night_wrap_key=key)
+        if prompt and window.inject_prompt(cfg, prompt):
+            return "night close: wrap-up injected"
+        return "night close: no resident window to wrap up"
+    # Not awake in the night window: mark the (idle) resident session
+    # non-resumable, once per night. Skip if no session exists (already fresh).
+    if st.get("night_rotated_key") == key or not wake_state.get_session_id(cfg):
+        return None
+    wake_state.set_rotated(cfg)
+    wake_state.update(cfg, night_rotated_key=key)
+    return "night close: resident session marked non-resumable"
 
 
 def _handle_awake(conn, cfg: dict, st: dict) -> str:
@@ -39,6 +72,9 @@ def main() -> int:
     conn = db.connect(cfg)
     try:
         st = wake_state.load(cfg)
+        nc = _night_close(cfg, integration._now(cfg), st)
+        if nc:
+            print(f"{db.utcnow_iso()} {nc}", flush=True)
         if st.get("awake"):
             msg = _handle_awake(conn, cfg, st)
             print(f"{db.utcnow_iso()} {msg}", flush=True)

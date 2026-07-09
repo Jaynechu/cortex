@@ -87,21 +87,21 @@ def test_second_wake_same_day_resumes(marrow_conn, wcfg):
     assert caller.calls[1]["resume_sid"] == "sid-abc"
 
 
-def test_rebirth_on_new_date_archives_and_resets_resume(marrow_conn, wcfg):
+def test_new_date_resumes_no_rebirth(marrow_conn, wcfg):
+    """Rebirth retired: a new local date no longer starts a fresh session or
+    archives. The headless path resumes the prior session as any same-day wake
+    would; freshness now comes only from the rotate/night-close path."""
     caller = FakeCaller(session_id="sid-day1")
     wake.run_wake(marrow_conn, wcfg, DECISION, now=DAY1, caller=caller)
 
     caller2 = FakeCaller(session_id="sid-day2")
     wake.run_wake(marrow_conn, wcfg, DECISION, now=DAY2, caller=caller2)
 
-    assert caller2.calls[0]["resume_sid"] is None
+    assert caller2.calls[0]["resume_sid"] == "sid-day1"  # resumed, not reborn
 
     from pathlib import Path
     archive_dir = Path(wcfg["paths"]["day_log_archive_dir"])
-    assert (archive_dir / "2026-07-03.md").exists()
-
-    path = Path(wcfg["paths"]["day_log"])
-    assert path.read_text().splitlines()[0] == "2026-07-04"
+    assert not (archive_dir / "2026-07-03.md").exists()  # no archiving
 
     from cortex.pacemaker import integration
     state = integration.load_state(marrow_conn)
@@ -125,34 +125,31 @@ class FailCaller:
         raise wake.WakeError("boom")
 
 
-def test_failed_wake_persists_rollover_and_preserves_archive(marrow_conn, wcfg):
-    """A failed wake on a new day must still record the daily rollover so a
-    retry does not re-archive; and the real archive from day 1 must never be
-    clobbered by a blank shell (the 07-03 first-wake data-loss bug)."""
+def test_failed_wake_forces_fresh_next_no_archive(marrow_conn, wcfg):
+    """A failed marrow call drops the resume sid (fresh session next wake) and
+    keeps date=today. Rebirth/archiving is retired -> no archive dir is created."""
+    from cortex.pacemaker import integration
+
     good = FakeCaller(session_id="sid-day1")
     wake.run_wake(marrow_conn, wcfg, DECISION, now=DAY1, caller=good)
-    day1_content = Path(wcfg["paths"]["day_log"]).read_text()
 
-    # Day 2 first attempt: rebirth archives day1 + new_day, then caller fails.
     with pytest.raises(wake.WakeError):
-        wake.run_wake(marrow_conn, wcfg, DECISION, now=DAY2, caller=FailCaller())
+        wake.run_wake(marrow_conn, wcfg, DECISION,
+                      now=DAY1 + timedelta(hours=1), caller=FailCaller())
+
+    st = integration.load_state(marrow_conn)
+    assert st.cortex_session_id is None            # fresh session next wake
+    assert st.cortex_session_date == "2026-07-03"  # same day, no rollover concept
 
     archive_dir = Path(wcfg["paths"]["day_log_archive_dir"])
-    archived = archive_dir / "2026-07-03.md"
-    assert archived.exists()
-    assert archived.read_text() == day1_content
+    assert not (archive_dir / "2026-07-03.md").exists()
 
-    from cortex.pacemaker import integration
-    st = integration.load_state(marrow_conn)
-    assert st.cortex_session_date == "2026-07-04"  # rollover persisted despite failure
-    assert st.cortex_session_id is None
-
-    # Day 2 retry: rebirth already recorded -> no re-archive, no clobber.
-    good2 = FakeCaller(session_id="sid-day2")
-    wake.run_wake(marrow_conn, wcfg, DECISION, now=DAY2 + timedelta(minutes=5), caller=good2)
-    assert archived.read_text() == day1_content
-    assert not (archive_dir / "2026-07-04.md").exists()
-    assert integration.load_state(marrow_conn).cortex_session_id == "sid-day2"
+    # Retry resumes fresh (resume None) and persists the new sid.
+    good2 = FakeCaller(session_id="sid-retry")
+    wake.run_wake(marrow_conn, wcfg, DECISION,
+                  now=DAY1 + timedelta(hours=2), caller=good2)
+    assert good2.calls[0]["resume_sid"] is None
+    assert integration.load_state(marrow_conn).cortex_session_id == "sid-retry"
 
 
 def test_call_marrow_cortex_outer_timeout_derives_from_inner(monkeypatch, wcfg):
@@ -227,7 +224,7 @@ def rot_cfg(wcfg, tmp_path):
     cfg["wake"] = {**wcfg["wake"], "mode": "window"}
     cfg["paths"] = {**wcfg["paths"], "handoff_file": str(tmp_path / "handoff.md"),
                     "wake_state_file": str(tmp_path / "wake_state.json")}
-    cfg["note"] = {"handoff_wake_kinds": ["rebirth", "rotate"],
+    cfg["note"] = {"handoff_wake_kinds": ["rotate"],
                    "handoff_title": "碎碎念"}
     Path(cfg["paths"]["handoff_file"]).write_text("carry this to your next self")
     return cfg
@@ -307,24 +304,19 @@ def test_window_wake_rotate_respawns(monkeypatch, marrow_conn, rot_cfg):
     assert captured["respawn"] is True  # rotate -> fresh self-arming window
 
 
-def test_window_wake_rebirth_wins_over_rotate(monkeypatch, marrow_conn, rot_cfg):
-    """Rebirth (new local date) sets its own kind; rotate is not re-evaluated."""
-    called = {"rotated": False}
-    def spy_rotated(cfg):
-        called["rotated"] = True
-        return True
-    monkeypatch.setattr(wake, "_window_rotated", spy_rotated)
+def test_rotate_flag_makes_next_wake_fresh(monkeypatch, marrow_conn, rot_cfg):
+    """Freshness comes only from the rotate path now (no rebirth): a set rotate
+    flag makes the next window wake respawn a fresh brain with the handoff note.
+    This is the mechanism the night close relies on for the first post-night wake."""
+    from cortex import wake_state
+    wake_state.set_rotated(rot_cfg)
     captured = {}
     monkeypatch.setattr(wake, "_window_wake",
                         lambda conn, cfg, t, now, respawn=False:
                         captured.update(text=t, respawn=respawn) or
                         {"mode": "window", "session_id": None, "text": None})
-    wake.run_wake(marrow_conn, rot_cfg, DECISION, now=DAY1)  # seed day1
-    captured.clear()
-    called["rotated"] = False
-    wake.run_wake(marrow_conn, rot_cfg, DECISION, now=DAY2)  # new date -> rebirth
-    assert called["rotated"] is False           # rotate short-circuited by rebirth
-    assert captured["respawn"] is True          # rebirth respawns a fresh window too
+    wake.run_wake(marrow_conn, rot_cfg, DECISION, now=DAY1)
+    assert captured["respawn"] is True          # rotate flag -> fresh respawn
 
 
 def test_window_wake_unrotated_no_handoff(monkeypatch, marrow_conn, rot_cfg):
@@ -340,6 +332,93 @@ def test_window_wake_unrotated_no_handoff(monkeypatch, marrow_conn, rot_cfg):
     wake.run_wake(marrow_conn, rot_cfg, DECISION, now=DAY1 + timedelta(hours=1))
     assert "碎碎念" not in captured["text"]
     assert captured["respawn"] is False         # live un-rotated window: no respawn
+
+
+# --------------------------------------------------------------------------- #
+# Night close (replaces rebirth): the 23:00 gate hands a still-awake resident
+# window a wrap-up instruction, then marks the idle session non-resumable so the
+# first post-night wake is a plain fresh spawn.
+# --------------------------------------------------------------------------- #
+
+NIGHT = datetime(2026, 7, 3, 23, 30, tzinfo=TZ)   # inside 23:00-06:00 window
+DAYTIME = datetime(2026, 7, 3, 14, 0, tzinfo=TZ)  # outside night window
+
+
+@pytest.fixture
+def night_cfg(rot_cfg):
+    cfg = dict(rot_cfg)
+    cfg["gates"] = {"night": {"start": "23:00", "end": "06:00", "cap": 0,
+                              "close_prompt": "wrap up now"}}
+    return cfg
+
+
+def test_night_close_awake_injects_wrapup_once(monkeypatch, night_cfg):
+    from cortex import pacemaker_tick, wake_state, window
+    wake_state.set_session_id(night_cfg, "sid-1")
+    injected = []
+    monkeypatch.setattr(window, "inject_prompt",
+                        lambda cfg, text: injected.append(text) or True)
+
+    st = wake_state.load(night_cfg)
+    st["awake"] = True
+    msg = pacemaker_tick._night_close(night_cfg, NIGHT, st)
+    assert injected == ["wrap up now"]
+    assert "wrap-up injected" in msg
+    # awake still + same night -> no second injection (once-per-night guard)
+    st2 = wake_state.load(night_cfg)
+    st2["awake"] = True
+    assert pacemaker_tick._night_close(night_cfg, NIGHT, st2) is None
+    assert injected == ["wrap up now"]
+    # rotate is NOT set while it is still awake (marked only once it lies down)
+    assert wake_state.load(night_cfg).get("rotated") is None
+
+
+def test_night_close_already_down_marks_rotated_only(monkeypatch, night_cfg):
+    from cortex import pacemaker_tick, wake_state, window
+    wake_state.set_session_id(night_cfg, "sid-1")
+    monkeypatch.setattr(window, "inject_prompt",
+                        lambda cfg, text: (_ for _ in ()).throw(
+                            AssertionError("must not inject when already down")))
+
+    st = wake_state.load(night_cfg)  # no awake key -> lying down
+    msg = pacemaker_tick._night_close(night_cfg, NIGHT, st)
+    assert wake_state.load(night_cfg).get("rotated") is True
+    assert "non-resumable" in msg
+    # once per night: a second tick same night is a no-op
+    assert pacemaker_tick._night_close(night_cfg, NIGHT, wake_state.load(night_cfg)) is None
+
+
+def test_night_close_awake_then_down_marks_rotated(monkeypatch, night_cfg):
+    """Awake at 23:00 -> wrap-up injected; after it lies down, the next tick in
+    the same night marks the session non-resumable (fresh spawn next wake)."""
+    from cortex import pacemaker_tick, wake_state, window
+    wake_state.set_session_id(night_cfg, "sid-1")
+    monkeypatch.setattr(window, "inject_prompt", lambda cfg, text: True)
+
+    st = wake_state.load(night_cfg)
+    st["awake"] = True
+    pacemaker_tick._night_close(night_cfg, NIGHT, st)          # injects
+    assert wake_state.load(night_cfg).get("rotated") is None
+    # it lied down -> awake cleared; next tick marks rotated
+    pacemaker_tick._night_close(night_cfg, NIGHT, wake_state.load(night_cfg))
+    assert wake_state.load(night_cfg).get("rotated") is True
+
+
+def test_night_close_outside_window_noop(monkeypatch, night_cfg):
+    from cortex import pacemaker_tick, wake_state, window
+    wake_state.set_session_id(night_cfg, "sid-1")
+    monkeypatch.setattr(window, "inject_prompt", lambda cfg, text: True)
+    st = wake_state.load(night_cfg)
+    assert pacemaker_tick._night_close(night_cfg, DAYTIME, st) is None
+    assert wake_state.load(night_cfg).get("rotated") is None
+
+
+def test_night_close_no_session_no_rotate(night_cfg):
+    """No resident session -> nothing to retire; do not set the rotate flag."""
+    from cortex import pacemaker_tick, wake_state
+    st = wake_state.load(night_cfg)  # not awake, no session id
+    assert pacemaker_tick._night_close(night_cfg, NIGHT, st) is None
+    assert wake_state.load(night_cfg).get("rotated") is None
 
 
 # --------------------------------------------------------------------------- #

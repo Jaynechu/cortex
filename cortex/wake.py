@@ -1,7 +1,9 @@
 """Wake runner (C3): on a pacemaker wake decision, assemble the wakeup note,
-call marrow's resumed full-env cortex session, persist the session_id, and
-refresh day_log.md. Daily rebirth: first wake on a new local date starts a
-fresh marrow session (no resume_sid) and archives the previous day_log.
+call marrow's resumed full-env cortex session, and persist the session_id.
+Freshness (a fresh marrow session, no resume_sid) comes only from the
+rotate/dead-window detection: a rotated or dead resident window is a new brain
+that reads the previous brain's handoff via SessionStart. Night close (23:00)
+retires the resident session so the first post-night wake is a plain fresh spawn.
 
 marrow lives in its own repo/venv (separate deps) — invoked as a subprocess
 against marrow's own venv python rather than imported in-process, so cortex
@@ -60,7 +62,7 @@ def assemble_note(conn: sqlite3.Connection, cfg: dict, now: datetime,
                   decision: dict | None = None, fresh: bool = False,
                   wake_kind: str | None = None) -> str:
     """Thin wrapper: gather() + render(). `fresh`/`wake_kind` gate the handoff
-    (碎碎念) section — only a fresh window (rebirth/rotate) receives it."""
+    (碎碎念) section — only a fresh window (rotate) receives it."""
     data = note.gather(conn, cfg, now, decision=decision,
                        fresh=fresh, wake_kind=wake_kind)
     return note.render(cfg, now, data)
@@ -111,9 +113,9 @@ def _audit_wake(conn: sqlite3.Connection, wake_id: str, summary: str) -> None:
 
 
 def _force_fresh_next(conn: sqlite3.Connection, state, today: str) -> None:
-    """Next wake starts a fresh marrow session (drop resume sid) without
-    re-archiving today's log (keep date=today). Used on token-cap breach and
-    marrow call failure/timeout so a broken/oversized session is never resumed."""
+    """Next wake starts a fresh marrow session (drop resume sid, keep date=today).
+    Used on token-cap breach and marrow call failure/timeout so a broken/oversized
+    session is never resumed."""
     integration.save_state(
         conn, replace(state, cortex_session_id=None, cortex_session_date=today))
 
@@ -238,7 +240,7 @@ def _signal_landed(cfg, before: float | None, timeout_sec: float) -> bool:
 def _window_wake(conn, cfg, note_text, now, respawn: bool = False) -> dict | None:
     """Interactive wake via the signal-file ear: write the note file, then
     append a WAKE line to the signal log the resident window's armed Monitor
-    tails — no typing. `respawn` (rotate/rebirth) or a dead/rotated window is
+    tails — no typing. `respawn` (rotate) or a dead/rotated window is
     replaced by a fresh self-arming window first. After appending, verify the
     wake landed (transcript mtime grows within ear_timeout_sec); if not, respawn
     once and re-append. Sets the awake marker + lights the watchdog. Returns a
@@ -316,28 +318,11 @@ def run_wake(
         return result
 
     state = integration.load_state(conn)
-    rebirth = state.cortex_session_date != today
-    resume_sid = None if rebirth else state.cortex_session_id
-
+    resume_sid = state.cortex_session_id
     path = config.day_log_path(cfg)
-    if rebirth:
-        if path.exists():
-            day_log.archive(path, config.day_log_archive_dir(cfg))
-        day_log.new_day(path, today)
-        # Persist the rollover immediately. Archiving + new_day is a
-        # once-per-local-day operation that must not repeat if the wake call
-        # below fails; keying it on wake success let a failed retry re-archive
-        # the fresh blank log and (before archive dedupe) clobber the real one.
-        state = replace(state, cortex_session_date=today, cortex_session_id=None)
-        integration.save_state(conn, state)
-        resume_sid = None
-    elif not path.exists():
-        day_log.new_day(path, today)
-    timer.mark("rebirth" if rebirth else "resume")
+    timer.mark("resume")
 
-    note_text = assemble_note(
-        conn, cfg, now, decision=decision,
-        fresh=rebirth, wake_kind="rebirth" if rebirth else None)
+    note_text = assemble_note(conn, cfg, now, decision=decision)
     home = str(config.cortex_home(cfg))
     timer.mark("note")
 
@@ -345,14 +330,12 @@ def run_wake(
     # taken for the real wake (default caller) in window mode; explicit `caller`
     # (tests / headless callers) always runs the marrow-subprocess path below.
     if cfg["wake"].get("mode", "window") == "window" and caller is call_marrow_cortex:
-        # Rotate (碎碎念 round-trip): rebirth wins; otherwise a rotated/dead
-        # window is a fresh brain that must read the old brain's handoff note.
-        # Either fresh-brain case -> respawn (SIGTERM claude + fresh self-arming
-        # window), so the same path serves rotate, rebirth and a dead window.
+        # A rotated/dead window is a fresh brain that must read the old brain's
+        # handoff note -> respawn (SIGTERM claude + fresh self-arming window),
+        # so the same path serves rotate and a dead window.
         window_text = note_text
-        respawn = rebirth
-        if not rebirth and _window_rotated(cfg):
-            respawn = True
+        respawn = _window_rotated(cfg)
+        if respawn:
             window_text = assemble_note(
                 conn, cfg, now, decision=decision, fresh=True, wake_kind="rotate")
             timer.mark("rotate_note")
@@ -360,7 +343,6 @@ def run_wake(
         if win is not None:
             state = replace(state, cortex_session_date=today)
             integration.save_state(conn, state)
-            day_log.update(path, conn, cfg, now)
             timer.mark("window_injected")
             timer.mark("wake_complete")
             return win
@@ -380,7 +362,7 @@ def run_wake(
     if result.get("capped"):
         _force_fresh_next(conn, state, today)
         _audit_wake(conn, wake_id,
-                    f"token_cap breach total={result.get('total_tokens')} -> rebirth")
+                    f"token_cap breach total={result.get('total_tokens')} -> fresh")
         timer.mark("capped")
         day_log.update(path, conn, cfg, now)
         timer.mark("day_log")

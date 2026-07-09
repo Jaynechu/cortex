@@ -140,6 +140,11 @@ cal_busy_default = false       # until calendar busy state is wired in
 start = "23:00"
 end = "06:00"
 cap = 0
+# Wrap-up instruction injected once (after the current turn) into a still-awake
+# resident window when the night window opens: it writes its handoff and lies
+# down. Once down, the session is marked non-resumable so the first post-night
+# wake is a plain fresh spawn that reads the handoff via SessionStart.
+close_prompt = "Night window is open. Write your handoff entry now, then call lie_down to end this wake."
 # Daily wake-token budget: once today's SUM(NET spend — cache-miss rewrite +
 # output, ct_wake_log.net_tokens with a tokens fallback) reaches tokens,
 # self-wakes stop; schedule pierces; resets naturally at local midnight.
@@ -174,6 +179,6 @@ daily_budget = 1000000       # daily wake-token (NET spend) budget the "today X/
 pending_window_min = 15      # surface a self-schedule entry only when due within this window
 handoff_title = "阿屿の碎碎念"   # title of the handoff-note section
 replay_title = "最近对话回放"     # title of the conversation-replay section
-handoff_wake_kinds = ["rebirth", "rotate"]  # wake kinds that get the handoff (fresh window only)
+handoff_wake_kinds = ["rotate"]  # wake kinds that get the handoff (fresh window only)
 cadence_bin = ""             # cadence CLI for cal/rem lines; empty = packaged default path
 turn_end_text = "NOTE: choose wait time or next wake time at the end of each turn. Wait: empty (default) / wait(N) [N=11-55]; sleep: lie_down(next_wake_min=N, or omit = dice). Pls leave empty during casual chat with user."  # one-line reminder appended at the end of every rendered note; "" omits it

@@ -25,8 +25,8 @@ class PacemakerState:
     # Night mode: capped floor wakes used in the night keyed here.
     night_cap_key: str | None = None
     night_wake_count: int = 0
-    # Cortex session resume (C3, Decided daily rebirth). Opaque to tick() —
-    # only the wake caller (cortex.wake) reads/writes these.
+    # Cortex session resume (C3). Opaque to tick() — only the wake caller
+    # (cortex.wake) reads/writes these.
     cortex_session_id: str | None = None
     cortex_session_date: str | None = None
 

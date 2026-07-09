@@ -490,6 +490,6 @@ if __name__ == "__main__":  # pragma: no cover - eyeball a real note
     _cfg = config.load()
     _conn = db.connect(_cfg)
     _now = datetime.now(_tz(_cfg))
-    _data = gather(_conn, _cfg, _now, fresh=True, wake_kind="rebirth")
+    _data = gather(_conn, _cfg, _now, fresh=True, wake_kind="rotate")
     print(render(_cfg, _now, _data))
     _conn.close()

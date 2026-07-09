@@ -44,7 +44,7 @@ _DEFAULTS: dict[str, Any] = {
         "wake_timing_log": "",
     },
     # Per-wake safety valve: cap tokens spent in one wake; breach or the marrow
-    # wall-clock timeout (marrow.call_timeout_s) rebirths a fresh session.
+    # wall-clock timeout (marrow.call_timeout_s) forces a fresh session next wake.
     # signal_log = the ear's tail-followed wake signal file (WAKE/NUDGE lines);
     # arm_prompt_path = the launch-time prompt that arms the Monitor ear;
     # ear_timeout_sec = how long the pacemaker waits for a wake to land before
@@ -88,7 +88,13 @@ _DEFAULTS: dict[str, Any] = {
     "gates": {
         # Night window (plan 07-08): zero self-wakes 23-06 — floor/
         # self_scheduled/affect_flag all silent; only schedule (duty) pierces.
-        "night": {"start": "23:00", "end": "06:00", "cap": 0},
+        # close_prompt = wrap-up instruction injected once into a still-awake
+        # resident window when the night window opens (write handoff + lie_down).
+        "night": {
+            "start": "23:00", "end": "06:00", "cap": 0,
+            "close_prompt": "Night window is open. Write your handoff entry now, "
+                            "then call lie_down to end this wake.",
+        },
         # Daily wake-token budget: once today's SUM(NET spend — cache-miss
         # rewrite + output, ct_wake_log.net_tokens with a tokens fallback)
         # reaches this, self-wakes stop; schedule pierces; resets at local
