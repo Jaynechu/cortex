@@ -211,6 +211,49 @@ def test_replay_events_channel_time_and_truncation(marrow_conn, cfg):
     assert len(ev[1]["content"]) == 300 and ev[1]["content"].endswith("…")
 
 
+def test_replay_excludes_cortex_self_talk(marrow_conn, cfg):
+    make_events_table(marrow_conn)
+    marrow_conn.executemany(
+        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
+        [
+            ("s", "2026-07-08T03:00:00+00:00", "user", "念念说的话", "cli"),
+            ("s", "2026-07-08T03:01:00+00:00", "assistant", "cortex自言自语", "ct"),
+            ("s", "2026-07-08T03:02:00+00:00", "user", "cortex醒来读note", "ct"),
+            ("s", "2026-07-08T03:03:00+00:00", "assistant", "阿屿回复", "cli"),
+        ],
+    )
+    marrow_conn.commit()
+    ev = note._replay_events(marrow_conn, cfg, 6, 300)
+    # ct channel (cortex wake monologue) excluded; real cli exchange kept.
+    assert [(e["channel"], e["content"]) for e in ev] == [
+        ("cli", "念念说的话"), ("cli", "阿屿回复")]
+
+
+def test_replay_strips_media_markers(marrow_conn, cfg):
+    make_events_table(marrow_conn)
+    marrow_conn.executemany(
+        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
+        [
+            ("s", "2026-07-08T03:00:00+00:00", "user",
+             '[time: 12:30] 你看 <image path="/stk/a.png"/> 这个', "wx"),
+        ],
+    )
+    marrow_conn.commit()
+    ev = note._replay_events(marrow_conn, cfg, 6, 300)
+    assert ev[0]["content"] == "你看 这个"
+
+
+def test_replay_exclude_channels_configurable(marrow_conn):
+    make_events_table(marrow_conn)
+    marrow_conn.execute(
+        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
+        ("s", "2026-07-08T03:00:00+00:00", "assistant", "ct turn", "ct"))
+    marrow_conn.commit()
+    # empty exclude list → include everything, including ct
+    ev = note._replay_events(marrow_conn, {"note": {"replay_exclude_channels": []}}, 6, 300)
+    assert [e["content"] for e in ev] == ["ct turn"]
+
+
 def test_window_tokens_absent_key_is_none(marrow_conn):
     marrow_conn.execute(
         "INSERT INTO ct_pacemaker_state (id, state, updated_at) VALUES (1, ?, ?)",

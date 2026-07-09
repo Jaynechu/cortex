@@ -12,6 +12,7 @@ SessionStart (marrow), not here. Cal/Rem lines retired (global inject pending).
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sqlite3
 from datetime import datetime, timedelta
@@ -47,6 +48,18 @@ def _local_hm(ts_iso: str, cfg: dict) -> str:
 
 def _note_cfg(cfg: dict) -> dict:
     return cfg.get("note", {}) or {}
+
+
+# Channels whose turns are cortex self-talk (wake monologues), excluded from
+# Replay so the wakeup note does not replay itself back into its own context.
+_DEFAULT_REPLAY_EXCLUDE_CHANNELS = ("ct",)
+
+
+def _replay_exclude_channels(cfg: dict) -> tuple[str, ...]:
+    raw = _note_cfg(cfg).get("replay_exclude_channels")
+    if raw is None:
+        return _DEFAULT_REPLAY_EXCLUDE_CHANNELS
+    return tuple(str(c) for c in raw if str(c).strip())
 
 
 # --------------------------------------------------------------------------- #
@@ -173,28 +186,57 @@ def _window_tokens(conn: sqlite3.Connection) -> int | None:
         return None
 
 
+# Media / bridge-marker shaper — kept in sync with marrow.transcript.
+# strip_media_markers (marrow is not importable from the cortex env, so this is
+# a deliberate small duplicate). Strips wx [time:]/[sticker:] markers and
+# <image|file|gif path="..."/> tags so replayed rows read like plain dialogue.
+_TIME_PREFIX_RE = re.compile(r"^\[time:[^\]]+\]\s*")
+_STICKER_LINE_RE = re.compile(r"^\[sticker:[^\]\n]*\]\n?", re.M)
+_MEDIA_TAG_RE = re.compile(r'\s*<(?:image|file|gif)\s+path="[^"]*?"[^>]*>\s*')
+
+
+def _strip_markers(text: str) -> str:
+    if not text:
+        return ""
+    text = _TIME_PREFIX_RE.sub("", text)
+    text = _STICKER_LINE_RE.sub("", text)
+    return _MEDIA_TAG_RE.sub(" ", text).strip()
+
+
 def _replay_events(conn: sqlite3.Connection, cfg: dict, limit: int, per_chars: int) -> list[dict]:
-    """Last `limit` user/assistant events (cross-session, chronological), each
-    tagged [channel HH:mm] + role marker (N=user, Y=assistant) and capped at
-    per_chars. Excludes role='tl'."""
+    """Last `limit` real user/assistant events (cross-session, chronological),
+    each tagged [channel HH:mm] + role marker (N=user, Y=assistant) and capped
+    at per_chars. Excludes role='tl' and cortex self-talk channels.
+
+    Replay is meant to show the real user<->assistant exchange context; cortex's
+    own wake monologues (channel='ct') are excluded so the note does not replay
+    itself. The excluded channel set is config-driven (note.replay_exclude_channels)."""
     if limit <= 0:
         return []
+    exclude = _replay_exclude_channels(cfg)
+    placeholders = ",".join("?" for _ in exclude) if exclude else ""
+    where_channel = (
+        f" AND COALESCE(channel,'') NOT IN ({placeholders})" if exclude else "")
     try:
         rows = conn.execute(
             "SELECT role, content, timestamp, channel FROM events "
-            "WHERE role IN ('user', 'assistant') ORDER BY id DESC LIMIT ?",
-            (limit,),
+            "WHERE role IN ('user', 'assistant')" + where_channel
+            + " ORDER BY id DESC LIMIT ?",
+            (*exclude, limit),
         ).fetchall()
     except sqlite3.OperationalError:
         return []
     events = []
     for row in reversed(rows):  # chronological
         ts = row["timestamp"]
+        content = _strip_markers(row["content"])
+        if not content:
+            continue
         events.append({
             "channel": row["channel"] or "?",
             "hm": _local_hm(ts, cfg) if ts else "??:??",
             "role": "N" if row["role"] == "user" else "Y",
-            "content": _truncate(row["content"], per_chars),
+            "content": _truncate(content, per_chars),
         })
     return events
 
