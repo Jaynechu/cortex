@@ -21,8 +21,8 @@ from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 
 # Trigger kinds that pierce every gate (night window + daily budget). Only a
-# fixed duty (schedule) is exempt: floor/desire/self_scheduled/affect_flag all
-# fall silent at night and once the daily budget is spent (plan 07-08).
+# fixed duty (schedule) is exempt: floor/self_scheduled/affect_flag all fall
+# silent at night and once the daily budget is spent (plan 07-08).
 PIERCE_KINDS = frozenset({"schedule"})
 
 

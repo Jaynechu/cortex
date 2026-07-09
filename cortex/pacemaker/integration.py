@@ -18,8 +18,6 @@ from zoneinfo import ZoneInfo
 
 from cortex import config, db
 from cortex.pacemaker.core import PacemakerState, tick
-from cortex.pacemaker.desire import DesireState
-from cortex.pacemaker.expect_reply import ExpectReplyState
 
 
 # --------------------------------------------------------------------------
@@ -61,19 +59,11 @@ def parse_due_at(value: str | None, tz: ZoneInfo) -> datetime | None:
 # --------------------------------------------------------------------------
 
 def _state_to_json(state: PacemakerState, base: dict | None = None) -> str:
-    d = state.desire
-    er = state.expect_reply
     obj = dict(base or {})  # preserve side-channel keys (window_tokens, schedule_fired)
+    # Drop any legacy desire/expect_reply keys carried in from an old row.
+    obj.pop("desire", None)
+    obj.pop("expect_reply", None)
     obj.update({
-        "desire": {
-            "attachment": d.attachment, "curiosity": d.curiosity,
-            "worry": d.worry, "duty": d.duty, "last_tick_at": _iso(d.last_tick_at),
-        },
-        "expect_reply": {
-            "pending": er.pending, "sent_at": _iso(er.sent_at),
-            "last_check_at": _iso(er.last_check_at),
-            "checks_done": er.checks_done, "tone_level": er.tone_level,
-        },
         "next_floor_due_at": _iso(state.next_floor_due_at),
         "last_wake_at": _iso(state.last_wake_at),
         "last_lie_down_at": _iso(state.last_lie_down_at),
@@ -86,20 +76,10 @@ def _state_to_json(state: PacemakerState, base: dict | None = None) -> str:
 
 
 def _state_from_json(text: str) -> PacemakerState:
+    # Tolerant load: legacy rows may still carry desire/expect_reply keys —
+    # they are simply ignored (the engines are retired).
     o = json.loads(text)
-    d = o.get("desire", {})
-    er = o.get("expect_reply", {})
     return PacemakerState(
-        desire=DesireState(
-            attachment=d.get("attachment", 0.0), curiosity=d.get("curiosity", 0.0),
-            worry=d.get("worry", 0.0), duty=d.get("duty", 0.0),
-            last_tick_at=_parse_dt(d.get("last_tick_at")),
-        ),
-        expect_reply=ExpectReplyState(
-            pending=er.get("pending", False), sent_at=_parse_dt(er.get("sent_at")),
-            last_check_at=_parse_dt(er.get("last_check_at")),
-            checks_done=er.get("checks_done", 0), tone_level=er.get("tone_level", 0),
-        ),
         next_floor_due_at=_parse_dt(o.get("next_floor_due_at")),
         last_wake_at=_parse_dt(o.get("last_wake_at")),
         last_lie_down_at=_parse_dt(o.get("last_lie_down_at")),
@@ -245,13 +225,9 @@ def build_context(conn: sqlite3.Connection, cfg: dict, now: datetime, state: Pac
     active = False
     if last_activity is not None:
         active = (now - last_activity).total_seconds() / 60.0 <= pm.get("active_window_min", 5)
-    replied = False
-    if state.expect_reply.pending and state.expect_reply.sent_at and last_activity:
-        replied = last_activity > state.expect_reply.sent_at
     return {
         "active_session": active,
         "last_real_chat_at": last_activity,
-        "replied": replied,
         "cal_busy": pm.get("cal_busy_default", False),
         "at_home": pm.get("at_home_default", True),
         "affect_flag": _read_json_file(config.affect_flag_path(cfg), None),
@@ -279,10 +255,12 @@ def write_wake_log(conn: sqlite3.Connection, decision: dict, now: datetime, dry_
 
 
 def lie_down(conn: sqlite3.Connection, cfg: dict, now: datetime | None = None,
-             rng: random.Random | None = None) -> None:
-    """Mark wake end (C-wm): the floor clock restarts from lie-down (uniform
-    10-55min draw). Called by the tick entry point after a wake finishes —
-    including on wake failure, so a crashed wake can't wedge the floor."""
+             rng: random.Random | None = None, minutes: float | None = None) -> None:
+    """Mark wake end (C-wm): lie_down chooses the next internal wake. `minutes`
+    = an explicit choice (clamped to [floor_min_min, floor_max_min]); None =
+    a uniform "dice" draw within that window (preserves prior behaviour). The
+    clock restarts from lie-down. Called by the tick entry point after a wake
+    finishes — including on wake failure, so a crashed wake can't wedge it."""
     from cortex.pacemaker.triggers import reschedule_floor
 
     now = now or _now(cfg)
@@ -291,7 +269,7 @@ def lie_down(conn: sqlite3.Connection, cfg: dict, now: datetime | None = None,
     state = load_state(conn)
     new_state = dataclasses.replace(
         state,
-        next_floor_due_at=reschedule_floor(now, cfg, rng),
+        next_floor_due_at=reschedule_floor(now, cfg, rng, minutes),
         last_lie_down_at=now,
     )
     save_state(conn, new_state)

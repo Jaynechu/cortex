@@ -82,21 +82,8 @@ _DEFAULTS: dict[str, Any] = {
         "at_home_default": True,
         "cal_busy_default": False,
     },
-    # Pure-pacemaker config (consumed by pacemaker.* modules as top-level keys).
-    "desire": {
-        "attachment": {
-            "base_rate_per_min": 0.002,
-            "decay_rate_per_min": 0.0005,
-            "busy_multiplier": 0.0,
-            "home_free_multiplier": 2.0,
-            "gap_threshold_min": 180,
-        },
-        "curiosity": {"base_rate_per_min": 0.001, "decay_rate_per_min": 0.0005},
-        "worry": {"base_rate_per_min": 0.0, "decay_rate_per_min": 0.001},
-        "duty": {"base_rate_per_min": 0.001, "decay_rate_per_min": 0.0005},
-    },
     "gates": {
-        # Night window (plan 07-08): zero self-wakes 23-06 — floor/desire/
+        # Night window (plan 07-08): zero self-wakes 23-06 — floor/
         # self_scheduled/affect_flag all silent; only schedule (duty) pierces.
         "night": {"start": "23:00", "end": "06:00", "cap": 0},
         # Daily wake-token budget: once today's SUM(NET spend — cache-miss
@@ -106,15 +93,12 @@ _DEFAULTS: dict[str, Any] = {
         "daily_budget": {"tokens": 1_000_000},
     },
     "triggers": {
-        "desire_thresholds": {"attachment": 0.8, "curiosity": 0.8, "worry": 0.7, "duty": 0.8},
-        # Floor wake draw (minutes, uniform) from lie-down.
+        # Wake-window draw (minutes) from lie-down. lie_down picks the next wake:
+        # an explicit choice clamped to [min, max] (max = cache-TTL guard, min =
+        # anti-thrash), or a uniform "dice" draw within the window when omitted.
+        # Also the clamp for a model-declared watchdog silence window.
         "floor_min_min": 10,
         "floor_max_min": 55,
-    },
-    "expect_reply": {
-        "check_interval_min": 30,
-        "worry_increment": 0.05,
-        "tone_levels": ["neutral", "concerned", "worried", "anxious"],
     },
     # Wakeup note knobs. Every field is deterministic now, so the old whole-note
     # max_chars cap is gone; per-source limits below keep each line bounded.
@@ -139,7 +123,7 @@ _DEFAULTS: dict[str, Any] = {
 
 _SECTIONS = (
     "core", "paths", "knowledgec", "geofence", "health",
-    "tick", "pacemaker", "desire", "gates", "triggers", "expect_reply", "marrow",
+    "tick", "pacemaker", "gates", "triggers", "marrow",
     "wake", "note",
 )
 

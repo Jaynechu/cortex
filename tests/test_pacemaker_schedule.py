@@ -2,7 +2,6 @@ from datetime import datetime, timedelta, timezone
 
 from cortex.pacemaker import schedule
 from cortex.pacemaker.triggers import evaluate
-from cortex.pacemaker.desire import DesireState
 
 TZ = timezone(timedelta(hours=10))
 
@@ -58,7 +57,7 @@ def test_schedule_trigger_pierces():
     now = datetime(2026, 7, 8, 20, 40, tzinfo=TZ)
     ctx = {"schedule": [{"name": "review+plan", "prompt_path": None}]}
     cfg = {"triggers": {"floor_min_min": 10, "floor_max_min": 55}}
-    reasons = evaluate(DesireState(), ctx, cfg, now, next_floor_due_at=now + timedelta(hours=1))
+    reasons = evaluate(ctx, cfg, now, next_floor_due_at=now + timedelta(hours=1))
     kinds = [r.kind for r in reasons]
     assert "schedule" in kinds
     # floor is not due -> only the piercing schedule fires

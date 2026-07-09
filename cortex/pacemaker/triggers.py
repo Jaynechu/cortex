@@ -1,13 +1,11 @@
-"""Wake-reason evaluation (Decided 07-02): event, affect flag, desire
-threshold, self-scheduled, floor. Returns fired reasons carrying facts —
-never pre-written motive lines (Design: reasoning happens in the cortex
-session, not here).
+"""Wake-reason evaluation (Decided 07-02): event, affect flag, self-scheduled,
+schedule, floor. Returns fired reasons carrying facts — never pre-written motive
+lines (Design: reasoning happens in the cortex session, not here).
 
 Expected config shape (config["triggers"]):
     {
-        "desire_thresholds": {"attachment": 0.8, "curiosity": 0.7, ...},
-        "floor_min_min": 10,   # uniform draw lower bound (minutes)
-        "floor_max_min": 55,   # uniform draw upper bound (minutes)
+        "floor_min_min": 10,   # wake-window draw lower bound (minutes)
+        "floor_max_min": 55,   # wake-window draw upper bound (minutes)
     }
 
 Expected context keys used here:
@@ -28,24 +26,6 @@ class TriggerReason:
     kind: str
     detail: str
     facts: dict = field(default_factory=dict)
-
-
-def _desire_triggers(desire_state, config: dict) -> list[TriggerReason]:
-    thresholds = config.get("triggers", {}).get("desire_thresholds", {})
-    reasons = []
-    for name, threshold in thresholds.items():
-        value = getattr(desire_state, name, None)
-        if value is None:
-            continue
-        if value >= threshold:
-            reasons.append(
-                TriggerReason(
-                    kind="desire",
-                    detail=f"desire.{name} {value:.2f}>={threshold:.2f}",
-                    facts={"dimension": name, "value": value, "threshold": threshold},
-                )
-            )
-    return reasons
 
 
 def _event_triggers(context: dict) -> list[TriggerReason]:
@@ -99,7 +79,6 @@ def _floor_trigger(next_floor_due_at: datetime | None, now: datetime) -> list[Tr
 
 
 def evaluate(
-    desire_state,
     context: dict,
     config: dict,
     now: datetime,
@@ -108,12 +87,11 @@ def evaluate(
     """Evaluate all trigger kinds. Pure; consumes no rng (floor rescheduling
     is a separate step, see reschedule_floor()).
 
-    Collision model (C-wm): the floor timer governs desire + floor ONLY.
+    Collision model (C-wm): the floor timer governs the plain heartbeat ONLY.
     event/affect_flag (trigger) and self_scheduled (schedule) pierce anytime
-    and are never held back — ordered trigger > schedule. Desire is held
-    behind the floor (accrues meanwhile) and can only motivate a wake once the
-    floor is due. Coincident firings collapse to one wake; the plain floor
-    heartbeat stays silent whenever any other source already fired this tick.
+    and are never held back — ordered trigger > schedule. Coincident firings
+    collapse to one wake; the plain floor heartbeat stays silent whenever any
+    other source already fired this tick.
     """
     pierce: list[TriggerReason] = []
     pierce.extend(_event_triggers(context))
@@ -123,20 +101,31 @@ def evaluate(
 
     floor_due = next_floor_due_at is None or now >= next_floor_due_at
     if not floor_due:
-        return pierce  # desire held behind the floor; floor not due
+        return pierce  # floor not due yet
 
-    desire = _desire_triggers(desire_state, config)
-    if pierce or desire:
-        return pierce + desire  # something real fired -> floor silent
+    if pierce:
+        return pierce  # something real fired -> floor silent
     return _floor_trigger(next_floor_due_at, now)
 
 
-def reschedule_floor(now: datetime, config: dict, rng: random.Random) -> datetime:
-    """Draw the next floor due time, uniform in [floor_min_min, floor_max_min]
-    from `now`. Callers pass lie-down time as `now` on the wake path (C-wm:
-    floor clocks from lie-down, not wake); gated firings redraw from tick time
-    so a blocked floor doesn't re-fire every tick."""
+def clamp_window_minutes(minutes: float, config: dict) -> float:
+    """Clamp an explicit wake choice to [floor_min_min, floor_max_min] — the
+    min guards against thrash, the max protects the cache TTL."""
     trig_config = config.get("triggers", {})
     lo = trig_config.get("floor_min_min", 10)
     hi = trig_config.get("floor_max_min", 55)
-    return now + timedelta(minutes=rng.uniform(lo, hi))
+    return max(lo, min(hi, minutes))
+
+
+def reschedule_floor(now: datetime, config: dict, rng: random.Random,
+                     minutes: float | None = None) -> datetime:
+    """Draw the next wake due time from `now`. `minutes` = an explicit choice
+    (clamped to [floor_min_min, floor_max_min]); None = a uniform "dice" draw
+    within that window. Callers pass lie-down time as `now` on the wake path
+    (C-wm: the clock runs from lie-down, not wake); gated firings redraw from
+    tick time so a blocked floor doesn't re-fire every tick."""
+    trig_config = config.get("triggers", {})
+    lo = trig_config.get("floor_min_min", 10)
+    hi = trig_config.get("floor_max_min", 55)
+    draw = rng.uniform(lo, hi) if minutes is None else clamp_window_minutes(minutes, config)
+    return now + timedelta(minutes=draw)

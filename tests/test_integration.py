@@ -10,8 +10,6 @@ import pytest
 from cortex import config, db
 from cortex.pacemaker import gates, integration
 from cortex.pacemaker.core import PacemakerState
-from cortex.pacemaker.desire import DesireState
-from cortex.pacemaker.expect_reply import ExpectReplyState
 
 MEL = ZoneInfo("Australia/Melbourne")
 
@@ -37,9 +35,6 @@ def conn(cfg):
 def test_state_round_trip(conn):
     now = datetime.now(MEL)
     state = PacemakerState(
-        desire=DesireState(attachment=0.4, curiosity=0.1, worry=0.2, duty=0.3, last_tick_at=now),
-        expect_reply=ExpectReplyState(pending=True, sent_at=now, last_check_at=now,
-                                      checks_done=2, tone_level=1),
         next_floor_due_at=now + timedelta(minutes=60),
         last_wake_at=now,
         last_lie_down_at=now - timedelta(minutes=1),
@@ -48,9 +43,6 @@ def test_state_round_trip(conn):
     )
     integration.save_state(conn, state)
     loaded = integration.load_state(conn)
-    assert loaded.desire.attachment == pytest.approx(0.4)
-    assert loaded.expect_reply.pending is True
-    assert loaded.expect_reply.checks_done == 2
     assert loaded.next_floor_due_at == state.next_floor_due_at
     assert loaded.last_wake_at == state.last_wake_at
     assert loaded.last_lie_down_at == state.last_lie_down_at
@@ -62,14 +54,16 @@ def test_load_state_empty_default(conn):
     assert integration.load_state(conn) == PacemakerState()
 
 
-def test_load_state_old_json_without_new_fields_still_loads(conn):
+def test_load_state_legacy_desire_json_loads_gracefully(conn):
+    # A pre-retirement row still carries desire/expect_reply keys — they are
+    # ignored (not migrated), and loading must not crash.
     now = datetime.now(MEL)
     old_json = json.dumps({
         "desire": {"attachment": 0.1, "curiosity": 0.0, "worry": 0.0, "duty": 0.0,
                    "last_tick_at": now.isoformat()},
-        "expect_reply": {"pending": False, "sent_at": None, "last_check_at": None,
-                         "checks_done": 0, "tone_level": 0},
-        "next_floor_due_at": None,
+        "expect_reply": {"pending": True, "sent_at": now.isoformat(),
+                         "checks_done": 3, "tone_level": 2},
+        "next_floor_due_at": now.isoformat(),
         "last_wake_at": None,
     })
     conn.execute(
@@ -78,10 +72,16 @@ def test_load_state_old_json_without_new_fields_still_loads(conn):
     )
     conn.commit()
     state = integration.load_state(conn)
-    assert state.desire.attachment == pytest.approx(0.1)
+    assert state.next_floor_due_at is not None
     assert state.last_lie_down_at is None
     assert state.night_cap_key is None
     assert state.night_wake_count == 0
+    # A save drops the stale desire/expect_reply keys from the row.
+    integration.save_state(conn, state)
+    raw = json.loads(conn.execute(
+        "SELECT state FROM ct_pacemaker_state WHERE id = 1").fetchone()["state"])
+    assert "desire" not in raw
+    assert "expect_reply" not in raw
 
 
 # --- lie_down ---------------------------------------------------------------
@@ -89,7 +89,6 @@ def test_load_state_old_json_without_new_fields_still_loads(conn):
 def test_lie_down_sets_floor_and_preserves_other_fields(conn, cfg):
     now = datetime(2026, 7, 4, 10, 0, tzinfo=MEL)
     prior = PacemakerState(
-        desire=DesireState(attachment=0.4, curiosity=0.1, worry=0.2, duty=0.3, last_tick_at=now),
         last_wake_at=now,
         cortex_session_id="sid-1",
         cortex_session_date="2026-07-04",
@@ -103,10 +102,26 @@ def test_lie_down_sets_floor_and_preserves_other_fields(conn, cfg):
     floor_delta_min = (state.next_floor_due_at - now).total_seconds() / 60.0
     assert 10.0 <= floor_delta_min <= 55.0
     # other fields untouched
-    assert state.desire.attachment == pytest.approx(0.4)
     assert state.last_wake_at == now
     assert state.cortex_session_id == "sid-1"
     assert state.cortex_session_date == "2026-07-04"
+
+
+def test_lie_down_explicit_minutes_sets_exact_next_wake(conn, cfg):
+    now = datetime(2026, 7, 4, 10, 0, tzinfo=MEL)
+    integration.save_state(conn, PacemakerState())
+    integration.lie_down(conn, cfg, now=now, rng=random.Random(1), minutes=25)
+    state = integration.load_state(conn)
+    assert state.next_floor_due_at == now + timedelta(minutes=25)
+
+
+def test_lie_down_explicit_minutes_clamped_to_window(conn, cfg):
+    now = datetime(2026, 7, 4, 10, 0, tzinfo=MEL)
+    integration.save_state(conn, PacemakerState())
+    integration.lie_down(conn, cfg, now=now, rng=random.Random(1), minutes=999)
+    state = integration.load_state(conn)
+    # clamps to floor_max_min (default 55)
+    assert state.next_floor_due_at == now + timedelta(minutes=55)
 
 
 # --- context builder -------------------------------------------------------
