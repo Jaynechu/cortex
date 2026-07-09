@@ -83,7 +83,7 @@ def _fuse(cfg: dict, grace: float) -> None:
     from cortex import lie_down as lie_down_mod
 
     wcfg = cfg["wake"].get("watchdog", {})
-    handoff_grace = float(wcfg.get("fuse_handoff_grace_sec", 120))
+    handoff_grace = float(wcfg.get("fuse_handoff_grace_sec", 300))
     prompt = wcfg.get("fuse_handoff_prompt") or _DEFAULT_FUSE_PROMPT
 
     window.send_esc(cfg)
