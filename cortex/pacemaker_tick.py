@@ -34,24 +34,6 @@ def _handle_awake(conn, cfg: dict, st: dict) -> str:
     return f"wake in progress (idle {idle:.0f}min) -> tick skipped"
 
 
-def _rotate_fallback(conn, cfg: dict) -> None:
-    """Asleep + last known window tokens over the rotate line -> flag a rotate so
-    the NEXT wake respawns a fresh window (belt-and-suspenders behind lie_down's
-    own flag, e.g. if lie_down never ran). Time-cooldown guarded, no typing."""
-    if cfg["wake"].get("mode", "window") != "window":
-        return
-    rotate = int(cfg["wake"].get("rotate", {}).get("threshold_tokens", 100_000))
-    tokens = transcript.window_tokens(cfg)
-    if tokens < rotate:
-        return
-    cooldown = int(cfg["wake"].get("rotate", {}).get("cooldown_sec", 600))
-    st = wake_state.load(cfg)
-    if time.time() - float(st.get("rotated_at", 0)) < cooldown:
-        return
-    wake_state.set_rotated(cfg)
-    wake_state.update(cfg, rotated_at=time.time())
-
-
 def main() -> int:
     cfg = config.load()
     conn = db.connect(cfg)
@@ -80,8 +62,6 @@ def main() -> int:
                     # headless path finished -> wake over, redraw floor now.
                     integration.lie_down(conn, cfg)
                 # window path: marker set, watchdog owns lie_down.
-        elif not dry_run:
-            _rotate_fallback(conn, cfg)
     finally:
         conn.close()
     print(f"{db.utcnow_iso()} {decision['explanation']}", flush=True)
