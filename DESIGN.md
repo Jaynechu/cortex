@@ -3,7 +3,7 @@
 # Cortex Design
 
 > Stellan's autonomous consciousness layer — exists between chat sessions, not a chat feature.
-> Goals + principles only. Mechanism → MAP. Plan history → CC-Lab/docs/plans/ct-cortex-v1.md.
+> Goals + principles only. Mechanism → MAP. Plan → CC-Lab/docs/plans/ct-plan.md.
 
 ## What cortex is
 
