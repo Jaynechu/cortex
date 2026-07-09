@@ -121,6 +121,13 @@ _DEFAULTS: dict[str, Any] = {
         "force_slept_catchup_text":
             "Prior window was force-slept — catchup by recall all events from DB "
             "(do not read raw jsonl) and append to handoff.md",
+        # One-line turn-end reminder appended at the very end of every rendered
+        # note. "" omits it.
+        "turn_end_text":
+            "NOTE: choose wait time or next wake time at the end of each turn. "
+            "Wait: empty (default) /  wait(N) [N=11-55]; sleep: "
+            "lie_down(next_wake_min=N, or omit = dice). Pls leave empty during "
+            "casual chat with user.",
     },
 }
 

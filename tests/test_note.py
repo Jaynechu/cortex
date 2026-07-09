@@ -75,6 +75,21 @@ def test_render_omits_absent_lines(cfg):
     assert "### Replay" not in text
 
 
+def test_render_turn_end_line_appears_every_render(cfg):
+    text = note.render(cfg, NOW, {"wake_parts": ["wander"]})
+    assert text.rstrip().endswith(
+        "NOTE: choose wait time or next wake time at the end of each turn. "
+        "Wait: empty (default) /  wait(N) [N=11-55]; sleep: "
+        "lie_down(next_wake_min=N, or omit = dice). Pls leave empty during "
+        "casual chat with user.")
+
+
+def test_render_turn_end_line_omitted_when_blank(cfg):
+    cfg["note"]["turn_end_text"] = ""
+    text = note.render(cfg, NOW, {"wake_parts": ["wander"]})
+    assert "NOTE: choose wait time" not in text
+
+
 def test_render_force_slept_marker_and_catchup(cfg):
     data = {"wake_parts": ["wander"], "last_wake": {"minutes_ago": 40, "force_slept": "timeout"}}
     text = note.render(cfg, NOW, data)

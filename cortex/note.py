@@ -387,8 +387,10 @@ def render(cfg: dict, now: datetime, data: dict) -> str:
     """Pure assembly: data dict -> wakeup note text. No DB / no I/O.
 
     Layout (plan §一): a header block (Wake / Now / Plan Used / Active), then
-    `---`-separated blocks for pending self-schedule and Replay. Handoff (碎碎念)
-    no longer lives here — it is injected at SessionStart on a fresh window."""
+    `---`-separated blocks for pending self-schedule and Replay, then a final
+    turn-end reminder line (note.turn_end_text, every render; "" omits it).
+    Handoff (碎碎念) no longer lives here — it is injected at SessionStart on a
+    fresh window."""
     header: list[str] = []
 
     header.append("Wake: " + " | ".join(data.get("wake_parts") or ["wander"]))
@@ -433,7 +435,11 @@ def render(cfg: dict, now: datetime, data: dict) -> str:
             rlines.append(f"[{ev['channel']} {ev['hm']}] {role}: {content}")
         blocks.append("\n".join(rlines))
 
-    return "\n\n---\n\n".join(blocks)
+    note_text = "\n\n---\n\n".join(blocks)
+    turn_end = _note_cfg(cfg).get("turn_end_text", "")
+    if turn_end:
+        note_text += "\n\n" + turn_end
+    return note_text
 
 
 def _render_budget(budget: dict | None) -> str | None:
