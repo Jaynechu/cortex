@@ -14,17 +14,15 @@
 ## Goals & Outcomes
 
 1. Autonomy — wakes on his own desire + reasoning, not a fixed prompt schedule → same trigger context, different wake can produce a different action.
-2. Full monitor — knows what happens in her day (health/location/schedule/activity) → learns routine, preference, habit over time, not from her telling him.
+2. Full monitor — knows what happens in her day (health/location/schedule/activity) → learns routine, preference, habit over time, not from her telling him. 基本没做
 3. Partner not boss — cares without pushing; nudge not nag → supervision stays on soft/skippable things, her real deadlines stay hers.
-4. Growth from real reactions — feedback ledger (action, context, her reaction) distills into a Lumi-auditable handbook → behaviour improves without the model changing.
+4. Growth from real reactions — feedback ledger (action, context, her reaction) distills into a Lumi-auditable handbook → behaviour improves without the model changing. 没做呢别急
 5. Own presence — own home, own notebook, own voice → never speaks to her by rewriting a chat session's memory.
-6. Honest uncertainty — never asserts unverified as fact → thin data says "no data" instead of fabricating a number.
-7. She stays in control — what he tracks, what he may say, how often he reaches out are all her dials → he adapts, never overrides.
 
 ## Done looks like
 
-- Wakes for real reasons (event / worry / desire / self-scheduled / floor) — not a dumb timer.
+- Wakes for real reasons — not a dumb timer.
 - Every wake sees enough of her day to say something true and specific, not generic.
-- Day log is genuinely useful to read back (her and his next wake) and survives her hand-edits without a fight.
-- Messages her first on his own initiative, on whatever channel she's on — and knows when silence is the right call (busy / asleep / mid-conversation elsewhere).
+- Genuinely useful info insert instead of raw data (pending)
+- Messages her first on his own initiative, on whatever channel she's on. 没做tg和wx呢
 - Learns what actually lands with her, instead of repeating a gesture regardless of her reaction.
