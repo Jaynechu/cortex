@@ -90,6 +90,18 @@ def test_render_turn_end_line_omitted_when_blank(cfg):
     assert "NOTE: choose wait time" not in text
 
 
+def test_render_title_prepended_with_blank_line(cfg):
+    cfg["note"]["title"] = "📮 小道消息"
+    text = note.render(cfg, NOW, {"wake_parts": ["wander"]})
+    assert text.startswith("📮 小道消息\n\nWake: wander")
+
+
+def test_render_title_empty_omits_it(cfg):
+    text = note.render(cfg, NOW, {"wake_parts": ["wander"]})
+    assert text.startswith("Wake: wander")
+    assert "小道消息" not in text
+
+
 def test_render_force_slept_marker_and_catchup(cfg):
     data = {"wake_parts": ["wander"], "last_wake": {"minutes_ago": 40, "force_slept": "timeout"}}
     text = note.render(cfg, NOW, data)

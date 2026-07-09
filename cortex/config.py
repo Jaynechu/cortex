@@ -113,6 +113,9 @@ _DEFAULTS: dict[str, Any] = {
     # max_chars cap is gone; per-source limits below keep each line bounded.
     # OSS: identity/display strings stay in config, never hardcoded in .py.
     "note": {
+        # Optional first line of the wakeup note (e.g. a nickname for the
+        # note), followed by a blank line then the usual content. "" omits it.
+        "title": "",
         # Trailing conversation events force-appended to the Replay block
         # (cross-session, uniform, no decay). 4 = two round-trips.
         "replay_events": 4,

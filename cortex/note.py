@@ -439,6 +439,10 @@ def render(cfg: dict, now: datetime, data: dict) -> str:
     turn_end = _note_cfg(cfg).get("turn_end_text", "")
     if turn_end:
         note_text += "\n\n" + turn_end
+
+    title = _note_cfg(cfg).get("title", "")
+    if title:
+        note_text = title + "\n\n" + note_text
     return note_text
 
 

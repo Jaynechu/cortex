@@ -172,6 +172,7 @@ floor_max_min = 55             # wake-window draw upper bound (uniform hi / clam
 # max_chars cap is gone; per-source limits below keep each line bounded.
 # Persona/display strings + behaviour (identity stays in config).
 [note]
+title = ""                   # first line of the wakeup note, e.g. a nickname for the note; empty hides it
 replay_events = 6            # trailing user/assistant events in the replay section
 replay_event_chars = 300     # per-event truncation in the replay section
 replay_exclude_channels = ["ct"]  # channels excluded from replay (ct = cortex self-talk); [] to include all
