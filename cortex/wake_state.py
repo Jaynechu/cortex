@@ -12,7 +12,8 @@ from pathlib import Path
 
 from cortex import config
 
-_AWAKE_KEYS = ("awake", "awake_since", "wake_log_id", "transcript", "silence_wait_until")
+_AWAKE_KEYS = ("awake", "awake_since", "wake_log_id", "transcript",
+               "silence_wait_until", "wait_count")
 
 
 def wake_state_path(cfg: dict) -> Path:
@@ -68,7 +69,7 @@ def is_awake(cfg: dict) -> bool:
 def set_awake(cfg: dict, wake_log_id: int | None, transcript: str | None) -> None:
     update(cfg, awake=True,
            awake_since=datetime.now(timezone.utc).isoformat(),
-           wake_log_id=wake_log_id, transcript=transcript)
+           wake_log_id=wake_log_id, transcript=transcript, wait_count=0)
 
 
 def clear_awake(cfg: dict) -> None:
@@ -105,6 +106,22 @@ def clear_wait_until(cfg: dict) -> None:
     d = load(cfg)
     if d.pop("silence_wait_until", None) is not None:
         _save(cfg, d)
+
+
+def get_wait_count(cfg: dict) -> int:
+    """How many wait() calls have fired this wake (reset on wake start /
+    lie_down). Absent -> 0."""
+    try:
+        return int(load(cfg).get("wait_count", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def bump_wait_count(cfg: dict) -> int:
+    """Increment and persist the per-wake wait() counter; returns the new count."""
+    count = get_wait_count(cfg) + 1
+    update(cfg, wait_count=count)
+    return count
 
 
 def set_rotated(cfg: dict) -> None:

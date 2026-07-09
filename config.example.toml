@@ -76,6 +76,7 @@ ear_timeout_sec = 90           # recovery deadline for a wake to land before res
 # say() = the ONLY place cortex takes focus: it fronts the resident window and
 # plays a system sound (name of a /System/Library/Sounds/*.aiff; "" = silent).
 say_sound = "Glass"
+wait_max_per_wake = 2       # max wait() calls per wake (reset on wake start / lie_down); a call past this is refused
 
 # Per-wake watchdog thresholds (spawned at injection, killed at lie_down).
 [wake.watchdog]
@@ -87,6 +88,11 @@ fuse_tokens = 150000           # (c) window tokens >= this -> esc + proxy lie_do
 # path, only if the transcript is still growing past the grace window.
 hard_interrupt_enabled = true
 hard_interrupt_grace_sec = 30
+# On the fuse path, after esc the session is prompted to write its handoff and
+# lie_down(rotate=True). It gets this many seconds to do so itself before the
+# force path (SIGINT + proxy lie_down) fires. Hard deadline — the fuse never hangs.
+fuse_handoff_grace_sec = 120
+# fuse_handoff_prompt = ""     # override the "write handoff + lie_down" prompt text
 
 # Context-window rotation: lie_down (and the tick fallback) flag a rotate when the
 # window grows past this, so the NEXT wake respawns a fresh window (SIGTERM claude

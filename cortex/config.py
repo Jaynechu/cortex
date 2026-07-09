@@ -55,6 +55,9 @@ _DEFAULTS: dict[str, Any] = {
         "arm_prompt_path": "",
         "ear_timeout_sec": 90,
         "say_sound": "Glass",
+        # Max wait() calls allowed per wake (reset on wake start / lie_down).
+        # A call past this returns a refusal result (not an exception).
+        "wait_max_per_wake": 2,
     },
     # marrow repo invocation for the wake call (separate venv/deps, C3).
     "marrow": {
@@ -116,8 +119,8 @@ _DEFAULTS: dict[str, Any] = {
         "pending_window_min": 15,
         # Prior window force-slept without a handoff -> backfill hint line.
         "force_slept_catchup_text":
-            "Prior window was force-slept without a handoff — backfill from DB "
-            "(recall/events + tl), not raw jsonl, before you carry on.",
+            "Prior window was force-slept — catchup by recall all events from DB "
+            "(do not read raw jsonl) and append to handoff.md",
     },
 }
 

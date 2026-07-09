@@ -80,7 +80,7 @@ def test_render_force_slept_marker_and_catchup(cfg):
     text = note.render(cfg, NOW, data)
     assert "Last wake: 40min ago (force-slept mid-task)" in text
     # catch-up backfill hint appears only on a force-slept prior window
-    assert "backfill from DB" in text
+    assert "recall all events from DB" in text
 
 
 # --------------------------------------------------------------------------- #

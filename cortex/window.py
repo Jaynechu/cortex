@@ -359,6 +359,23 @@ def inject_note(cfg: dict, text: str, sid: str | None = None) -> None:
     _guard_focus(prev)
 
 
+def inject_prompt(cfg: dict, text: str) -> bool:
+    """Inject a one-line text prompt into the resident cortex window, restoring
+    focus afterwards. Used by the fuse path to ask the session to write its
+    handoff and lie down. Returns False if there is no resident session."""
+    sid = wake_state.get_session_id(cfg)
+    if not sid:
+        return False
+    prev = _frontmost_bid()
+    try:
+        _submit_prompt(sid, text)
+    except WindowError:
+        return False
+    finally:
+        _guard_focus(prev)
+    return True
+
+
 def send_esc(cfg: dict) -> None:
     """Interrupt the current turn (ESC, char id 27, no trailing newline)."""
     sid = wake_state.get_session_id(cfg)
