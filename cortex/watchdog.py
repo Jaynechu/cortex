@@ -1,10 +1,11 @@
 """Per-wake watchdog: spawned at note injection, killed at lie_down, never
 resident. Every poll_sec it reads the transcript (mtime + window tokens) and
-the awake marker, applying one-dog-three-judgements (plan 07-08):
-  (a) running past run_max_min & still active -> esc + wrap-up nudge (self-wrap);
-  (b) silent past silent_max_min without lie_down -> proxy lie_down (timeout);
-  (c) window tokens >= fuse -> esc + proxy lie_down (fuse).
-On (a) and (c), esc is followed by a grace window (hard_interrupt_grace_sec):
+the awake marker, applying two judgements:
+  (b) silent past silent_max_min without lie_down -> proxy lie_down (timeout).
+      The routine end: user replies keep the transcript mtime fresh, so an
+      active conversation never times out mid-turn.
+  (c) window tokens >= fuse -> esc + proxy lie_down (fuse) — the runaway fuse.
+On the fuse path, esc is followed by a grace window (hard_interrupt_grace_sec):
 if the transcript is still growing (esc didn't land, e.g. no focus), SIGINT the
 resident claude process — a guaranteed esc-equivalent, at most once per trigger.
 Three-layer trace: esc/inject/SIGINT -> ct_wake_log.force_slept -> next note's
@@ -16,12 +17,9 @@ import os
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
 
 from cortex import config, db, transcript, wake_state, window
 from cortex.pacemaker import integration
-
-_WRAP_LINE = "写碎碎念收尾躺下"
 
 
 def spawn(cfg: dict) -> int:
@@ -36,14 +34,6 @@ def spawn(cfg: dict) -> int:
         start_new_session=True, env={**os.environ},
     )
     return p.pid
-
-
-def _elapsed_min(iso: str | None) -> float:
-    try:
-        t = datetime.fromisoformat(iso)
-    except (ValueError, TypeError):
-        return 0.0
-    return (datetime.now(timezone.utc) - t).total_seconds() / 60.0
 
 
 def _verify_esc_or_hard_interrupt(cfg: dict, grace_sec: float, trigger: str) -> str | None:
@@ -77,13 +67,10 @@ def run(cfg: dict) -> int:
 
     wcfg = cfg["wake"].get("watchdog", {})
     poll = int(wcfg.get("poll_sec", 60))
-    run_max = float(wcfg.get("run_max_min", 10))
-    silent_max = float(wcfg.get("silent_max_min", 5))
+    silent_max = float(wcfg.get("silent_max_min", 10))
     fuse = int(wcfg.get("fuse_tokens", 150_000))
     grace = float(wcfg.get("hard_interrupt_grace_sec", 30))
-    wrap = cfg["wake"].get("wrap_line", _WRAP_LINE)
 
-    wrap_sent = False
     while True:
         time.sleep(poll)
         st = wake_state.load(cfg)
@@ -93,7 +80,6 @@ def run(cfg: dict) -> int:
         mt = transcript.mtime(cfg)
         silent_min = (time.time() - mt) / 60.0 if mt else 0.0
         tokens = transcript.window_tokens(cfg)
-        run_min = _elapsed_min(st.get("awake_since"))
 
         # Publish the live NET spend (cache-miss rewrite + output) for the next
         # wake's Budget line; `tokens` (full occupancy) still drives fuse below.
@@ -111,13 +97,6 @@ def run(cfg: dict) -> int:
         if silent_min >= silent_max:
             lie_down_mod.lie_down(cfg, force_slept="timeout")
             return 0
-        if run_min >= run_max and not wrap_sent:
-            window.send_esc(cfg)
-            note = _verify_esc_or_hard_interrupt(cfg, grace, "overrun")
-            if note:
-                print(f"{db.utcnow_iso()} {note}", flush=True)  # into watchdog.log
-            window.append_nudge_signal(cfg, wrap)  # NUDGE via the ear
-            wrap_sent = True  # give the self-wrap-up one chance, then let (b)/(c) act
 
 
 def main(argv: list[str] | None = None) -> int:

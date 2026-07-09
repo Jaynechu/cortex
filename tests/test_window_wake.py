@@ -302,15 +302,6 @@ def test_append_wake_signal_line_format(cfg):
     assert text == "Waking up — read /tmp/note.md first"
 
 
-def test_append_nudge_signal_kind(cfg):
-    """The watchdog wrap-up nudge is a distinct NUDGE line carrying wrap_line."""
-    from cortex import window
-
-    window.append_nudge_signal(cfg, "写碎碎念收尾躺下")
-    lines = config.wake_signal_log_path(cfg).read_text().strip().splitlines()
-    assert lines[-1] == "NUDGE 写碎碎念收尾躺下"
-
-
 def test_append_wake_signal_appends_not_overwrites(cfg):
     """Multiple signals accumulate (the ear tails the file)."""
     from cortex import window

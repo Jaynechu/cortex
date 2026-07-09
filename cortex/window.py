@@ -161,11 +161,6 @@ def append_wake_signal(cfg: dict, note_path: str) -> None:
     _append_signal_line(cfg, f"Waking up — read {note_path} first")
 
 
-def append_nudge_signal(cfg: dict, wrap_line: str) -> None:
-    """Append one NUDGE line (watchdog wrap-up nudge) the ear picks up."""
-    _append_signal_line(cfg, f"NUDGE {wrap_line}")
-
-
 _launch_command = launch_command  # back-compat alias
 
 
@@ -198,8 +193,8 @@ def ensure_window(cfg: dict) -> str:
     window/geometry, and the shell is otherwise idle so typing the launch
     command is safe. Either path is a new brain; wake.py's _window_rotated
     detects both cases itself (session-dead / claude-dead) BEFORE this runs,
-    so no rotate flag is set here (this fn also fires mid-wake for the
-    watchdog wrap nudge, where setting it would wrongly mark the NEXT wake)."""
+    so no rotate flag is set here (this fn can also fire mid-wake, where
+    setting it would wrongly mark the NEXT wake)."""
     sid = wake_state.get_session_id(cfg)
     if sid and is_running() and _session_alive(sid):
         if find_claude_pid(cfg) is not None:
