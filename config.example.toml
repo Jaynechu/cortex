@@ -69,13 +69,20 @@ skip_permissions = true        # add --dangerously-skip-permissions so a fresh d
                                # trust dialog never blocks the injected note
 ready_marker = "accept edits"  # TUI footer text signalling claude is ready for input
 ready_timeout_sec = 30         # max wait for readiness after a fresh spawn
-# The signal-file ear. The resident window arms a persistent Monitor
-# (`tail -n 0 -f <signal_log>`) at launch; the pacemaker appends WAKE/NUDGE
-# lines to it to wake the window (no keyboard typing). ear_timeout_sec = how
-# long a wake is given to land (transcript grows) before respawn + re-append.
+# The signal-file ear (alive-resident wake only). An already-running resident
+# window has a persistent Monitor (`tail -n 0 -f <signal_log>`); the pacemaker
+# appends a WAKE line to wake it (no keyboard typing). ear_timeout_sec = how
+# long a wake is given to land (transcript grows) before the resident is
+# replaced by a FRESH window that gets the note as its first prompt.
 signal_log = ""                # Default: <cortex_home>/wake_signal.log
-arm_prompt_path = ""           # launch-time arm prompt. Default: <cortex_home>/prompts/arm.md
-ear_timeout_sec = 90           # recovery deadline for a wake to land before respawn
+ear_timeout_sec = 90           # recovery deadline for an alive-window wake to land before respawn
+# A fresh window (rotate / dead resident / ear miss) is spawned with this line
+# baked in as claude's FIRST prompt so it starts acting immediately — no arm
+# prompt, no lie-down-first, no signal. {note} = the wakeup-note file path.
+wake_prompt = "Read {note} — this is your wakeup note; act on it"
+# Quiet macOS notification fired when a fresh window is spawned for a wake (a
+# soft good-morning ping, no focus steal). "" = silent.
+spawn_greeting = "🐷"
 # say() = the ONLY place cortex takes focus: it fronts the resident window and
 # plays a system sound (name of a /System/Library/Sounds/*.aiff; "" = silent).
 say_sound = "Glass"

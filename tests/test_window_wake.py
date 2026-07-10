@@ -139,10 +139,10 @@ def test_clear_due_self_schedule_bare_dict(cfg):
 
 # --- lie_down: token recording into ct_wake_log ------------------------------
 
-def test_window_wake_dispatch(cfg, monkeypatch):
-    """Live window: _window_wake writes the note file, appends ONE WAKE signal
-    line (no typing, no respawn), captures the wake row id, sets the awake
-    marker, and lights the watchdog — verified without osascript."""
+def test_window_wake_alive_uses_ear(cfg, monkeypatch):
+    """Alive resident window: _window_wake writes the note file, appends ONE
+    WAKE signal line (no respawn, no note-as-prompt), captures the wake row id,
+    sets the awake marker, and lights the watchdog — verified without osascript."""
     from cortex import wake, watchdog, window
 
     conn = db.connect(cfg)
@@ -155,7 +155,7 @@ def test_window_wake_dispatch(cfg, monkeypatch):
     calls = {}
     monkeypatch.setattr(wake, "_window_alive", lambda c: True)
     monkeypatch.setattr(window, "respawn",
-                        lambda c: calls.setdefault("respawn", True))
+                        lambda c, initial_prompt=None: calls.setdefault("respawn", True))
     monkeypatch.setattr(
         window, "append_wake_signal",
         lambda c, note: calls.setdefault("signal", note))
@@ -175,8 +175,10 @@ def test_window_wake_dispatch(cfg, monkeypatch):
     assert d["awake"] is True and d["wake_log_id"] == wid
 
 
-def test_window_wake_respawn_on_flag(cfg, monkeypatch):
-    """respawn=True (rotate/rebirth) replaces the window before the signal."""
+def test_window_wake_respawn_delivers_note_as_prompt(cfg, monkeypatch):
+    """respawn=True (rotate/rebirth) spawns a FRESH window with the note-read
+    line baked in as its first prompt — no signal append — fires the greeting,
+    and sets the awake marker + watchdog."""
     from cortex import wake, watchdog, window
 
     conn = db.connect(cfg)
@@ -184,24 +186,32 @@ def test_window_wake_respawn_on_flag(cfg, monkeypatch):
         "INSERT INTO ct_wake_log (ts, wake, dry_run, explanation) VALUES (?,1,0,?)",
         (db.utcnow_iso(), "respawn"))
     conn.commit()
+    wid = conn.execute("SELECT MAX(id) AS id FROM ct_wake_log").fetchone()["id"]
 
     calls = {}
-    monkeypatch.setattr(window, "respawn", lambda c: calls.setdefault("respawn", True))
+    monkeypatch.setattr(window, "respawn",
+                        lambda c, initial_prompt=None: calls.setdefault("prompt", initial_prompt))
+    monkeypatch.setattr(window, "spawn_greeting", lambda c: calls.setdefault("greeting", True))
     monkeypatch.setattr(window, "append_wake_signal",
                         lambda c, note: calls.setdefault("signal", note))
-    monkeypatch.setattr(wake, "_signal_landed", lambda c, before, t: True)
-    monkeypatch.setattr(watchdog, "spawn", lambda c: None)
+    monkeypatch.setattr(watchdog, "spawn", lambda c: calls.setdefault("watchdog", True))
 
     from datetime import datetime as _dt
     res = wake._window_wake(conn, cfg, "N", _dt.now(timezone.utc), respawn=True)
     conn.close()
     assert res["mode"] == "window"
-    assert calls["respawn"] is True
-    assert calls["signal"] == str(wake_state.wakeup_note_path(cfg))
+    note_path = str(wake_state.wakeup_note_path(cfg))
+    assert calls["prompt"] == window.note_read_line(cfg, note_path)  # note baked in
+    assert "signal" not in calls                # fresh path never appends a signal
+    assert calls["greeting"] is True
+    assert calls["watchdog"] is True
+    d = wake_state.load(cfg)
+    assert d["awake"] is True and d["wake_log_id"] == wid
 
 
-def test_window_wake_recovery_reappends_on_ear_miss(cfg, monkeypatch):
-    """Signal did not land within ear_timeout -> respawn once + re-append."""
+def test_window_wake_recovery_respawns_with_note_on_ear_miss(cfg, monkeypatch):
+    """Signal did not land within ear_timeout on an alive window -> spawn a
+    fresh window that gets the note directly (no re-append)."""
     from cortex import wake, watchdog, window
 
     conn = db.connect(cfg)
@@ -212,8 +222,10 @@ def test_window_wake_recovery_reappends_on_ear_miss(cfg, monkeypatch):
 
     calls = {"respawn": 0, "signal": 0}
     monkeypatch.setattr(wake, "_window_alive", lambda c: True)
-    monkeypatch.setattr(window, "respawn",
-                        lambda c: calls.__setitem__("respawn", calls["respawn"] + 1))
+    monkeypatch.setattr(
+        window, "respawn",
+        lambda c, initial_prompt=None: calls.__setitem__("respawn", calls["respawn"] + 1))
+    monkeypatch.setattr(window, "spawn_greeting", lambda c: None)
     monkeypatch.setattr(window, "append_wake_signal",
                         lambda c, note: calls.__setitem__("signal", calls["signal"] + 1))
     monkeypatch.setattr(wake, "_signal_landed", lambda c, before, t: False)  # never lands
@@ -223,21 +235,18 @@ def test_window_wake_recovery_reappends_on_ear_miss(cfg, monkeypatch):
     res = wake._window_wake(conn, cfg, "N", _dt.now(timezone.utc))
     conn.close()
     assert res["mode"] == "window"
-    assert calls["respawn"] == 1   # respawned exactly once on the miss
-    assert calls["signal"] == 2    # original + one re-append
+    assert calls["respawn"] == 1   # fresh window spawned exactly once on the miss
+    assert calls["signal"] == 1    # only the original ear signal, no re-append
 
 
 def test_window_wake_falls_back_on_window_error(cfg, monkeypatch):
-    """An osascript/iTerm failure (WindowError) in the respawn/signal path ->
-    None so the caller drops to the headless fallback; awake marker stays off."""
+    """An osascript/iTerm failure (WindowError) in the respawn path -> None so
+    the caller drops to the headless fallback; awake marker stays off."""
     from cortex import wake, window
 
-    def boom(c):
+    def boom(c, initial_prompt=None):
         raise window.WindowError("no iterm")
-    monkeypatch.setattr(wake, "_window_alive", lambda c: True)
-    monkeypatch.setattr(window, "append_wake_signal",
-                        lambda c, note: (_ for _ in ()).throw(
-                            window.WindowError("append")))
+    monkeypatch.setattr(wake, "_window_alive", lambda c: False)  # dead -> fresh path
     monkeypatch.setattr(window, "respawn", boom)
     from datetime import datetime as _dt
     assert wake._window_wake(None, cfg, "x", _dt.now(timezone.utc)) is None
@@ -312,30 +321,58 @@ def test_append_wake_signal_appends_not_overwrites(cfg):
     assert len(lines) == 2
 
 
-# --- arm prompt substituted into the launch command ---------------------------
+# --- wakeup note baked into the launch command --------------------------------
 
-def test_launch_command_embeds_arm_prompt_with_signal_log(cfg, tmp_path):
-    """launch_command appends the arm prompt as claude's initial positional
-    prompt, with {signal_log} substituted for the live signal-log path."""
+def test_note_read_line_uses_config_template(cfg):
+    """note_read_line renders the config wake_prompt with {note} substituted."""
     from cortex import window
 
-    arm = tmp_path / "arm.md"
-    arm.write_text("arm ear on {signal_log} then lie down")
-    cfg["wake"]["arm_prompt_path"] = str(arm)
-    sig = str(config.wake_signal_log_path(cfg))
-
-    cmd = window.launch_command(cfg)
-    assert f"arm ear on {sig} then lie down" in cmd
-    assert "{signal_log}" not in cmd  # placeholder fully resolved
+    cfg["wake"]["wake_prompt"] = "GO: read {note} now"
+    assert window.note_read_line(cfg, "/x/note.md") == "GO: read /x/note.md now"
 
 
-def test_launch_command_no_arm_prompt_when_missing(cfg):
-    """No arm file -> no trailing prompt arg, window still launches."""
+def test_launch_command_bakes_initial_prompt(cfg):
+    """launch_command bakes a non-empty initial_prompt as claude's first
+    positional prompt (single-quoted) so a fresh window acts with zero typing."""
     from cortex import window
 
-    cfg["wake"]["arm_prompt_path"] = "/nonexistent/arm.md"
+    cmd = window.launch_command(cfg, "Read /x/note.md — act on it")
+    assert cmd.rstrip().endswith("'Read /x/note.md — act on it'")
+    assert "arm" not in cmd  # no arm mechanism left
+
+
+def test_launch_command_no_prompt_when_none(cfg):
+    """No initial prompt -> no trailing prompt arg, window still launches."""
+    from cortex import window
+
     cmd = window.launch_command(cfg)
     assert cmd.rstrip().endswith("--dangerously-skip-permissions")
+
+
+def test_arm_mechanism_retired(cfg):
+    """The arm-prompt boot mechanism is fully gone."""
+    from cortex import config as _config, window
+
+    assert not hasattr(window, "arm_prompt")
+    assert not hasattr(_config, "arm_prompt_path")
+
+
+def test_spawn_greeting_notifies_when_set(cfg, monkeypatch):
+    """spawn_greeting posts a notification with the configured text; empty =
+    silent (no osascript call)."""
+    from cortex import window
+
+    fired = {}
+    monkeypatch.setattr(window, "_notify", lambda t: fired.setdefault("text", t))
+
+    cfg["wake"]["spawn_greeting"] = "🐷"
+    window.spawn_greeting(cfg)
+    assert fired["text"] == "🐷"
+
+    fired.clear()
+    cfg["wake"]["spawn_greeting"] = ""
+    window.spawn_greeting(cfg)
+    assert "text" not in fired  # empty -> silent, no notify call
 
 
 # --- rotate = flag for respawn, no /clear typing ------------------------------

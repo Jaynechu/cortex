@@ -254,28 +254,54 @@ def _signal_landed(cfg, before: float | None, timeout_sec: float) -> bool:
     return False
 
 
+def _spawn_wake(conn, cfg, note_path, now) -> dict | None:
+    """Fresh-window wake (respawn / rotate / dead window / ear-miss recovery):
+    spawn a new resident window whose FIRST prompt is the wakeup-note Read line,
+    baked into the launch command — the window starts acting immediately, with
+    no arm prompt, no lie-down-first, and no signal append. A quiet greeting
+    notification fires on spawn. Sets the awake marker + lights the watchdog.
+    Returns a result dict, or None on window failure (caller -> headless)."""
+    from cortex import transcript, wake_state, watchdog, window
+
+    try:
+        window.respawn(cfg, initial_prompt=window.note_read_line(cfg, note_path))
+        window.spawn_greeting(cfg)
+    except window.WindowError:
+        return None
+    tpath = transcript.newest(cfg)
+    wake_state.set_awake(cfg, _latest_wake_log_id(conn),
+                         str(tpath) if tpath else None)
+    watchdog.spawn(cfg)
+    return {"mode": "window", "session_id": None, "text": None}
+
+
 def _window_wake(conn, cfg, note_text, now, respawn: bool = False) -> dict | None:
-    """Interactive wake via the signal-file ear: write the note file, then
-    append a WAKE line to the signal log the resident window's armed Monitor
-    tails — no typing. `respawn` (rotate) or a dead/rotated window is
-    replaced by a fresh self-arming window first. After appending, verify the
-    wake landed (transcript mtime grows within ear_timeout_sec); if not, respawn
-    once and re-append. Sets the awake marker + lights the watchdog. Returns a
-    result dict, or None if the window path failed (caller -> headless). The
-    wake is NOT over here — lie_down (self or watchdog proxy) ends it."""
+    """Interactive wake. A fresh brain (rotate/dead/rotated window) is spawned
+    with the note as its first prompt (_spawn_wake) — no ear, no ritual. An
+    alive resident window is woken via the signal-file ear: write the note file,
+    append a WAKE line its armed Monitor tails, then verify the wake landed
+    (transcript mtime grows within ear_timeout_sec). On an ear miss the resident
+    is replaced by a fresh window that gets the note directly. Sets the awake
+    marker + lights the watchdog. Returns a result dict, or None if the window
+    path failed (caller -> headless). The wake is NOT over here — lie_down (self
+    or watchdog proxy) ends it."""
     from cortex import transcript, wake_state, watchdog, window
 
     note_path = str(window.write_note(cfg, note_text))
+
+    # Fresh brain: rotate/rebirth or a dead resident -> spawn with the note baked
+    # in as the first prompt (no ear, no arm/lie-down dance).
+    if respawn or not _window_alive(cfg):
+        return _spawn_wake(conn, cfg, note_path, now)
+
+    # Alive resident: the signal-file ear path (unchanged).
     timeout = float(cfg["wake"].get("ear_timeout_sec", 90))
     try:
-        if respawn or not _window_alive(cfg):
-            window.respawn(cfg)
         before = transcript.mtime(cfg)
         window.append_wake_signal(cfg, note_path)
         if not _signal_landed(cfg, before, timeout):
-            _audit_wake(conn, wake_id_of(now), "ear miss -> respawn + re-append")
-            window.respawn(cfg)
-            window.append_wake_signal(cfg, note_path)
+            _audit_wake(conn, wake_id_of(now), "ear miss -> respawn with note")
+            return _spawn_wake(conn, cfg, note_path, now)
     except window.WindowError:
         return None
     tpath = transcript.newest(cfg)
@@ -347,8 +373,9 @@ def run_wake(
     # (tests / headless callers) always runs the marrow-subprocess path below.
     if cfg["wake"].get("mode", "window") == "window" and caller is call_marrow_cortex:
         # A rotated/dead window is a fresh brain that must read the old brain's
-        # handoff note -> respawn (SIGTERM claude + fresh self-arming window),
-        # so the same path serves rotate and a dead window.
+        # handoff note -> respawn (SIGTERM claude + fresh window that gets the
+        # note as its first prompt), so the same path serves rotate and a dead
+        # window.
         window_text = note_text
         respawn = _window_rotated(cfg)
         if respawn:

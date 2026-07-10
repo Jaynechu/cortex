@@ -43,15 +43,18 @@ _DEFAULTS: dict[str, Any] = {
     },
     # Per-wake safety valve: cap tokens spent in one wake; breach or the marrow
     # wall-clock timeout (marrow.call_timeout_s) forces a fresh session next wake.
-    # signal_log = the ear's tail-followed wake signal file (WAKE/NUDGE lines);
-    # arm_prompt_path = the launch-time prompt that arms the Monitor ear;
-    # ear_timeout_sec = how long the pacemaker waits for a wake to land before
-    # respawning; say_sound = the sound say() plays when it fronts the window.
+    # signal_log = the ear's tail-followed wake signal file (alive-resident wake);
+    # ear_timeout_sec = how long the pacemaker waits for an alive-window wake to
+    # land before respawning fresh; wake_prompt = the first prompt baked into a
+    # freshly spawned window ({note} -> note path); spawn_greeting = a quiet
+    # notification fired when a fresh window is spawned ("" = silent);
+    # say_sound = the sound say() plays when it fronts the window.
     "wake": {
         "token_cap": 150_000,
         "signal_log": "",
-        "arm_prompt_path": "",
         "ear_timeout_sec": 90,
+        "wake_prompt": "Read {note} — this is your wakeup note; act on it",
+        "spawn_greeting": "🐷",
         "say_sound": "Glass",
         # Max wait() calls allowed per wake (reset on wake start / lie_down).
         # A call past this returns a refusal result (not an exception).
@@ -269,13 +272,7 @@ def wake_timing_log_path(cfg: dict) -> Path:
 
 def wake_signal_log_path(cfg: dict) -> Path:
     """The ear's wake-signal file: the persistent Monitor `tail -f`s it, the
-    pacemaker appends WAKE/NUDGE lines to it. Default: <cortex_home>/wake_signal.log."""
+    pacemaker appends WAKE/NUDGE lines to it (alive-resident wake only).
+    Default: <cortex_home>/wake_signal.log."""
     raw = cfg["wake"].get("signal_log") or ""
     return Path(raw).expanduser() if raw else cortex_home(cfg) / "wake_signal.log"
-
-
-def arm_prompt_path(cfg: dict) -> Path:
-    """Launch-time prompt that arms the Monitor ear + reads handoff + lies down.
-    Default: <cortex_home>/prompts/arm.md."""
-    raw = cfg["wake"].get("arm_prompt_path") or ""
-    return Path(raw).expanduser() if raw else cortex_home(cfg) / "prompts" / "arm.md"
