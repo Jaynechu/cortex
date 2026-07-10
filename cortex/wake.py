@@ -233,6 +233,13 @@ def _window_rotated(cfg) -> bool:
     prev = wake_state.load(cfg).get("transcript")
     cur = transcript.newest(cfg)
     cur = str(cur) if cur else None
+    # A None recorded hint means the last spawn timed out before the new
+    # session jsonl appeared (see _spawn_wake). The window is alive with no
+    # rotate flag, so treat it as NOT rotated — otherwise cur (any current
+    # transcript) != None would re-trigger a respawn every tick (the loop this
+    # whole fix removes). Only a real transcript-to-transcript mismatch rotates.
+    if prev is None:
+        return False
     return cur != prev
 
 
@@ -254,23 +261,61 @@ def _signal_landed(cfg, before: float | None, timeout_sec: float) -> bool:
     return False
 
 
+# Bounded poll for a freshly-spawned window's NEW session transcript to appear.
+# The launched claude does not create its session jsonl until it starts its
+# first turn, so newest() right after respawn returns the PREVIOUS session's
+# file — recording that stale hint makes _window_rotated see a mismatch on the
+# next tick and respawn forever (the P0 loop). Poll until a file newer than the
+# pre-spawn newest (or past the pre-spawn timestamp) shows up; on timeout record
+# None so _window_rotated's None-hint guard keeps the alive window unrotated.
+_SPAWN_TRANSCRIPT_POLL_STEP_S = 0.5
+_SPAWN_TRANSCRIPT_POLL_TIMEOUT_S = 8.0
+
+
+def _wait_new_transcript(cfg, prev_path: str | None, spawn_ts: float) -> str | None:
+    """Poll (bounded) for the new session transcript after a spawn. Returns its
+    path once one appears that differs from prev_path and was modified at/after
+    spawn_ts; None on timeout (record None, never a stale path)."""
+    from cortex import transcript
+
+    waited = 0.0
+    while waited < _SPAWN_TRANSCRIPT_POLL_TIMEOUT_S:
+        cur = transcript.newest(cfg)
+        if cur is not None:
+            cur_s = str(cur)
+            try:
+                fresh_mtime = cur.stat().st_mtime >= spawn_ts
+            except OSError:
+                fresh_mtime = False
+            if cur_s != prev_path or fresh_mtime:
+                return cur_s
+        time.sleep(_SPAWN_TRANSCRIPT_POLL_STEP_S)
+        waited += _SPAWN_TRANSCRIPT_POLL_STEP_S
+    return None
+
+
 def _spawn_wake(conn, cfg, note_path, now) -> dict | None:
     """Fresh-window wake (respawn / rotate / dead window / ear-miss recovery):
     spawn a new resident window whose FIRST prompt is the wakeup-note Read line,
     baked into the launch command — the window starts acting immediately, with
-    no arm prompt, no lie-down-first, and no signal append. A quiet greeting
-    notification fires on spawn. Sets the awake marker + lights the watchdog.
-    Returns a result dict, or None on window failure (caller -> headless)."""
+    no arm prompt, no lie-down-first, and no signal append. Sets the awake
+    marker + lights the watchdog. Returns a result dict, or None on window
+    failure (caller -> headless).
+
+    The recorded transcript hint must be the NEW session's jsonl — captured only
+    after it actually appears (bounded poll) — never the pre-spawn newest, which
+    is the OLD session and would drive an endless respawn loop next tick."""
     from cortex import transcript, wake_state, watchdog, window
 
+    prev_path = transcript.newest(cfg)
+    prev_path = str(prev_path) if prev_path else None
+    spawn_ts = time.time()
     try:
         window.respawn(cfg, initial_prompt=window.note_read_line(cfg, note_path))
-        window.spawn_greeting(cfg)
     except window.WindowError:
         return None
-    tpath = transcript.newest(cfg)
-    wake_state.set_awake(cfg, _latest_wake_log_id(conn),
-                         str(tpath) if tpath else None)
+    new_path = _wait_new_transcript(cfg, prev_path, spawn_ts)
+    wake_state.set_awake(cfg, _latest_wake_log_id(conn), new_path)
     watchdog.spawn(cfg)
     return {"mode": "window", "session_id": None, "text": None}
 

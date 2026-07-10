@@ -48,8 +48,8 @@ def test_render_full_note(cfg):
         ],
     }
     text = note.render(cfg, NOW, data)
-    assert "Wake: wander" in text
-    assert "Now: 14:30 Wed | Last wake: 12min ago" in text
+    assert "Wake:" not in text  # reason line retired
+    assert text.startswith("Now: 14:30 Wed | Last wake: 12min ago")
     # Plan Used line: USED %, pipe-joined, template口径
     assert ("Plan Used: 5h 5% (04:50) | 7d 50% (1d2h) | "
             "Cortex Today 250k/1M 25% | Net Session Token: 50k") in text
@@ -65,9 +65,9 @@ def test_render_full_note(cfg):
 
 
 def test_render_omits_absent_lines(cfg):
-    text = note.render(cfg, NOW, {"wake_parts": ["wander"]})
-    assert text.startswith("Wake: wander")
-    assert "Now: 14:30 Wed" in text
+    text = note.render(cfg, NOW, {})
+    assert "Wake:" not in text  # reason line retired
+    assert text.startswith("Now: 14:30 Wed")
     assert "Last wake:" not in text
     assert "Plan Used:" not in text
     assert "Active (Mac):" not in text
@@ -76,7 +76,7 @@ def test_render_omits_absent_lines(cfg):
 
 
 def test_render_turn_end_line_appears_every_render(cfg):
-    text = note.render(cfg, NOW, {"wake_parts": ["wander"]})
+    text = note.render(cfg, NOW, {})
     assert text.rstrip().endswith(
         "NOTE: choose wait time or next wake time at the end of each turn. "
         "Wait: empty (default) / wait(N) [N=11-55]; sleep: "
@@ -86,58 +86,34 @@ def test_render_turn_end_line_appears_every_render(cfg):
 
 def test_render_turn_end_line_omitted_when_blank(cfg):
     cfg["note"]["turn_end_text"] = ""
-    text = note.render(cfg, NOW, {"wake_parts": ["wander"]})
+    text = note.render(cfg, NOW, {})
     assert "NOTE: choose wait time" not in text
 
 
 def test_render_title_prepended_with_blank_line(cfg):
     cfg["note"]["title"] = "📮 小道消息"
-    text = note.render(cfg, NOW, {"wake_parts": ["wander"]})
-    assert text.startswith("📮 小道消息\n\nWake: wander")
+    text = note.render(cfg, NOW, {})
+    assert text.startswith("📮 小道消息\n\nNow: ")
 
 
 def test_render_title_empty_omits_it(cfg):
-    text = note.render(cfg, NOW, {"wake_parts": ["wander"]})
-    assert text.startswith("Wake: wander")
+    text = note.render(cfg, NOW, {})
+    assert text.startswith("Now: ")
     assert "小道消息" not in text
 
 
 def test_render_force_slept_marker_and_catchup(cfg):
-    data = {"wake_parts": ["wander"], "last_wake": {"minutes_ago": 40, "force_slept": "timeout"}}
+    data = {"last_wake": {"minutes_ago": 40, "force_slept": "timeout"}}
     text = note.render(cfg, NOW, data)
     assert "Last wake: 40min ago (force-slept mid-task)" in text
     # catch-up backfill hint appears only on a force-slept prior window
     assert "recall all events from DB" in text
 
 
-# --------------------------------------------------------------------------- #
-# wake line mapping
-# --------------------------------------------------------------------------- #
-
-def test_wake_parts_floor():
-    d = {"reasons": [TriggerReason(kind="floor", detail="floor check due")]}
-    assert note._wake_parts(d) == ["wander"]
-
-
-def test_wake_parts_self_scheduled_uses_intent():
-    d = {"reasons": [TriggerReason(kind="self_scheduled", detail="x",
-                                   facts={"intent": "问午饭吃了什么"})]}
-    assert note._wake_parts(d) == ["self-scheduled(问午饭吃了什么)"]
-
-
-def test_wake_parts_schedule_uses_name():
-    d = {"reasons": [TriggerReason(kind="schedule", detail="x", facts={"name": "week para"})]}
-    assert note._wake_parts(d) == ["scheduled(week para)"]
-
-
-def test_wake_parts_none_defaults():
-    assert note._wake_parts(None) == ["wander"]
-    assert note._wake_parts({"reasons": [], "explanation": "manual --force"}) == ["manual --force"]
-
-
-def test_wake_parts_dict_reason():
-    d = {"reasons": [{"kind": "floor", "detail": "floor check due"}]}
-    assert note._wake_parts(d) == ["wander"]
+def test_render_no_wake_line_ever(cfg):
+    """The 'Wake:' reason line is fully retired — gone from every render."""
+    for data in ({}, {"wake_parts": ["wander"]}, {"last_wake": {"minutes_ago": 5, "force_slept": None}}):
+        assert "Wake:" not in note.render(cfg, NOW, data)
 
 
 # --------------------------------------------------------------------------- #
@@ -384,14 +360,15 @@ def test_gather_end_to_end(marrow_conn, cfg, monkeypatch):
 
     data = note.gather(marrow_conn, cfg, NOW, decision={
         "reasons": [TriggerReason(kind="floor", detail="floor check due")]})
-    assert data["wake_parts"] == ["wander"]
+    assert "wake_parts" not in data  # Wake reason line retired
     assert data["budget"]["five_h_pct"] == 40.0
     assert data["budget"]["five_h_reset"] == "14:30"  # 04:30Z -> AEST
     assert data["budget"]["seven_d_pct"] == 12.0
     assert len(data["replay"]) == 1
     assert "handoff" not in data  # handoff moved to SessionStart
     text = note.render(cfg, NOW, data)
-    assert text.startswith("Wake: wander")
+    assert text.startswith("Now: ")
+    assert "Wake:" not in text
 
 
 def test_gather_survives_naive_due_at_self_schedule(marrow_conn, cfg, tmp_path, monkeypatch):

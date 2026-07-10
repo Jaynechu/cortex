@@ -1,11 +1,11 @@
 """iTerm2 window control for the resident interactive cortex session. All
 control via iTerm2 AppleScript (works while the screen is locked — no keyboard
 simulation). Primitives: ensure_window, respawn (fresh window with the wakeup
-note baked in as its first prompt), spawn_greeting, append_wake_signal (the ear
-for an already-running resident window), inject_note (schedule windows only),
-send_esc, say, hard_interrupt (process-level SIGINT fallback when esc alone may
-not land, e.g. no focus). A fresh window starts acting immediately from its
-baked-in note prompt; an alive resident window is woken by the signal-file ear
+note baked in as its first prompt), append_wake_signal (the ear for an
+already-running resident window), inject_note (schedule windows only), send_esc,
+say, hard_interrupt (process-level SIGINT fallback when esc alone may not land,
+e.g. no focus). A fresh window wakes silently — the baked-in note prompt is the
+only trace, no notification. An alive resident window is woken by the signal-file ear
 (a Monitor tailing wake_signal.log). The window body is one `claude` running in
 cortex_home with MARROW_CORTEX=1 set explicitly (identity marker).
 """
@@ -106,11 +106,15 @@ def window_effort(cfg: dict) -> str:
 
 
 def note_read_line(cfg: dict, note_path: str) -> str:
-    """The single-line first prompt handed to a fresh cortex window: read the
-    wakeup note it names and start acting. Template is config-driven ({note} is
-    substituted for the note path) so the wording stays customisable."""
-    tmpl = cfg["wake"].get(
-        "wake_prompt", "Read {note} — this is your wakeup note; act on it")
+    """The single-line first prompt handed to a fresh cortex window: JUST the
+    configured emoji (wake.wake_prompt, default '☀️') so no readable text shows
+    in the user's face. The full wake instructions (read the note, arm the ear,
+    choose next wake) are injected by marrow's UserPromptSubmit hook when this
+    emoji is submitted in a cortex window. `note_path` is accepted for call-site
+    compatibility but no longer substituted — the hook reads the note path from
+    marrow config so the two sides can't drift. If a legacy config still carries
+    a `{note}` template, it is substituted for back-compat."""
+    tmpl = cfg["wake"].get("wake_prompt", "☀️")
     return tmpl.replace("{note}", str(note_path))
 
 
@@ -251,26 +255,6 @@ def respawn(cfg: dict, initial_prompt: str | None = None) -> str:
     wake_state.set_session_id(cfg, sid)
     _wait_ready(sid, cfg)
     return sid
-
-
-def spawn_greeting(cfg: dict) -> None:
-    """Quiet macOS notification when a fresh cortex window is spawned for a wake
-    (a soft 'good morning' ping, no focus steal). Fires through the say() sound
-    channel; the greeting text/emoji is config-driven and empty = silent."""
-    text = cfg["wake"].get("spawn_greeting", "")
-    if not text:
-        return
-    _notify(text)
-
-
-def _notify(text: str) -> None:
-    """Post a macOS Notification Center banner (no focus steal, no sound of its
-    own beyond the system default). Best-effort, never raises."""
-    body = _esc(text)
-    try:
-        _osa(f'display notification "{body}"')
-    except WindowError:
-        pass
 
 
 def submit_prompt_to(sid: str, cfg: dict, text: str) -> None:

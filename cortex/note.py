@@ -5,9 +5,11 @@ probe. Every external source is wrapped in try/except so a failure omits its
 line rather than crashing the wake. render() is pure — no I/O, no DB — so it
 can be unit-tested with synthetic data.
 
-Layout: a header block (Wake / Now / Plan Used / Active), then `---`-separated
-blocks for pending self-schedule and Replay. The handoff (碎碎念) injects at
+Layout: a header block (Now / Plan Used / Active), then `---`-separated blocks
+for pending self-schedule and Replay. The handoff (碎碎念) injects at
 SessionStart (marrow), not here. Cal/Rem lines retired (global inject pending).
+The old "Wake:" reason line is gone — reasons carry no signal (desire engine
+retired, wander-only) and schedule/duty windows get their own prompt.
 """
 from __future__ import annotations
 
@@ -60,43 +62,6 @@ def _replay_exclude_channels(cfg: dict) -> tuple[str, ...]:
     if raw is None:
         return _DEFAULT_REPLAY_EXCLUDE_CHANNELS
     return tuple(str(c) for c in raw if str(c).strip())
-
-
-# --------------------------------------------------------------------------- #
-# Wake line
-# --------------------------------------------------------------------------- #
-
-def _reason_kind_detail(reason) -> tuple[str, str, dict]:
-    if isinstance(reason, dict):
-        return reason.get("kind", ""), reason.get("detail", ""), reason.get("facts", {}) or {}
-    return (
-        getattr(reason, "kind", ""),
-        getattr(reason, "detail", ""),
-        getattr(reason, "facts", {}) or {},
-    )
-
-
-def _wake_parts(decision: dict | None) -> list[str]:
-    """Map decision reasons to English display fragments (plan §wakeup note):
-    floor -> wander, self_scheduled -> self-scheduled(<intent>),
-    schedule -> scheduled(<name>). Unknown kinds fall back to their detail."""
-    if not decision:
-        return ["wander"]
-    parts: list[str] = []
-    for reason in decision.get("reasons", []) or []:
-        kind, detail, facts = _reason_kind_detail(reason)
-        if kind == "floor":
-            parts.append("wander")
-        elif kind == "self_scheduled":
-            parts.append(f"self-scheduled({facts.get('intent') or detail})")
-        elif kind == "schedule":
-            parts.append(f"scheduled({facts.get('name') or detail})")
-        elif detail:
-            parts.append(detail)
-    if parts:
-        return parts
-    explanation = decision.get("explanation")
-    return [explanation] if explanation else ["wander"]
 
 
 # --------------------------------------------------------------------------- #
@@ -326,7 +291,6 @@ def gather(
     budget = _safe(_build_budget, conn, cfg, now, kv, ncfg)
 
     return {
-        "wake_parts": _safe(_wake_parts, decision, default=["wander"]),
         "last_wake": _safe(_last_wake, conn, now),
         "budget": budget,
         "active_app": _safe(_frontmost_app),
@@ -386,14 +350,12 @@ def _as_float(raw):
 def render(cfg: dict, now: datetime, data: dict) -> str:
     """Pure assembly: data dict -> wakeup note text. No DB / no I/O.
 
-    Layout (plan §一): a header block (Wake / Now / Plan Used / Active), then
+    Layout (plan §一): a header block (Now / Plan Used / Active), then
     `---`-separated blocks for pending self-schedule and Replay, then a final
     turn-end reminder line (note.turn_end_text, every render; "" omits it).
     Handoff (碎碎念) no longer lives here — it is injected at SessionStart on a
     fresh window."""
     header: list[str] = []
-
-    header.append("Wake: " + " | ".join(data.get("wake_parts") or ["wander"]))
 
     now_seg = f"Now: {now.strftime('%H:%M %a')}"
     last = data.get("last_wake")

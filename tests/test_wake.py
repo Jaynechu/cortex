@@ -59,8 +59,8 @@ class FakeCaller:
 
 def test_assemble_note_real_data(marrow_conn, wcfg):
     text = wake.assemble_note(marrow_conn, wcfg, DAY1)
-    assert "Now:" in text
-    assert "Wake:" in text  # new note format leads with the Wake (trigger) line
+    assert text.startswith("Now:")  # note leads with Now; Wake reason line retired
+    assert "Wake:" not in text
     assert len(text) < 1000
 
 

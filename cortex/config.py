@@ -46,15 +46,16 @@ _DEFAULTS: dict[str, Any] = {
     # signal_log = the ear's tail-followed wake signal file (alive-resident wake);
     # ear_timeout_sec = how long the pacemaker waits for an alive-window wake to
     # land before respawning fresh; wake_prompt = the first prompt baked into a
-    # freshly spawned window ({note} -> note path); spawn_greeting = a quiet
-    # notification fired when a fresh window is spawned ("" = silent);
+    # freshly spawned window — JUST an emoji so nothing readable shows in the
+    # user's face; the full wake instructions are injected by marrow's
+    # UserPromptSubmit hook when this exact emoji is submitted in a cortex
+    # window (the note path itself is read from config, not this prompt);
     # say_sound = the sound say() plays when it fronts the window.
     "wake": {
         "token_cap": 150_000,
         "signal_log": "",
         "ear_timeout_sec": 90,
-        "wake_prompt": "Read {note} — this is your wakeup note; act on it",
-        "spawn_greeting": "🐷",
+        "wake_prompt": "☀️",
         "say_sound": "Glass",
         # Max wait() calls allowed per wake (reset on wake start / lie_down).
         # A call past this returns a refusal result (not an exception).

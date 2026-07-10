@@ -76,13 +76,12 @@ ready_timeout_sec = 30         # max wait for readiness after a fresh spawn
 # replaced by a FRESH window that gets the note as its first prompt.
 signal_log = ""                # Default: <cortex_home>/wake_signal.log
 ear_timeout_sec = 90           # recovery deadline for an alive-window wake to land before respawn
-# A fresh window (rotate / dead resident / ear miss) is spawned with this line
-# baked in as claude's FIRST prompt so it starts acting immediately — no arm
-# prompt, no lie-down-first, no signal. {note} = the wakeup-note file path.
-wake_prompt = "Read {note} — this is your wakeup note; act on it"
-# Quiet macOS notification fired when a fresh window is spawned for a wake (a
-# soft good-morning ping, no focus steal). "" = silent.
-spawn_greeting = "🐷"
+# A fresh window (rotate / dead resident / ear miss) is spawned with this as
+# claude's FIRST prompt — JUST an emoji, so nothing readable shows in the user's
+# face; the window wakes silently. The full wake instructions (read the note,
+# arm the ear, choose next wake) are injected by marrow's UserPromptSubmit hook
+# when this exact emoji is submitted in a cortex window.
+wake_prompt = "☀️"
 # say() = the ONLY place cortex takes focus: it fronts the resident window and
 # plays a system sound (name of a /System/Library/Sounds/*.aiff; "" = silent).
 say_sound = "Glass"

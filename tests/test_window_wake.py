@@ -176,10 +176,10 @@ def test_window_wake_alive_uses_ear(cfg, monkeypatch):
 
 
 def test_window_wake_respawn_delivers_note_as_prompt(cfg, monkeypatch):
-    """respawn=True (rotate/rebirth) spawns a FRESH window with the note-read
-    line baked in as its first prompt — no signal append — fires the greeting,
+    """respawn=True (rotate/rebirth) spawns a FRESH window with the emoji-only
+    first prompt baked in — no signal append, no notification (silent wake) —
     and sets the awake marker + watchdog."""
-    from cortex import wake, watchdog, window
+    from cortex import transcript, wake, watchdog, window
 
     conn = db.connect(cfg)
     conn.execute(
@@ -191,9 +191,12 @@ def test_window_wake_respawn_delivers_note_as_prompt(cfg, monkeypatch):
     calls = {}
     monkeypatch.setattr(window, "respawn",
                         lambda c, initial_prompt=None: calls.setdefault("prompt", initial_prompt))
-    monkeypatch.setattr(window, "spawn_greeting", lambda c: calls.setdefault("greeting", True))
+    assert not hasattr(window, "spawn_greeting")  # greeting mechanism removed
     monkeypatch.setattr(window, "append_wake_signal",
                         lambda c, note: calls.setdefault("signal", note))
+    # New session jsonl appears promptly (skip the real 8s poll).
+    monkeypatch.setattr(transcript, "newest",
+                        lambda c: __import__("pathlib").Path("/t/new.jsonl"))
     monkeypatch.setattr(watchdog, "spawn", lambda c: calls.setdefault("watchdog", True))
 
     from datetime import datetime as _dt
@@ -201,9 +204,8 @@ def test_window_wake_respawn_delivers_note_as_prompt(cfg, monkeypatch):
     conn.close()
     assert res["mode"] == "window"
     note_path = str(wake_state.wakeup_note_path(cfg))
-    assert calls["prompt"] == window.note_read_line(cfg, note_path)  # note baked in
+    assert calls["prompt"] == window.note_read_line(cfg, note_path)  # emoji baked in
     assert "signal" not in calls                # fresh path never appends a signal
-    assert calls["greeting"] is True
     assert calls["watchdog"] is True
     d = wake_state.load(cfg)
     assert d["awake"] is True and d["wake_log_id"] == wid
@@ -225,7 +227,7 @@ def test_window_wake_recovery_respawns_with_note_on_ear_miss(cfg, monkeypatch):
     monkeypatch.setattr(
         window, "respawn",
         lambda c, initial_prompt=None: calls.__setitem__("respawn", calls["respawn"] + 1))
-    monkeypatch.setattr(window, "spawn_greeting", lambda c: None)
+    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, prev, ts: "/t/new.jsonl")
     monkeypatch.setattr(window, "append_wake_signal",
                         lambda c, note: calls.__setitem__("signal", calls["signal"] + 1))
     monkeypatch.setattr(wake, "_signal_landed", lambda c, before, t: False)  # never lands
@@ -357,22 +359,124 @@ def test_arm_mechanism_retired(cfg):
     assert not hasattr(_config, "arm_prompt_path")
 
 
-def test_spawn_greeting_notifies_when_set(cfg, monkeypatch):
-    """spawn_greeting posts a notification with the configured text; empty =
-    silent (no osascript call)."""
+def test_spawn_greeting_mechanism_removed():
+    """The spawn notification is gone entirely — fresh windows wake silently,
+    the emoji prompt is the only trace. No greeting / _notify / display
+    notification anywhere in window.py."""
+    import inspect
+
     from cortex import window
 
-    fired = {}
-    monkeypatch.setattr(window, "_notify", lambda t: fired.setdefault("text", t))
+    assert not hasattr(window, "spawn_greeting")
+    assert not hasattr(window, "_notify")
+    assert "display notification" not in inspect.getsource(window)
 
-    cfg["wake"]["spawn_greeting"] = "🐷"
-    window.spawn_greeting(cfg)
-    assert fired["text"] == "🐷"
 
-    fired.clear()
-    cfg["wake"]["spawn_greeting"] = ""
-    window.spawn_greeting(cfg)
-    assert "text" not in fired  # empty -> silent, no notify call
+def test_no_notification_config_key():
+    """spawn_greeting config key dropped; wake_prompt defaults to the emoji."""
+    from pathlib import Path
+
+    from cortex import config
+
+    c = config.load(path=Path("/no-such.toml"))
+    assert "spawn_greeting" not in c["wake"]
+    assert c["wake"]["wake_prompt"] == "☀️"
+
+
+def test_spawn_wake_records_new_transcript_not_stale(cfg, monkeypatch):
+    """P0 regression: _spawn_wake must NOT record the pre-spawn (OLD session)
+    transcript. Before the fix it called transcript.newest() right after respawn
+    — the new claude has not written its jsonl yet, so it recorded the PREVIOUS
+    session's path; _window_rotated then saw a mismatch every tick and respawned
+    forever. After the fix it polls for the NEW jsonl (or None on timeout) and
+    records that, so a second consecutive wake on the alive window takes the ear
+    path, not respawn.
+
+    Timing model (the crux): at the instant respawn() returns, the new session
+    jsonl does NOT exist yet — the new claude writes it only once it starts its
+    turn. So the FIRST transcript.newest() after respawn still returns the OLD
+    file; the NEW file appears on a LATER poll. The old code (single newest()
+    right after respawn) recorded OLD; the fixed poll waits for NEW. Modelled
+    with a stateful newest() stub: OLD for the first N reads, then NEW."""
+    from datetime import datetime as _dt
+
+    from cortex import transcript, wake, watchdog, window
+
+    conn = db.connect(cfg)
+    conn.execute(
+        "INSERT INTO ct_wake_log (ts, wake, dry_run, explanation) VALUES (?,1,0,?)",
+        (db.utcnow_iso(), "p0"))
+    conn.commit()
+
+    tdir = transcript.transcript_dir(cfg)
+    tdir.mkdir(parents=True)
+    old = tdir / "OLD.jsonl"
+    new = tdir / "NEW.jsonl"
+
+    # newest() returns OLD until the new session's jsonl "appears" on the 3rd
+    # read (as it does in production, a beat after respawn). The pre-spawn read
+    # + immediate post-spawn read both see OLD; only a poll finds NEW.
+    reads = {"n": 0}
+
+    def stub_newest(c):
+        reads["n"] += 1
+        return new if reads["n"] >= 3 else old
+
+    monkeypatch.setattr(transcript, "newest", stub_newest)
+    monkeypatch.setattr(window, "respawn", lambda c, initial_prompt=None: "sid-new")
+    monkeypatch.setattr(watchdog, "spawn", lambda c: None)
+    # Zero the poll sleep so the test does not actually wait.
+    monkeypatch.setattr(wake.time, "sleep", lambda s: None)
+
+    wake._spawn_wake(conn, cfg, str(wake_state.wakeup_note_path(cfg)),
+                     _dt.now(timezone.utc))
+    conn.close()
+
+    recorded = wake_state.load(cfg)["transcript"]
+    assert recorded == str(new)          # NEW session, not the stale OLD path
+    assert recorded != str(old)          # old timing recorded OLD here — the bug
+
+    # Second wake: window alive, same NEW transcript, no rotate flag -> ear path.
+    wake_state.set_session_id(cfg, "sid-new")
+    monkeypatch.setattr(window, "is_running", lambda: True)
+    monkeypatch.setattr(window, "_session_alive", lambda sid: True)
+    monkeypatch.setattr(window, "find_claude_pid", lambda c: 4242)
+    assert wake._window_rotated(cfg) is False  # no respawn loop
+
+
+def test_spawn_wake_timeout_records_none_not_stale(cfg, monkeypatch):
+    """If the NEW jsonl never appears within the poll window, record None (never
+    the stale pre-spawn path). _window_rotated then treats the None hint on an
+    alive, flag-free window as NOT rotated — the fallback must not reopen the
+    loop."""
+    from datetime import datetime as _dt
+
+    from cortex import transcript, wake, watchdog, window
+
+    conn = db.connect(cfg)
+    conn.execute(
+        "INSERT INTO ct_wake_log (ts, wake, dry_run, explanation) VALUES (?,1,0,?)",
+        (db.utcnow_iso(), "p0-timeout"))
+    conn.commit()
+
+    tdir = transcript.transcript_dir(cfg)
+    tdir.mkdir(parents=True)
+    (tdir / "OLD.jsonl").write_text("{}")  # only the stale file exists, no new one
+
+    monkeypatch.setattr(window, "respawn", lambda c, initial_prompt=None: "sid-x")
+    monkeypatch.setattr(watchdog, "spawn", lambda c: None)
+    # Force an immediate timeout so the test does not sleep.
+    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, prev, ts: None)
+
+    wake._spawn_wake(conn, cfg, "x", _dt.now(timezone.utc))
+    conn.close()
+    assert wake_state.load(cfg)["transcript"] is None  # None, not the stale path
+
+    wake_state.set_session_id(cfg, "sid-x")
+    monkeypatch.setattr(window, "is_running", lambda: True)
+    monkeypatch.setattr(window, "_session_alive", lambda sid: True)
+    monkeypatch.setattr(window, "find_claude_pid", lambda c: 4242)
+    assert wake._window_rotated(cfg) is False  # None hint + alive -> not rotated
 
 
 # --- rotate = flag for respawn, no /clear typing ------------------------------

@@ -41,9 +41,16 @@ def load(cfg: dict) -> dict:
     return {}
 
 
+# Legacy keys from older schema versions, dropped on the next _save so state
+# files converge (nothing reads these anymore — verified in both repos).
+_DEAD_KEYS = ("rotated_at",)
+
+
 def _save(cfg: dict, data: dict) -> None:
     p = wake_state_path(cfg)
     p.parent.mkdir(parents=True, exist_ok=True)
+    for k in _DEAD_KEYS:
+        data.pop(k, None)
     p.write_text(json.dumps(data, ensure_ascii=False, indent=2))
 
 
