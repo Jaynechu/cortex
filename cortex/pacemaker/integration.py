@@ -122,6 +122,37 @@ def _raw_state(conn: sqlite3.Connection) -> dict:
         return {}
 
 
+# Side-channel key holding the LAST-reported whole-session cumulative net spend
+# (transcript.net_tokens). lie_down records only the DELTA since this baseline
+# into ct_wake_log.net_tokens, so one window lying down N times a night no
+# longer re-counts its running cumulative N times (the 647k-vs-170k bug).
+_NET_REPORTED_KEY = "net_reported_cum"
+
+
+def load_net_reported(conn: sqlite3.Connection) -> int:
+    """Last-reported whole-session cumulative net spend (0 if unseeded). The
+    delta baseline for lie_down._record_tokens — kept on the raw state JSON so
+    it survives tick/floor-redraw save_state independently of the dataclass."""
+    val = _raw_state(conn).get(_NET_REPORTED_KEY)
+    try:
+        return int(val) if val is not None else 0
+    except (TypeError, ValueError):
+        return 0
+
+
+def store_net_reported(conn: sqlite3.Connection, cum: int | None) -> None:
+    """Persist the new cumulative baseline (merged into the raw JSON so it
+    survives independently of tick saves — same mechanism as window_tokens)."""
+    obj = _raw_state(conn)
+    obj[_NET_REPORTED_KEY] = int(cum) if cum else 0
+    conn.execute(
+        "INSERT INTO ct_pacemaker_state (id, state, updated_at) VALUES (1, ?, ?)"
+        " ON CONFLICT(id) DO UPDATE SET state=excluded.state, updated_at=excluded.updated_at",
+        (json.dumps(obj), db.utcnow_iso()),
+    )
+    conn.commit()
+
+
 def load_schedule_fired(conn: sqlite3.Connection) -> dict:
     """{duty name: last-fired local date} — kept on the raw state JSON (not the
     pure PacemakerState) so it survives tick saves independently."""
@@ -165,9 +196,12 @@ def _latest_activity_at(conn: sqlite3.Connection) -> datetime | None:
 def _today_tokens(conn: sqlite3.Connection, now: datetime) -> int:
     """SUM(COALESCE(net_tokens, tokens)) for `now`'s local date — the daily
     budget gate counts NET spend (cache-miss rewrite + output); a pre-migration
-    row with no net_tokens degrades to its total `tokens`. ts is stored UTC ISO;
-    filter from local midnight (converted to UTC) then confirm the local date so
-    the gate resets naturally at local midnight."""
+    row with no net_tokens degrades to its total `tokens`. net_tokens is a
+    PER-WAKE DELTA (lie_down._record_tokens records spend since the last
+    cumulative), so the SUM is the true day total, not re-counted cumulatives —
+    twin of note._today_tokens, keep in sync. ts is stored UTC ISO; filter from
+    local midnight (converted to UTC) then confirm the local date so the gate
+    resets naturally at local midnight."""
     tz = now.tzinfo
     start_utc = now.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(
         ZoneInfo("UTC")).isoformat()

@@ -347,6 +347,7 @@ def _spawn_wake(conn, cfg, now, resume: bool = False) -> dict | None:
     after it actually appears (bounded poll) — never the pre-spawn newest, which
     is the OLD session and would drive an endless respawn loop next tick."""
     from cortex import transcript, wake_state, watchdog, window
+    from cortex.pacemaker import integration
 
     resume_sid = window.claude_session_id(cfg) if resume else None
     prev_path = transcript.newest(cfg)
@@ -358,6 +359,14 @@ def _spawn_wake(conn, cfg, now, resume: bool = False) -> dict | None:
     except window.WindowError as e:
         _alert_respawn_failed(conn, wake_id_of(now), str(e)[:180])
         return None
+    # A FRESH brain's transcript net cumulative restarts at ~0, so reset the
+    # delta baseline here — the first lie_down of the new window then records its
+    # own delta (cum - 0), not cum minus the dead window's stale cumulative. A
+    # RESUME keeps the same conversation (cumulative carries over), so its
+    # baseline must NOT reset. The monotonicity fallback in _record_tokens
+    # remains the safety net for any respawn that misses this hook.
+    if not resume:
+        integration.store_net_reported(conn, 0)
     new_path = _wait_new_transcript(cfg, prev_path, spawn_ts)
     wake_state.set_awake(cfg, _latest_wake_log_id(conn), new_path)
     watchdog.spawn(cfg)

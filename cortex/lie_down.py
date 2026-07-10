@@ -66,21 +66,35 @@ def _kill_watchdog(cfg: dict) -> None:
 
 
 def _record_tokens(conn, cfg: dict, state: dict, force_slept: str | None) -> tuple[int, int]:
-    """Record both this wake's total context occupancy (`tokens`, drives
-    rotate/fuse) and its NET spend (`net_tokens` — cache-miss rewrite + output;
-    drives the daily budget gate + Budget note line). Returns (tokens, net)."""
+    """Record this wake's total context occupancy (`tokens`, drives rotate/fuse)
+    and its NET spend DELTA (`net_tokens` — cache-miss rewrite + output; drives
+    the daily budget gate + Budget note line).
+
+    transcript.net_tokens is the WHOLE-SESSION cumulative (sum over every usage
+    row), so a window lying down N times a night would re-count that running
+    total N times. Record only the delta since the last reported cumulative:
+    `delta = cum - prev` when monotonic; a fresh window's cum starts near 0
+    (below prev) -> treat the full cum as the delta and reset the baseline.
+    Persist the new cumulative as the next delta's baseline. Returns
+    (tokens, delta)."""
     tokens = transcript.window_tokens(cfg)
-    net = transcript.net_tokens(cfg)
+    cum = transcript.net_tokens(cfg)
+    prev = integration.load_net_reported(conn)
+    delta = cum - prev if cum >= prev else cum
     wid = state.get("wake_log_id")
     if wid:
         try:
             conn.execute(
                 "UPDATE ct_wake_log SET tokens=?, net_tokens=?, force_slept=? WHERE id=?",
-                (tokens or None, net or None, force_slept, wid))
+                (tokens or None, delta or None, force_slept, wid))
             conn.commit()
         except Exception:  # column race with concurrent migrate; best-effort
             pass
-    return tokens, net
+    # Publish the new baseline. Merged into the raw state JSON (ON CONFLICT), so
+    # the later floor-redraw save_state (which preserves side-channel keys) does
+    # not drop it — same survival mechanism as window_tokens.
+    integration.store_net_reported(conn, cum)
+    return tokens, delta
 
 
 def lie_down(cfg: dict, force_slept: str | None = None, rotate: bool = False,
