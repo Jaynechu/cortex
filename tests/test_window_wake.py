@@ -526,6 +526,45 @@ def test_spawn_wake_records_new_transcript_not_stale(cfg, monkeypatch):
     assert wake._window_rotated(cfg) is False  # no respawn loop
 
 
+def test_wait_new_transcript_prev_none_rejects_stale_mtime(cfg, monkeypatch):
+    """Second symptom of the same P0 timing bug: when prev_path is None (the
+    common case, since the 8s spawn poll routinely times out before the 30s+
+    transcript-creation), `cur_s != prev_path` is trivially true for ANY
+    existing jsonl — the old code returned the first stale file it found on
+    the very first poll iteration, bypassing the fresh_mtime check entirely
+    (live-confirmed: wake_state recorded an old session's uuid instead of the
+    new window's). With prev_path None, only fresh_mtime (mtime >= spawn_ts)
+    may accept a candidate; a stale file (mtime < spawn_ts) must be rejected
+    for the whole poll window, yielding None on timeout."""
+    from cortex import transcript, wake
+
+    tdir = transcript.transcript_dir(cfg)
+    tdir.mkdir(parents=True)
+    stale = tdir / "stale-session.jsonl"
+    stale.write_text("{}")
+    spawn_ts = stale.stat().st_mtime + 100  # spawn started AFTER the stale file's mtime
+
+    monkeypatch.setattr(wake.time, "sleep", lambda s: None)  # no real waiting
+    result = wake._wait_new_transcript(cfg, None, spawn_ts)
+    assert result is None  # stale file must never be accepted when prev is None
+
+
+def test_wait_new_transcript_prev_none_accepts_fresh_mtime(cfg, monkeypatch):
+    """Companion case: prev_path None but the jsonl's mtime IS >= spawn_ts (a
+    genuinely new file) -> accepted immediately."""
+    from cortex import transcript, wake
+
+    tdir = transcript.transcript_dir(cfg)
+    tdir.mkdir(parents=True)
+    fresh = tdir / "fresh-session.jsonl"
+    fresh.write_text("{}")
+    spawn_ts = fresh.stat().st_mtime - 100  # spawn started BEFORE the file's mtime
+
+    monkeypatch.setattr(wake.time, "sleep", lambda s: None)
+    result = wake._wait_new_transcript(cfg, None, spawn_ts)
+    assert result == str(fresh)
+
+
 def test_spawn_wake_timeout_records_none_not_stale(cfg, monkeypatch):
     """If the NEW jsonl never appears within the poll window, record None (never
     the stale pre-spawn path). _window_rotated then treats the None hint on an
@@ -705,6 +744,30 @@ def test_claude_session_id_from_transcript_stem(cfg):
     assert window.claude_session_id(cfg) == "abc-123"
 
 
+def test_claude_session_id_falls_back_to_newest_transcript_when_hint_none(cfg):
+    """The recorded hint is a best-effort ~8s poll after spawn; the claude TUI
+    can take 30s+ to create its session jsonl in real timing, so the hint is
+    routinely None. When that happens, claude_session_id must fall back to the
+    NEWEST top-level session jsonl in the transcript dir — in the died-window
+    scenario that IS the dead session's own archive."""
+    from cortex import window
+
+    tdir = transcript.transcript_dir(cfg)
+    tdir.mkdir(parents=True, exist_ok=True)
+    (tdir / "dead-session-uuid.jsonl").write_text("{}\n")
+
+    assert wake_state.load(cfg).get("transcript") is None  # no recorded hint
+    assert window.claude_session_id(cfg) == "dead-session-uuid"
+
+
+def test_claude_session_id_none_when_no_hint_and_no_transcript(cfg):
+    """No recorded hint and no transcript file at all -> None (existing fresh
+    fallback), never a fabricated UUID."""
+    from cortex import window
+
+    assert window.claude_session_id(cfg) is None
+
+
 def test_launch_command_resume_variant(cfg):
     """launch_command bakes `--resume <sid>` when resume_sid is given."""
     from cortex import window
@@ -750,6 +813,42 @@ def test_window_wake_dead_resumes_when_sid_present(cfg, monkeypatch):
     assert cfg["wake"].get("wake_signal_marker", "[CORTEX-WAKE]") in calls["prompt"]
     note_text = wake_state.wakeup_note_path(cfg).read_text()
     assert "died without a handoff" not in note_text  # resume -> no catchup
+
+
+def test_window_wake_dead_resumes_from_newest_jsonl_when_hint_none(cfg, monkeypatch):
+    """Real-timing regression: the recorded hint is None (the 8s spawn poll
+    timed out before the 30s+ transcript creation), but a session jsonl exists
+    in the transcript dir (the dead session's own archive) -> claude_session_id
+    must still resolve it, and _window_wake must resume (not fresh-spawn)."""
+    from cortex import wake, watchdog, window
+
+    conn = db.connect(cfg)
+    conn.execute(
+        "INSERT INTO ct_wake_log (ts, wake, dry_run, explanation) VALUES (?,1,0,?)",
+        (db.utcnow_iso(), "resume"))
+    conn.commit()
+
+    assert wake_state.load(cfg).get("transcript") is None  # no recorded hint
+    tdir = transcript.transcript_dir(cfg)
+    tdir.mkdir(parents=True, exist_ok=True)
+    (tdir / "dead-session-uuid.jsonl").write_text("{}\n")
+
+    calls = {}
+    monkeypatch.setattr(wake, "_window_alive", lambda c: False)  # dead resident
+    monkeypatch.setattr(window, "respawn",
+                        lambda c, initial_prompt=None, resume_sid=None:
+                        (calls.__setitem__("resume_sid", resume_sid),
+                         calls.__setitem__("launch_command",
+                                           window.launch_command(c, initial_prompt, resume_sid))))
+    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, prev, ts: "/t/new.jsonl")
+    monkeypatch.setattr(watchdog, "spawn", lambda c: None)
+
+    from datetime import datetime as _dt
+    res = wake._window_wake(conn, cfg, "N", _dt.now(timezone.utc))
+    conn.close()
+    assert res["mode"] == "window"
+    assert calls["resume_sid"] == "dead-session-uuid"
+    assert "--resume 'dead-session-uuid'" in calls["launch_command"]
 
 
 def test_window_wake_dead_no_sid_fresh_with_catchup(cfg, monkeypatch):

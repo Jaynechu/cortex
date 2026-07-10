@@ -303,7 +303,16 @@ _SPAWN_TRANSCRIPT_POLL_TIMEOUT_S = 8.0
 def _wait_new_transcript(cfg, prev_path: str | None, spawn_ts: float) -> str | None:
     """Poll (bounded) for the new session transcript after a spawn. Returns its
     path once one appears that differs from prev_path and was modified at/after
-    spawn_ts; None on timeout (record None, never a stale path)."""
+    spawn_ts; None on timeout (record None, never a stale path).
+
+    When prev_path is None (no prior transcript to compare against — the
+    common case since the poll routinely times out, see module docstring
+    above), `cur_s != prev_path` is trivially true for ANY existing jsonl, so
+    the != shortcut is only valid when prev_path is a real path. With prev_path
+    None, acceptance must rely solely on fresh_mtime (mtime >= spawn_ts) —
+    otherwise the very first poll iteration returns whatever stale jsonl
+    happens to already exist (live-confirmed: recorded hint pointed at an old
+    session instead of the new window's)."""
     from cortex import transcript
 
     waited = 0.0
@@ -315,7 +324,8 @@ def _wait_new_transcript(cfg, prev_path: str | None, spawn_ts: float) -> str | N
                 fresh_mtime = cur.stat().st_mtime >= spawn_ts
             except OSError:
                 fresh_mtime = False
-            if cur_s != prev_path or fresh_mtime:
+            accept = fresh_mtime if prev_path is None else (cur_s != prev_path or fresh_mtime)
+            if accept:
                 return cur_s
         time.sleep(_SPAWN_TRANSCRIPT_POLL_STEP_S)
         waited += _SPAWN_TRANSCRIPT_POLL_STEP_S
@@ -523,7 +533,7 @@ def run_wake(
 
     state = integration.load_state(conn)
     resume_sid = state.cortex_session_id
-    timer.mark("resume")
+    timer.mark("state_loaded")
 
     note_text = assemble_note(conn, cfg, now, decision=decision)
     home = str(config.cortex_home(cfg))

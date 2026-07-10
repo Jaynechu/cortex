@@ -266,16 +266,27 @@ def _close_session(sid: str) -> None:
 def claude_session_id(cfg: dict) -> str | None:
     """The claude conversation session UUID for --resume: the stem of the
     recorded transcript jsonl (~/.claude/projects/<cwd>/<uuid>.jsonl). This is
-    NOT the iTerm session id (wake_state.session_id). None if no transcript hint
-    is recorded (a resume can't be attempted -> caller falls back to a fresh
+    NOT the iTerm session id (wake_state.session_id).
+
+    The recorded hint is a best-effort bounded poll captured right after a
+    spawn (_wait_new_transcript, ~8s) — the claude TUI can take 30s+ to create
+    its session jsonl, so in real timing the poll times out and the hint is
+    None almost every time. Fall back to the NEWEST top-level session jsonl in
+    the transcript dir: in the died-window/no-rotate-flag scenario that IS the
+    dead session's own archive (nothing writes to the dir after it dies), so
+    this recovers the correct UUID for --resume. None only when neither the
+    recorded hint nor any transcript file exists (caller falls back to a fresh
     spawn)."""
     from pathlib import Path
+    from cortex import transcript as _transcript
 
     raw = wake_state.load(cfg).get("transcript")
-    if not raw:
-        return None
-    stem = Path(str(raw)).stem
-    return stem or None
+    if raw:
+        stem = Path(str(raw)).stem
+        if stem:
+            return stem
+    newest = _transcript.newest(cfg)
+    return newest.stem if newest else None
 
 
 def respawn(cfg: dict, initial_prompt: str | None = None,
