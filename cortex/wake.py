@@ -324,12 +324,14 @@ def _wait_new_transcript(cfg, prev_path: str | None, spawn_ts: float) -> str | N
 
 def _spawn_wake(conn, cfg, now, resume: bool = False) -> dict | None:
     """New-window wake. FRESH (resume=False): a brand-new brain whose FIRST
-    prompt is the emoji-only wake prompt (marrow hook injects the note). RESUME
-    (resume=True + a recorded claude session UUID): relaunch `claude --resume
-    <sid>` so the SAME conversation returns with full context — used when the
-    window simply died with no rotate flag. Resume with no recorded UUID -> fall
-    back to a fresh spawn. Sets the awake marker + lights the watchdog. Returns a
-    result dict, or None on window failure (caller -> headless).
+    prompt is the emoji + bell-marker wake prompt (marrow hook detects the
+    marker and injects the note). RESUME (resume=True + a recorded claude
+    session UUID): relaunch `claude --resume <sid>` with the same baked prompt
+    so the SAME conversation returns with full context AND its wake identity —
+    used when the window simply died with no rotate flag. Resume with no
+    recorded UUID -> fall back to a fresh spawn. Sets the awake marker + lights
+    the watchdog. Returns a result dict, or None on window failure (caller ->
+    headless).
 
     The recorded transcript hint must be the NEW session's jsonl — captured only
     after it actually appears (bounded poll) — never the pre-spawn newest, which
@@ -341,7 +343,7 @@ def _spawn_wake(conn, cfg, now, resume: bool = False) -> dict | None:
     prev_path = str(prev_path) if prev_path else None
     spawn_ts = time.time()
     try:
-        window.respawn(cfg, initial_prompt=window.wake_prompt(cfg),
+        window.respawn(cfg, initial_prompt=window.fresh_initial_prompt(cfg, now),
                        resume_sid=resume_sid)
     except window.WindowError as e:
         _alert_respawn_failed(conn, wake_id_of(now), str(e)[:180])
@@ -354,7 +356,7 @@ def _spawn_wake(conn, cfg, now, resume: bool = False) -> dict | None:
 
 def _window_wake(conn, cfg, note_text, now, respawn: bool = False) -> dict | None:
     """Interactive wake. `respawn=True` (rotate/rebirth) -> a deliberate FRESH
-    brain via the emoji wake prompt (_spawn_wake). `respawn=False` with a DEAD
+    brain via the emoji + bell-marker wake prompt (_spawn_wake). `respawn=False` with a DEAD
     resident -> RESUME the same conversation (`claude --resume`), no handoff
     catchup — context is intact. An alive resident window is woken via the
     signal-file ear: write the note file (marrow hook reads it to inject), append
@@ -377,7 +379,7 @@ def _window_wake(conn, cfg, note_text, now, respawn: bool = False) -> dict | Non
     # inject the full note when it sees the bell marker.
     window.write_note(cfg, note_text)
 
-    # Deliberate fresh brain (rotate/rebirth) -> emoji wake prompt, new session.
+    # Deliberate fresh brain (rotate/rebirth) -> emoji + bell-marker wake prompt, new session.
     if respawn:
         return _spawn_wake(conn, cfg, now, resume=False)
     # Simply-dead resident (crash/manual close, no rotate flag) -> resume the

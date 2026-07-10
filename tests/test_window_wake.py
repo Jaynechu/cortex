@@ -176,9 +176,11 @@ def test_window_wake_alive_uses_ear(cfg, monkeypatch):
 
 
 def test_window_wake_respawn_delivers_note_as_prompt(cfg, monkeypatch):
-    """respawn=True (rotate/rebirth) spawns a FRESH window with the emoji-only
-    first prompt baked in — no signal append, no notification (silent wake) —
-    and sets the awake marker + watchdog."""
+    """respawn=True (rotate/rebirth) spawns a FRESH window with the emoji +
+    bell-marker first prompt baked in (fresh_initial_prompt) — no signal
+    append, no notification (silent wake) — and sets the awake marker +
+    watchdog. The marker in the baked prompt is what makes marrow's hook
+    inject the full wakeup note into the new window."""
     from cortex import transcript, wake, watchdog, window
 
     conn = db.connect(cfg)
@@ -200,10 +202,13 @@ def test_window_wake_respawn_delivers_note_as_prompt(cfg, monkeypatch):
     monkeypatch.setattr(watchdog, "spawn", lambda c: calls.setdefault("watchdog", True))
 
     from datetime import datetime as _dt
-    res = wake._window_wake(conn, cfg, "N", _dt.now(timezone.utc), respawn=True)
+    now = _dt.now(timezone.utc)
+    res = wake._window_wake(conn, cfg, "N", now, respawn=True)
     conn.close()
     assert res["mode"] == "window"
-    assert calls["prompt"] == window.wake_prompt(cfg)  # emoji baked in
+    assert calls["prompt"] == window.fresh_initial_prompt(cfg, now)
+    assert window.wake_prompt(cfg) in calls["prompt"]           # emoji present
+    assert cfg["wake"].get("wake_signal_marker", "[CORTEX-WAKE]") in calls["prompt"]  # bell marker present
     assert "signal" not in calls                # fresh path never appends a signal
     assert calls["watchdog"] is True
     d = wake_state.load(cfg)
@@ -392,6 +397,23 @@ def test_wake_prompt_is_emoji_only(cfg):
     assert window.wake_prompt(cfg) == "☀️"
     cfg["wake"]["wake_prompt"] = "GO"
     assert window.wake_prompt(cfg) == "GO"
+
+
+def test_fresh_initial_prompt_composes_emoji_and_bell_marker(cfg):
+    """fresh_initial_prompt bakes '<wake_prompt> <wake_signal_line>' — the
+    baked first prompt of a fresh/resumed window must carry the same bell
+    marker as the ear so the marrow hook detects it and injects the note."""
+    from datetime import datetime, timezone
+    from cortex import window
+
+    now = datetime(2026, 7, 10, 0, 55, tzinfo=timezone.utc)
+    prompt = window.fresh_initial_prompt(cfg, now)
+    assert prompt == "☀️ [CORTEX-WAKE] 00:55"
+    assert prompt == f"{window.wake_prompt(cfg)} {window.wake_signal_line(cfg, now)}"
+
+    cfg["wake"]["wake_prompt"] = "GO"
+    cfg["wake"]["wake_signal_marker"] = "[WAKE]"
+    assert window.fresh_initial_prompt(cfg, now) == "GO [WAKE] 00:55"
 
 
 def test_launch_command_bakes_initial_prompt(cfg):
@@ -696,7 +718,9 @@ def test_launch_command_resume_variant(cfg):
 
 def test_window_wake_dead_resumes_when_sid_present(cfg, monkeypatch):
     """Item 6: a simply-dead resident (no rotate flag) with a recorded session
-    UUID -> resume (respawn resume_sid set), no catchup line in the note."""
+    UUID -> resume (respawn resume_sid set), no catchup line in the note. The
+    relaunch prompt is the SAME composed emoji+marker prompt as a fresh spawn
+    so the resumed window also gets its wake identity + note."""
     from cortex import wake, watchdog, window
 
     conn = db.connect(cfg)
@@ -710,15 +734,20 @@ def test_window_wake_dead_resumes_when_sid_present(cfg, monkeypatch):
     monkeypatch.setattr(wake, "_window_alive", lambda c: False)  # dead resident
     monkeypatch.setattr(window, "respawn",
                         lambda c, initial_prompt=None, resume_sid=None:
-                        calls.__setitem__("resume_sid", resume_sid))
+                        (calls.__setitem__("resume_sid", resume_sid),
+                         calls.__setitem__("prompt", initial_prompt)))
     monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, prev, ts: "/t/new.jsonl")
     monkeypatch.setattr(watchdog, "spawn", lambda c: None)
 
     from datetime import datetime as _dt
-    res = wake._window_wake(conn, cfg, "N", _dt.now(timezone.utc))
+    now = _dt.now(timezone.utc)
+    res = wake._window_wake(conn, cfg, "N", now)
     conn.close()
     assert res["mode"] == "window"
     assert calls["resume_sid"] == "live-uuid"   # same conversation resumed
+    assert calls["prompt"] == window.fresh_initial_prompt(cfg, now)
+    assert window.wake_prompt(cfg) in calls["prompt"]
+    assert cfg["wake"].get("wake_signal_marker", "[CORTEX-WAKE]") in calls["prompt"]
     note_text = wake_state.wakeup_note_path(cfg).read_text()
     assert "died without a handoff" not in note_text  # resume -> no catchup
 

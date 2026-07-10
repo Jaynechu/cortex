@@ -1,14 +1,15 @@
 """iTerm2 window control for the resident interactive cortex session. All
 control via iTerm2 AppleScript (works while the screen is locked — no keyboard
-simulation). Primitives: ensure_window, respawn (fresh window with the emoji-only
-wake prompt baked in as its first prompt), append_wake_signal (the ear bell for an
-already-running resident window), type_wake_signal (typed rearm on ear death),
-inject_note (schedule windows only), send_esc, say, hard_interrupt (process-level
-SIGINT fallback when esc alone may not land, e.g. no focus). A fresh window wakes
-silently — the baked-in emoji prompt is the only trace, no notification. An alive
-resident window is woken by the signal-file ear (a Monitor tailing
-wake_signal.log). The marrow UserPromptSubmit hook detects the bell marker and
-injects the full wakeup note. The window body is one `claude` running in
+simulation). Primitives: ensure_window, respawn (fresh window with the emoji +
+bell-marker wake prompt baked in as its first prompt, see fresh_initial_prompt),
+append_wake_signal (the ear bell for an already-running resident window),
+type_wake_signal (typed rearm on ear death), inject_note (schedule windows
+only), send_esc, say, hard_interrupt (process-level SIGINT fallback when esc
+alone may not land, e.g. no focus). A fresh window wakes silently — the baked-in
+prompt is the only trace, no notification, but carries the same bell marker as
+the ear so the marrow UserPromptSubmit hook detects it and injects the full
+wakeup note. An alive resident window is woken by the signal-file ear (a Monitor
+tailing wake_signal.log) instead. The window body is one `claude` running in
 cortex_home with MARROW_CORTEX=1 set explicitly (identity marker).
 """
 from __future__ import annotations
@@ -128,15 +129,25 @@ def wake_signal_line(cfg: dict, now, rearm: bool = False) -> str:
     return line
 
 
+def fresh_initial_prompt(cfg: dict, now) -> str:
+    """The baked first prompt for a brand-new/resumed cortex window: the
+    configured emoji + the bell marker line, e.g. '☀️ [CORTEX-WAKE] 00:55'.
+    Same marker as the ear bell, so the marrow UserPromptSubmit hook detects it
+    and injects the full wakeup note — the window gets its wake identity + note
+    in one stroke instead of the emoji alone being read as a bare chat message."""
+    return f"{wake_prompt(cfg)} {wake_signal_line(cfg, now)}"
+
+
 def launch_command(cfg: dict, initial_prompt: str | None = None,
                    resume_sid: str | None = None) -> str:
     # Identity + channel markers set explicitly (hooks derive channel from
     # MARROW_CHANNEL; MARROW_CORTEX=1 = cortex identity / kickout immunity).
     # --model/--effort pin tier + reasoning so the window never rides the
     # system default. Reused by every cortex window spawn. A non-empty
-    # initial_prompt (the emoji-only wake prompt) is baked in as claude's first
-    # positional prompt so a freshly launched window starts acting immediately —
-    # the marrow hook injects the full note on that emoji; zero readable text.
+    # initial_prompt (fresh_initial_prompt: emoji + bell marker) is baked in as
+    # claude's first positional prompt so a freshly launched window starts
+    # acting immediately — the marrow hook detects the marker and injects the
+    # full note; near-zero readable text (one emoji + a short marker line).
     # A non-empty resume_sid adds `--resume <sid>` so a window that simply died
     # (crash / manual close, NOT a deliberate rotate) comes back as the SAME
     # session with full context — no fresh brain, no handoff catchup needed.
@@ -271,12 +282,13 @@ def respawn(cfg: dict, initial_prompt: str | None = None,
             resume_sid: str | None = None) -> str:
     """Replace the resident window with a new one: SIGTERM its `claude` process
     (never SIGKILL), close the old iTerm session, then spawn. A non-empty
-    initial_prompt (the emoji-only wake prompt) is baked into the launch command
-    so the window starts acting immediately — no arm prompt, no lie-down-first,
-    no signal. A non-empty resume_sid launches `claude --resume <sid>` (same
-    conversation, full context) instead of a fresh brain — used when the window
-    simply died with no rotate flag. Persists and returns the new resident sid.
-    Reused for rotate/rebirth (fresh) and the dead-window recovery (resume)."""
+    initial_prompt (fresh_initial_prompt: emoji + bell marker) is baked into the
+    launch command so the window starts acting immediately — no arm prompt, no
+    lie-down-first, no signal. A non-empty resume_sid launches `claude --resume
+    <sid>` (same conversation, full context) instead of a fresh brain — used
+    when the window simply died with no rotate flag. Persists and returns the
+    new resident sid. Reused for rotate/rebirth (fresh) and the dead-window
+    recovery (resume)."""
     pid = find_claude_pid(cfg)
     if pid is not None:
         try:
