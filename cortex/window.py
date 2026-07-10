@@ -264,29 +264,35 @@ def _close_session(sid: str) -> None:
 
 
 def claude_session_id(cfg: dict) -> str | None:
-    """The claude conversation session UUID for --resume: the stem of the
-    recorded transcript jsonl (~/.claude/projects/<cwd>/<uuid>.jsonl). This is
-    NOT the iTerm session id (wake_state.session_id).
+    """The claude conversation session UUID for --resume: the stem of a
+    session jsonl (~/.claude/projects/<cwd>/<uuid>.jsonl). This is NOT the
+    iTerm session id (wake_state.session_id).
 
-    The recorded hint is a best-effort bounded poll captured right after a
-    spawn (_wait_new_transcript, ~8s) — the claude TUI can take 30s+ to create
-    its session jsonl, so in real timing the poll times out and the hint is
-    None almost every time. Fall back to the NEWEST top-level session jsonl in
-    the transcript dir: in the died-window/no-rotate-flag scenario that IS the
-    dead session's own archive (nothing writes to the dir after it dies), so
-    this recovers the correct UUID for --resume. None only when neither the
-    recorded hint nor any transcript file exists (caller falls back to a fresh
-    spawn)."""
+    Priority: the NEWEST top-level session jsonl in the transcript dir FIRST.
+    In the died-window/no-rotate-flag scenario (the only case this is called
+    for) newest IS the dead session's own archive — nothing writes to the dir
+    after it dies — so it is always correct there, and it is also fresher than
+    the recorded hint in the general case. The recorded hint is a best-effort
+    bounded poll captured right after a spawn (_wait_new_transcript, ~8s) — the
+    claude TUI can take 30s+ to create its session jsonl, so in real timing the
+    poll routinely times out (hint None) AND, if a stale entry from a previous
+    cycle was never cleared, the hint can be present but wrong (live-confirmed:
+    resumed a stale recorded uuid instead of the dead window's real archive).
+    The hint is now only a fallback for when no transcript file exists at all
+    (e.g. a wiped/relocated transcript dir). None only when neither yields a
+    UUID (caller falls back to a fresh spawn)."""
     from pathlib import Path
     from cortex import transcript as _transcript
 
+    newest = _transcript.newest(cfg)
+    if newest is not None:
+        return newest.stem
     raw = wake_state.load(cfg).get("transcript")
     if raw:
         stem = Path(str(raw)).stem
         if stem:
             return stem
-    newest = _transcript.newest(cfg)
-    return newest.stem if newest else None
+    return None
 
 
 def respawn(cfg: dict, initial_prompt: str | None = None,
