@@ -19,7 +19,7 @@ health_export = ""
 affect_flag_file = ""
 # Pacemaker self-schedule queue (JSON list of {due_at}). Default: ~/.config/marrow/cortex/self_schedule.json
 self_schedule_file = ""
-# Handoff note the next fresh window reads (assistant's 碎碎念). Default: ~/.config/marrow/cortex/handoff.md
+# Handoff note the next fresh window reads (assistant's handoff). Default: ~/.config/marrow/cortex/handoff.md
 handoff_file = ""
 # Cortex session cwd (own CLAUDE.md lives here). Default: ~/.config/marrow/cortex
 cortex_home = ""
@@ -162,7 +162,7 @@ close_prompt = "Night window is open. Write your handoff entry now, then call li
 tokens = 1000000
 
 # Schedule (duty) blocks: fixed recurring duties, rare + explicit. Each fires
-# once per day at its local time in a FRESH iTerm window (no 碎碎念), pierces
+# once per day at its local time in a FRESH iTerm window (no handoff), pierces
 # night + daily budget. Add a block per duty; enabled = false keeps it inert.
 # [[schedule]]
 # name = "review+plan"

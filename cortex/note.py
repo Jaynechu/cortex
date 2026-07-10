@@ -6,7 +6,7 @@ line rather than crashing the wake. render() is pure — no I/O, no DB — so it
 can be unit-tested with synthetic data.
 
 Layout: a header block (Now / Plan Used / Active), then `---`-separated blocks
-for pending self-schedule and Replay. The handoff (碎碎念) injects at
+for pending self-schedule and Replay. The handoff injects at
 SessionStart (marrow), not here. Cal/Rem lines retired (global inject pending).
 The old "Wake:" reason line is gone — reasons carry no signal (desire engine
 retired, wander-only) and schedule/duty windows get their own prompt.
@@ -284,7 +284,7 @@ def gather(
 ) -> dict:
     """Assemble the wakeup note data dict. conn must use sqlite3.Row factory.
     `fresh`/`wake_kind` are accepted for caller compatibility; the handoff
-    (碎碎念) now injects at SessionStart, not here."""
+    now injects at SessionStart, not here."""
     ncfg = _note_cfg(cfg)
 
     kv = _safe(_rate_limit_kv, conn, default={})
@@ -353,7 +353,7 @@ def render(cfg: dict, now: datetime, data: dict) -> str:
     Layout (plan §一): a header block (Now / Plan Used / Active), then
     `---`-separated blocks for pending self-schedule and Replay, then a final
     turn-end reminder line (note.turn_end_text, every render; "" omits it).
-    Handoff (碎碎念) no longer lives here — it is injected at SessionStart on a
+    Handoff no longer lives here — it is injected at SessionStart on a
     fresh window."""
     header: list[str] = []
 

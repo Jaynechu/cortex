@@ -220,7 +220,7 @@ def _relaunch(sid: str, cfg: dict) -> None:
 
 def spawn_fresh(cfg: dict) -> str:
     """Spawn a brand-new cortex window (attention hygiene for schedule duties —
-    no roaming context, no 碎碎念). NOT the resident session: its sid is never
+    no roaming context, no handoff). NOT the resident session: its sid is never
     persisted, so it can't be resumed and cortex ends it itself when done."""
     sid = _spawn(cfg)
     _wait_ready(sid, cfg)

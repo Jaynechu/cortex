@@ -203,7 +203,7 @@ def test_token_cap_breach_forces_fresh_no_rearchive(marrow_conn, wcfg):
 
 
 # --------------------------------------------------------------------------- #
-# Rotate (碎碎念 round-trip): a rotated/respawned resident window is a fresh
+# Rotate (handoff round-trip): a rotated/respawned resident window is a fresh
 # brain and must receive the previous brain's handoff note.
 # --------------------------------------------------------------------------- #
 
@@ -215,7 +215,7 @@ def rot_cfg(wcfg, tmp_path):
     cfg["paths"] = {**wcfg["paths"], "handoff_file": str(tmp_path / "handoff.md"),
                     "wake_state_file": str(tmp_path / "wake_state.json")}
     cfg["note"] = {"handoff_wake_kinds": ["rotate"],
-                   "handoff_title": "碎碎念"}
+                   "handoff_title": "handoff-note"}
     Path(cfg["paths"]["handoff_file"]).write_text("carry this to your next self")
     return cfg
 
@@ -265,7 +265,7 @@ def test_window_rotated_claude_dead_is_fresh(monkeypatch, rot_cfg):
 
 def test_window_unrotated_resume_stays_non_fresh(monkeypatch, rot_cfg):
     """Plain wake into a live, un-rotated window: same transcript, no flag ->
-    NOT fresh (no 碎碎念; replay continuity lives in the window's own context)."""
+    NOT fresh (no handoff; replay continuity lives in the window's own context)."""
     from cortex import wake_state, window, transcript
     wake_state.set_session_id(rot_cfg, "sid-1")
     wake_state.update(rot_cfg, transcript="/t/same.jsonl")
@@ -278,7 +278,7 @@ def test_window_unrotated_resume_stays_non_fresh(monkeypatch, rot_cfg):
 
 def test_window_wake_rotate_respawns(monkeypatch, marrow_conn, rot_cfg):
     """Full window-branch: a rotated window (same local day) respawns fresh.
-    The 碎碎念 handoff now injects at SessionStart (marrow), not in the note."""
+    The handoff now injects at SessionStart (marrow), not in the note."""
     monkeypatch.setattr(wake, "_window_rotated", lambda cfg: True)
     captured = {}
     def fake_window_wake(conn, cfg, note_text, now, respawn=False):
@@ -290,7 +290,7 @@ def test_window_wake_rotate_respawns(monkeypatch, marrow_conn, rot_cfg):
     wake.run_wake(marrow_conn, rot_cfg, DECISION, now=DAY1)  # first wake seeds state
     captured.clear()
     wake.run_wake(marrow_conn, rot_cfg, DECISION, now=DAY1 + timedelta(hours=1))
-    assert "碎碎念" not in captured["text"]  # handoff moved to SessionStart
+    assert "handoff-note" not in captured["text"]  # handoff moved to SessionStart
     assert captured["respawn"] is True  # rotate -> fresh self-arming window
 
 
@@ -310,7 +310,7 @@ def test_rotate_flag_makes_next_wake_fresh(monkeypatch, marrow_conn, rot_cfg):
 
 
 def test_window_wake_unrotated_no_handoff(monkeypatch, marrow_conn, rot_cfg):
-    """Un-rotated same-day wake: no 碎碎念 in the note."""
+    """Un-rotated same-day wake: no handoff in the note."""
     monkeypatch.setattr(wake, "_window_rotated", lambda cfg: False)
     captured = {}
     monkeypatch.setattr(wake, "_window_wake",
@@ -320,7 +320,7 @@ def test_window_wake_unrotated_no_handoff(monkeypatch, marrow_conn, rot_cfg):
     wake.run_wake(marrow_conn, rot_cfg, DECISION, now=DAY1)
     captured.clear()
     wake.run_wake(marrow_conn, rot_cfg, DECISION, now=DAY1 + timedelta(hours=1))
-    assert "碎碎念" not in captured["text"]
+    assert "handoff-note" not in captured["text"]
     assert captured["respawn"] is False         # live un-rotated window: no respawn
 
 

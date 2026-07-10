@@ -62,7 +62,7 @@ def assemble_note(conn: sqlite3.Connection, cfg: dict, now: datetime,
                   decision: dict | None = None, fresh: bool = False,
                   wake_kind: str | None = None) -> str:
     """Thin wrapper: gather() + render(). `fresh`/`wake_kind` gate the handoff
-    (碎碎念) section — only a fresh window (rotate) receives it."""
+    section — only a fresh window (rotate) receives it."""
     data = note.gather(conn, cfg, now, decision=decision,
                        fresh=fresh, wake_kind=wake_kind)
     return note.render(cfg, now, data)
@@ -171,7 +171,7 @@ def _duty_prompt(duty: dict) -> str | None:
 
 def _schedule_wake(conn, cfg, decision, now, duties) -> dict:
     """Schedule (duty) wake: a fresh iTerm window per duty (attention hygiene —
-    no roaming context, no 碎碎念). Not the resident session and not resumed;
+    no roaming context, no handoff). Not the resident session and not resumed;
     cortex ends it itself when the duty is done. A quiet say() requests
     attention on spawn. Budget/night-exempt (schedule pierces the gates).
 
