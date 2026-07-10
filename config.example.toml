@@ -70,7 +70,7 @@ skip_permissions = true        # add --dangerously-skip-permissions so a fresh d
 ready_marker = "accept edits"  # TUI footer text signalling claude is ready for input
 ready_timeout_sec = 30         # max wait for readiness after a fresh spawn
 # The signal-file ear (alive-resident wake only). An already-running resident
-# window has a persistent Monitor (`tail -n 0 -f <signal_log>`); the pacemaker
+# window has a persistent Monitor (command: "tail -n 0 -f <signal_log>", persistent: true); the pacemaker
 # appends a WAKE line to wake it (no keyboard typing). ear_timeout_sec = how
 # long a wake is given to land (transcript grows) before the resident is
 # replaced by a FRESH window that gets the note as its first prompt.
