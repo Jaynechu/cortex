@@ -268,25 +268,30 @@ def claude_session_id(cfg: dict) -> str | None:
     session jsonl (~/.claude/projects/<cwd>/<uuid>.jsonl). This is NOT the
     iTerm session id (wake_state.session_id).
 
-    Priority: the NEWEST top-level session jsonl in the transcript dir FIRST.
-    In the died-window/no-rotate-flag scenario (the only case this is called
-    for) newest IS the dead session's own archive — nothing writes to the dir
-    after it dies — so it is always correct there, and it is also fresher than
-    the recorded hint in the general case. The recorded hint is a best-effort
-    bounded poll captured right after a spawn (_wait_new_transcript, ~8s) — the
-    claude TUI can take 30s+ to create its session jsonl, so in real timing the
-    poll routinely times out (hint None) AND, if a stale entry from a previous
-    cycle was never cleared, the hint can be present but wrong (live-confirmed:
+    Priority: the newest WINDOW-LINEAGE session jsonl in the transcript dir
+    FIRST (transcript.newest_window_lineage) — the newest jsonl whose first
+    user message carries the wake signal marker, i.e. was launched as a cortex
+    window (fresh_initial_prompt bakes it into every window's first prompt
+    since dccb3d4). Plain newest() is NOT enough: the transcript dir also holds
+    HEADLESS session archives (marrow's sessionend digest runs `claude -p`
+    against this same cwd -> same projects dir), and a digest run can be the
+    mtime-newest file — resuming it exposes its full worker prompt in the
+    window (live-confirmed). The recorded hint is a best-effort bounded poll
+    captured right after a spawn (_wait_new_transcript, ~8s) — the claude TUI
+    can take 30s+ to create its session jsonl, so in real timing the poll
+    routinely times out (hint None) AND, if a stale entry from a previous cycle
+    was never cleared, the hint can be present but wrong (live-confirmed:
     resumed a stale recorded uuid instead of the dead window's real archive).
-    The hint is now only a fallback for when no transcript file exists at all
-    (e.g. a wiped/relocated transcript dir). None only when neither yields a
-    UUID (caller falls back to a fresh spawn)."""
+    The hint is now only a fallback for when no marker-bearing transcript file
+    exists at all. None only when neither yields a UUID (caller falls back to
+    a fresh spawn)."""
     from pathlib import Path
     from cortex import transcript as _transcript
 
-    newest = _transcript.newest(cfg)
-    if newest is not None:
-        return newest.stem
+    marker = cfg.get("wake", {}).get("wake_signal_marker", "[CORTEX-WAKE]")
+    lineage = _transcript.newest_window_lineage(cfg, marker)
+    if lineage is not None:
+        return lineage.stem
     raw = wake_state.load(cfg).get("transcript")
     if raw:
         stem = Path(str(raw)).stem
