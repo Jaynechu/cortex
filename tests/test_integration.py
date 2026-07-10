@@ -55,14 +55,15 @@ def test_load_state_empty_default(conn):
 
 
 def test_load_state_legacy_desire_json_loads_gracefully(conn):
-    # A pre-retirement row still carries desire/expect_reply keys — they are
-    # ignored (not migrated), and loading must not crash.
+    # A pre-retirement row still carries desire/expect_reply/cortex_session_date
+    # keys — they are ignored (not migrated), and loading must not crash.
     now = datetime.now(MEL)
     old_json = json.dumps({
         "desire": {"attachment": 0.1, "curiosity": 0.0, "worry": 0.0, "duty": 0.0,
                    "last_tick_at": now.isoformat()},
         "expect_reply": {"pending": True, "sent_at": now.isoformat(),
                          "checks_done": 3, "tone_level": 2},
+        "cortex_session_date": "2026-07-04",
         "next_floor_due_at": now.isoformat(),
         "last_wake_at": None,
     })
@@ -76,12 +77,13 @@ def test_load_state_legacy_desire_json_loads_gracefully(conn):
     assert state.last_lie_down_at is None
     assert state.night_cap_key is None
     assert state.night_wake_count == 0
-    # A save drops the stale desire/expect_reply keys from the row.
+    # A save drops the stale desire/expect_reply/cortex_session_date keys.
     integration.save_state(conn, state)
     raw = json.loads(conn.execute(
         "SELECT state FROM ct_pacemaker_state WHERE id = 1").fetchone()["state"])
     assert "desire" not in raw
     assert "expect_reply" not in raw
+    assert "cortex_session_date" not in raw
 
 
 # --- lie_down ---------------------------------------------------------------
@@ -91,7 +93,6 @@ def test_lie_down_sets_floor_and_preserves_other_fields(conn, cfg):
     prior = PacemakerState(
         last_wake_at=now,
         cortex_session_id="sid-1",
-        cortex_session_date="2026-07-04",
     )
     integration.save_state(conn, prior)
 
@@ -104,7 +105,6 @@ def test_lie_down_sets_floor_and_preserves_other_fields(conn, cfg):
     # other fields untouched
     assert state.last_wake_at == now
     assert state.cortex_session_id == "sid-1"
-    assert state.cortex_session_date == "2026-07-04"
 
 
 def test_lie_down_explicit_minutes_sets_exact_next_wake(conn, cfg):

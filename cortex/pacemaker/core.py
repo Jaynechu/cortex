@@ -26,9 +26,8 @@ class PacemakerState:
     night_cap_key: str | None = None
     night_wake_count: int = 0
     # Cortex session resume (C3). Opaque to tick() — only the wake caller
-    # (cortex.wake) reads/writes these.
+    # (cortex.wake) reads/writes this.
     cortex_session_id: str | None = None
-    cortex_session_date: str | None = None
 
 
 def _render_explanation(now: datetime, reasons: list, gated: list) -> str:
@@ -85,7 +84,6 @@ def tick(
         night_cap_key=new_night_cap_key,
         night_wake_count=new_night_wake_count,
         cortex_session_id=state.cortex_session_id,
-        cortex_session_date=state.cortex_session_date,
     )
 
     decision = {

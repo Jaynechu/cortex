@@ -69,7 +69,6 @@ def test_first_wake_no_resume_and_persists_session(marrow_conn, wcfg):
     from cortex.pacemaker import integration
     state = integration.load_state(marrow_conn)
     assert state.cortex_session_id == "sid-abc"
-    assert state.cortex_session_date == "2026-07-03"
 
     path = wcfg["paths"]["day_log"]
     text = open(path).read()
@@ -106,7 +105,6 @@ def test_new_date_resumes_no_rebirth(marrow_conn, wcfg):
     from cortex.pacemaker import integration
     state = integration.load_state(marrow_conn)
     assert state.cortex_session_id == "sid-day2"
-    assert state.cortex_session_date == "2026-07-04"
 
 
 def test_run_wake_creates_ny_symlinks(marrow_conn, wcfg):
@@ -126,8 +124,8 @@ class FailCaller:
 
 
 def test_failed_wake_forces_fresh_next_no_archive(marrow_conn, wcfg):
-    """A failed marrow call drops the resume sid (fresh session next wake) and
-    keeps date=today. Rebirth/archiving is retired -> no archive dir is created."""
+    """A failed marrow call drops the resume sid (fresh session next wake).
+    Rebirth/archiving is retired -> no archive dir is created."""
     from cortex.pacemaker import integration
 
     good = FakeCaller(session_id="sid-day1")
@@ -139,7 +137,6 @@ def test_failed_wake_forces_fresh_next_no_archive(marrow_conn, wcfg):
 
     st = integration.load_state(marrow_conn)
     assert st.cortex_session_id is None            # fresh session next wake
-    assert st.cortex_session_date == "2026-07-03"  # same day, no rollover concept
 
     archive_dir = Path(wcfg["paths"]["day_log_archive_dir"])
     assert not (archive_dir / "2026-07-03.md").exists()
@@ -187,7 +184,8 @@ class CapCaller:
 
 def test_token_cap_breach_forces_fresh_no_rearchive(marrow_conn, wcfg):
     """A mid-wake token-cap breach drops the resume sid (fresh session next
-    wake) but keeps date=today so the same day's log is never re-archived."""
+    wake). Rebirth/archiving is retired -> the same day's log is never
+    re-archived."""
     from cortex.pacemaker import integration
 
     good = FakeCaller(session_id="sid-1")
@@ -201,7 +199,6 @@ def test_token_cap_breach_forces_fresh_no_rearchive(marrow_conn, wcfg):
 
     st = integration.load_state(marrow_conn)
     assert st.cortex_session_id is None            # fresh session next wake
-    assert st.cortex_session_date == "2026-07-03"  # same day -> no re-archive
 
     # Third wake same day: fresh (resume None), still no archive of day1.
     good2 = FakeCaller(session_id="sid-3")

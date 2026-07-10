@@ -113,11 +113,10 @@ def _audit_wake(conn: sqlite3.Connection, wake_id: str, summary: str) -> None:
 
 
 def _force_fresh_next(conn: sqlite3.Connection, state, today: str) -> None:
-    """Next wake starts a fresh marrow session (drop resume sid, keep date=today).
+    """Next wake starts a fresh marrow session (drop resume sid).
     Used on token-cap breach and marrow call failure/timeout so a broken/oversized
     session is never resumed."""
-    integration.save_state(
-        conn, replace(state, cortex_session_id=None, cortex_session_date=today))
+    integration.save_state(conn, replace(state, cortex_session_id=None))
 
 
 def _latest_wake_log_id(conn: sqlite3.Connection) -> int | None:
@@ -341,8 +340,6 @@ def run_wake(
             timer.mark("rotate_note")
         win = _window_wake(conn, cfg, window_text, now, respawn=respawn)
         if win is not None:
-            state = replace(state, cortex_session_date=today)
-            integration.save_state(conn, state)
             timer.mark("window_injected")
             timer.mark("wake_complete")
             return win
@@ -372,7 +369,6 @@ def run_wake(
     new_state = replace(
         state,
         cortex_session_id=result.get("session_id") or resume_sid,
-        cortex_session_date=today,
     )
     integration.save_state(conn, new_state)
 

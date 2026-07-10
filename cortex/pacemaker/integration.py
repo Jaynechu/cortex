@@ -60,9 +60,11 @@ def parse_due_at(value: str | None, tz: ZoneInfo) -> datetime | None:
 
 def _state_to_json(state: PacemakerState, base: dict | None = None) -> str:
     obj = dict(base or {})  # preserve side-channel keys (window_tokens, schedule_fired)
-    # Drop any legacy desire/expect_reply keys carried in from an old row.
+    # Drop any legacy desire/expect_reply/cortex_session_date keys carried in
+    # from an old row (cortex_session_date: rebirth retired, 3155246).
     obj.pop("desire", None)
     obj.pop("expect_reply", None)
+    obj.pop("cortex_session_date", None)
     obj.update({
         "next_floor_due_at": _iso(state.next_floor_due_at),
         "last_wake_at": _iso(state.last_wake_at),
@@ -70,14 +72,13 @@ def _state_to_json(state: PacemakerState, base: dict | None = None) -> str:
         "night_cap_key": state.night_cap_key,
         "night_wake_count": state.night_wake_count,
         "cortex_session_id": state.cortex_session_id,
-        "cortex_session_date": state.cortex_session_date,
     })
     return json.dumps(obj)
 
 
 def _state_from_json(text: str) -> PacemakerState:
-    # Tolerant load: legacy rows may still carry desire/expect_reply keys —
-    # they are simply ignored (the engines are retired).
+    # Tolerant load: legacy rows may still carry desire/expect_reply/
+    # cortex_session_date keys — they are simply ignored (retired engines).
     o = json.loads(text)
     return PacemakerState(
         next_floor_due_at=_parse_dt(o.get("next_floor_due_at")),
@@ -86,7 +87,6 @@ def _state_from_json(text: str) -> PacemakerState:
         night_cap_key=o.get("night_cap_key"),
         night_wake_count=o.get("night_wake_count", 0),
         cortex_session_id=o.get("cortex_session_id"),
-        cortex_session_date=o.get("cortex_session_date"),
     )
 
 
