@@ -281,10 +281,12 @@ def gather(
     *,
     fresh: bool = False,
     wake_kind: str | None = None,
+    died_no_handoff: bool = False,
 ) -> dict:
     """Assemble the wakeup note data dict. conn must use sqlite3.Row factory.
     `fresh`/`wake_kind` are accepted for caller compatibility; the handoff
-    now injects at SessionStart, not here."""
+    now injects at SessionStart, not here. `died_no_handoff` = the prior window
+    crashed without a handoff (respawn catchup line)."""
     ncfg = _note_cfg(cfg)
 
     kv = _safe(_rate_limit_kv, conn, default={})
@@ -295,6 +297,7 @@ def gather(
         "budget": budget,
         "active_app": _safe(_frontmost_app),
         "pending": _safe(_pending, cfg, now, default=[]),
+        "died_no_handoff": died_no_handoff,
         "replay": _safe(
             _replay_events, conn, cfg,
             ncfg.get("replay_events", 4),
@@ -378,6 +381,13 @@ def render(cfg: dict, now: datetime, data: dict) -> str:
     # window to backfill from DB events (recall/tl), never from raw jsonl.
     if last and last.get("force_slept"):
         catchup = _note_cfg(cfg).get("force_slept_catchup_text", "")
+        if catchup:
+            header.append(catchup)
+
+    # Prior window DIED (crash/manual close) mid-wake without a handoff -> the
+    # fresh respawn recovers from its transcript.
+    if data.get("died_no_handoff"):
+        catchup = _note_cfg(cfg).get("died_no_handoff_catchup_text", "")
         if catchup:
             header.append(catchup)
 

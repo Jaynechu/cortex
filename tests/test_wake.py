@@ -279,7 +279,7 @@ def test_window_unrotated_resume_stays_non_fresh(monkeypatch, rot_cfg):
 def test_window_wake_rotate_respawns(monkeypatch, marrow_conn, rot_cfg):
     """Full window-branch: a rotated window (same local day) respawns fresh.
     The handoff now injects at SessionStart (marrow), not in the note."""
-    monkeypatch.setattr(wake, "_window_rotated", lambda cfg: True)
+    monkeypatch.setattr(wake, "_window_wake_plan", lambda cfg: "fresh")
     captured = {}
     def fake_window_wake(conn, cfg, note_text, now, respawn=False):
         captured["text"] = note_text
@@ -311,7 +311,7 @@ def test_rotate_flag_makes_next_wake_fresh(monkeypatch, marrow_conn, rot_cfg):
 
 def test_window_wake_unrotated_no_handoff(monkeypatch, marrow_conn, rot_cfg):
     """Un-rotated same-day wake: no handoff in the note."""
-    monkeypatch.setattr(wake, "_window_rotated", lambda cfg: False)
+    monkeypatch.setattr(wake, "_window_wake_plan", lambda cfg: "ear")
     captured = {}
     monkeypatch.setattr(wake, "_window_wake",
                         lambda conn, cfg, t, now, respawn=False:

@@ -1,12 +1,14 @@
 """iTerm2 window control for the resident interactive cortex session. All
 control via iTerm2 AppleScript (works while the screen is locked — no keyboard
-simulation). Primitives: ensure_window, respawn (fresh window with the wakeup
-note baked in as its first prompt), append_wake_signal (the ear for an
-already-running resident window), inject_note (schedule windows only), send_esc,
-say, hard_interrupt (process-level SIGINT fallback when esc alone may not land,
-e.g. no focus). A fresh window wakes silently — the baked-in note prompt is the
-only trace, no notification. An alive resident window is woken by the signal-file ear
-(a Monitor tailing wake_signal.log). The window body is one `claude` running in
+simulation). Primitives: ensure_window, respawn (fresh window with the emoji-only
+wake prompt baked in as its first prompt), append_wake_signal (the ear bell for an
+already-running resident window), type_wake_signal (typed rearm on ear death),
+inject_note (schedule windows only), send_esc, say, hard_interrupt (process-level
+SIGINT fallback when esc alone may not land, e.g. no focus). A fresh window wakes
+silently — the baked-in emoji prompt is the only trace, no notification. An alive
+resident window is woken by the signal-file ear (a Monitor tailing
+wake_signal.log). The marrow UserPromptSubmit hook detects the bell marker and
+injects the full wakeup note. The window body is one `claude` running in
 cortex_home with MARROW_CORTEX=1 set explicitly (identity marker).
 """
 from __future__ import annotations
@@ -105,33 +107,47 @@ def window_effort(cfg: dict) -> str:
     return cfg["wake"].get("window_effort", "")
 
 
-def note_read_line(cfg: dict, note_path: str) -> str:
+def wake_prompt(cfg: dict) -> str:
     """The single-line first prompt handed to a fresh cortex window: JUST the
     configured emoji (wake.wake_prompt, default '☀️') so no readable text shows
     in the user's face. The full wake instructions (read the note, arm the ear,
     choose next wake) are injected by marrow's UserPromptSubmit hook when this
-    emoji is submitted in a cortex window. `note_path` is accepted for call-site
-    compatibility but no longer substituted — the hook reads the note path from
-    marrow config so the two sides can't drift. If a legacy config still carries
-    a `{note}` template, it is substituted for back-compat."""
-    tmpl = cfg["wake"].get("wake_prompt", "☀️")
-    return tmpl.replace("{note}", str(note_path))
+    emoji is submitted in a cortex window."""
+    return cfg["wake"].get("wake_prompt", "☀️")
 
 
-def launch_command(cfg: dict, initial_prompt: str | None = None) -> str:
+def wake_signal_line(cfg: dict, now, rearm: bool = False) -> str:
+    """The bell line: '<marker> HH:MM' (local time). The marrow UserPromptSubmit
+    hook detects the marker and injects the full wakeup note — this line is a
+    BELL ONLY, no note body, no read errand. `rearm` appends the ear-died suffix
+    for the typed re-arm of an alive window whose ear missed."""
+    marker = cfg["wake"].get("wake_signal_marker", "[CORTEX-WAKE]")
+    line = f"{marker} {now.strftime('%H:%M')}"
+    if rearm:
+        line += cfg["wake"].get("rearm_suffix", " (ear died — rearm)")
+    return line
+
+
+def launch_command(cfg: dict, initial_prompt: str | None = None,
+                   resume_sid: str | None = None) -> str:
     # Identity + channel markers set explicitly (hooks derive channel from
     # MARROW_CHANNEL; MARROW_CORTEX=1 = cortex identity / kickout immunity).
     # --model/--effort pin tier + reasoning so the window never rides the
     # system default. Reused by every cortex window spawn. A non-empty
-    # initial_prompt (the wakeup-note Read line) is baked in as claude's first
+    # initial_prompt (the emoji-only wake prompt) is baked in as claude's first
     # positional prompt so a freshly launched window starts acting immediately —
-    # zero typing, no arm/lie-down ritual.
+    # the marrow hook injects the full note on that emoji; zero readable text.
+    # A non-empty resume_sid adds `--resume <sid>` so a window that simply died
+    # (crash / manual close, NOT a deliberate rotate) comes back as the SAME
+    # session with full context — no fresh brain, no handoff catchup needed.
     home = str(config.cortex_home(cfg))
     cmd = cfg["wake"].get("launch_command", "claude")
     flags = f" --model {window_model(cfg)}"
     eff = window_effort(cfg)
     if eff:
         flags += f" --effort {eff}"
+    if resume_sid:
+        flags += f" --resume {_shq(resume_sid)}"
     # Skip the workspace-trust dialog so the injected note lands (a fresh dir
     # otherwise blocks on the trust prompt). Mirrors marrow's headless call.
     if cfg["wake"].get("skip_permissions", True):
@@ -155,20 +171,21 @@ def _append_signal_line(cfg: dict, line: str) -> None:
         pass
 
 
-def append_wake_signal(cfg: dict, note_path: str) -> None:
-    """Append one WAKE line the armed Monitor ear picks up: 'Waking up — read
-    <note_path> first'. The wake reason already lives inside the note itself
-    (note's Wake: line) so it is not duplicated here. Best-effort: a write
-    failure never crashes the pacemaker."""
-    _append_signal_line(cfg, f"Waking up — read {note_path} first")
+def append_wake_signal(cfg: dict, now) -> None:
+    """Append one bell line the armed Monitor ear picks up: '<marker> HH:MM'.
+    The marker (not this file) is what the marrow UserPromptSubmit hook detects
+    to inject the full wakeup note — a BELL ONLY, no note body, no read errand.
+    Best-effort: a write failure never crashes the pacemaker."""
+    _append_signal_line(cfg, wake_signal_line(cfg, now))
 
 
 _launch_command = launch_command  # back-compat alias
 
 
-def _spawn(cfg: dict, initial_prompt: str | None = None) -> str:
+def _spawn(cfg: dict, initial_prompt: str | None = None,
+           resume_sid: str | None = None) -> str:
     name = _esc(cfg["wake"].get("session_name", "cortex"))
-    launch = _esc(launch_command(cfg, initial_prompt))
+    launch = _esc(launch_command(cfg, initial_prompt, resume_sid))
     # No `activate` — spawning must not steal keyboard focus. Creating a window
     # still brings iTerm forward, so capture the frontmost app and restore it.
     prev = _frontmost_bid()
@@ -235,13 +252,31 @@ def _close_session(sid: str) -> None:
         pass
 
 
-def respawn(cfg: dict, initial_prompt: str | None = None) -> str:
-    """Replace the resident window with a fresh brain: SIGTERM its `claude`
-    process (never SIGKILL), close the old iTerm session, then spawn a new
-    window. A non-empty initial_prompt (the wakeup-note Read line) is baked into
-    the launch command so the fresh window starts acting immediately — no arm
-    prompt, no lie-down-first, no signal. Persists and returns the new resident
-    sid. Reused for rotate, rebirth and the dead/ear-miss recovery path."""
+def claude_session_id(cfg: dict) -> str | None:
+    """The claude conversation session UUID for --resume: the stem of the
+    recorded transcript jsonl (~/.claude/projects/<cwd>/<uuid>.jsonl). This is
+    NOT the iTerm session id (wake_state.session_id). None if no transcript hint
+    is recorded (a resume can't be attempted -> caller falls back to a fresh
+    spawn)."""
+    from pathlib import Path
+
+    raw = wake_state.load(cfg).get("transcript")
+    if not raw:
+        return None
+    stem = Path(str(raw)).stem
+    return stem or None
+
+
+def respawn(cfg: dict, initial_prompt: str | None = None,
+            resume_sid: str | None = None) -> str:
+    """Replace the resident window with a new one: SIGTERM its `claude` process
+    (never SIGKILL), close the old iTerm session, then spawn. A non-empty
+    initial_prompt (the emoji-only wake prompt) is baked into the launch command
+    so the window starts acting immediately — no arm prompt, no lie-down-first,
+    no signal. A non-empty resume_sid launches `claude --resume <sid>` (same
+    conversation, full context) instead of a fresh brain — used when the window
+    simply died with no rotate flag. Persists and returns the new resident sid.
+    Reused for rotate/rebirth (fresh) and the dead-window recovery (resume)."""
     pid = find_claude_pid(cfg)
     if pid is not None:
         try:
@@ -251,7 +286,7 @@ def respawn(cfg: dict, initial_prompt: str | None = None) -> str:
     old = wake_state.get_session_id(cfg)
     if old:
         _close_session(old)
-    sid = _spawn(cfg, initial_prompt)
+    sid = _spawn(cfg, initial_prompt, resume_sid)
     wake_state.set_session_id(cfg, sid)
     _wait_ready(sid, cfg)
     return sid
@@ -377,6 +412,14 @@ def inject_prompt(cfg: dict, text: str) -> bool:
     finally:
         _guard_focus(prev)
     return True
+
+
+def type_wake_signal(cfg: dict, now) -> bool:
+    """Ear-died rearm (ladder 2a): type the bell line '<marker> HH:MM (ear died
+    — rearm)' into the ALIVE resident window. It flows through the marrow hook
+    like any wake (marker detected -> note injected -> session rearms). Returns
+    False if there is no resident session. Focus-guarded like every typing path."""
+    return inject_prompt(cfg, wake_signal_line(cfg, now, rearm=True))
 
 
 def send_esc(cfg: dict) -> None:

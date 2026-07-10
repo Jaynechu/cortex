@@ -56,6 +56,12 @@ _DEFAULTS: dict[str, Any] = {
         "signal_log": "",
         "ear_timeout_sec": 90,
         "wake_prompt": "☀️",
+        # Bell marker line the marrow UserPromptSubmit hook detects to inject the
+        # full wakeup note. Signal is a BELL ONLY — no note body, no read errand.
+        # Rendered as "<marker> HH:MM" (local time). rearm_suffix is appended when
+        # the ear died and the pacemaker re-types the marker into an alive window.
+        "wake_signal_marker": "[CORTEX-WAKE]",
+        "rearm_suffix": " (ear died — rearm)",
         "say_sound": "Glass",
         # Max wait() calls allowed per wake (reset on wake start / lie_down).
         # A call past this returns a refusal result (not an exception).
@@ -132,6 +138,11 @@ _DEFAULTS: dict[str, Any] = {
         "force_slept_catchup_text":
             "Prior window was force-slept — catchup by recall all events from DB "
             "(do not read raw jsonl) and append to handoff.md",
+        # Prior window DIED (crash/manual close) mid-wake without writing its
+        # handoff -> the fresh respawn recovers context from its transcript.
+        "died_no_handoff_catchup_text":
+            "Previous window died without a handoff — recover context from its "
+            "transcript, then write the handoff.",
         # One-line turn-end reminder appended at the very end of every rendered
         # note. "" omits it.
         "turn_end_text":

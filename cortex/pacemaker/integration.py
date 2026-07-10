@@ -255,24 +255,28 @@ def write_wake_log(conn: sqlite3.Connection, decision: dict, now: datetime, dry_
 
 
 def lie_down(conn: sqlite3.Connection, cfg: dict, now: datetime | None = None,
-             rng: random.Random | None = None, minutes: float | None = None) -> None:
+             rng: random.Random | None = None,
+             minutes: float | None = None) -> datetime:
     """Mark wake end (C-wm): lie_down chooses the next internal wake. `minutes`
     = an explicit choice (clamped to [floor_min_min, floor_max_min]); None =
     a uniform "dice" draw within that window (preserves prior behaviour). The
     clock restarts from lie-down. Called by the tick entry point after a wake
-    finishes — including on wake failure, so a crashed wake can't wedge it."""
+    finishes — including on wake failure, so a crashed wake can't wedge it.
+    Returns the redrawn next-floor datetime (local tz)."""
     from cortex.pacemaker.triggers import reschedule_floor
 
     now = now or _now(cfg)
     rng = rng or random.Random()
 
+    next_floor = reschedule_floor(now, cfg, rng, minutes)
     state = load_state(conn)
     new_state = dataclasses.replace(
         state,
-        next_floor_due_at=reschedule_floor(now, cfg, rng, minutes),
+        next_floor_due_at=next_floor,
         last_lie_down_at=now,
     )
     save_state(conn, new_state)
+    return next_floor
 
 
 def run_tick(conn: sqlite3.Connection, cfg: dict, now: datetime | None = None,

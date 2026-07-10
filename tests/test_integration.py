@@ -276,6 +276,31 @@ def test_daily_budget_falls_back_to_tokens_when_net_missing(conn, cfg):
     assert any(g.name == "daily_budget" for g in decision["gated_by"])
 
 
+def test_dry_run_marks_schedule_fired_no_refire(conn, cfg):
+    """Regression: under dry_run a due duty must be marked fired so it does not
+    re-fire every 5-min tick until midnight (run_wake, the live marker, is never
+    called). _mark_dry_run_schedule_fired records the fire; the next tick's
+    due_duties then skips it."""
+    from cortex import pacemaker_tick
+
+    cfg["pacemaker"]["dry_run"] = True
+    cfg["schedule"] = [{"name": "review+plan", "time": "20:30", "enabled": True}]
+
+    now1 = datetime(2026, 7, 8, 20, 31, tzinfo=MEL)
+    decision1 = integration.run_tick(conn, cfg, now=now1, rng=random.Random(1))
+    assert decision1["wake"] is True
+    assert any(r.kind == "schedule" for r in decision1["reasons"])
+
+    # tick entry marks the fired duty under dry_run
+    pacemaker_tick._mark_dry_run_schedule_fired(conn, decision1, now1)
+    assert integration.load_schedule_fired(conn) == {"review+plan": "2026-07-08"}
+
+    # a later tick the same day no longer re-fires the duty
+    now2 = datetime(2026, 7, 8, 20, 36, tzinfo=MEL)
+    decision2 = integration.run_tick(conn, cfg, now=now2, rng=random.Random(1))
+    assert not any(r.kind == "schedule" for r in decision2["reasons"])
+
+
 def test_night_mode_gates_floor_wake(conn, cfg):
     now = datetime(2026, 7, 4, 2, 0, tzinfo=MEL)  # inside default 23:00-06:00 window
     night_key = gates.night_key(cfg, now)

@@ -93,7 +93,9 @@ def lie_down(cfg: dict, force_slept: str | None = None, rotate: bool = False,
         state = wake_state.load(cfg)
         tokens, net = _record_tokens(conn, cfg, state, force_slept)
         cleared = _clear_due_self_schedule(cfg)
-        integration.lie_down(conn, cfg, minutes=next_wake_min)  # wake redraw from now
+        # wake redraw from now; next_floor drives the next_wake HH:MM the marrow
+        # MCP wrapper surfaces to the session.
+        next_floor = integration.lie_down(conn, cfg, minutes=next_wake_min)
         # Publish AFTER the floor redraw's save_state (which drops the key), so the
         # next wake's Plan Used line sees this wake's NET spend (cache-miss rewrite
         # + output — not the full context occupancy `tokens` used for rotate/fuse).
@@ -105,10 +107,19 @@ def lie_down(cfg: dict, force_slept: str | None = None, rotate: bool = False,
         if rotate:
             wake_state.set_rotated(cfg)
         wake_state.clear_awake(cfg)
+        next_wake = _local_hm(next_floor, cfg)
         return {"tokens": tokens, "cleared_due": cleared,
-                "force_slept": force_slept, "rotated": rotate}
+                "force_slept": force_slept, "rotated": rotate,
+                "next_wake": next_wake}
     finally:
         conn.close()
+
+
+def _local_hm(dt: datetime | None, cfg: dict) -> str | None:
+    """Next-floor datetime -> local HH:MM (config tz). None -> None."""
+    if dt is None:
+        return None
+    return dt.astimezone(ZoneInfo(cfg["core"]["timezone"])).strftime("%H:%M")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -122,8 +133,9 @@ def main(argv: list[str] | None = None) -> int:
                              "the wake window); omit for a uniform dice draw")
     args = parser.parse_args(argv)
     cfg = config.load()
-    lie_down(cfg, force_slept=args.force_slept, rotate=args.rotate,
-             next_wake_min=args.next_wake_min)
+    result = lie_down(cfg, force_slept=args.force_slept, rotate=args.rotate,
+                      next_wake_min=args.next_wake_min)
+    print(json.dumps(result, ensure_ascii=False))  # surface next_wake harmlessly
     return 0
 
 

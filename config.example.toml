@@ -82,6 +82,12 @@ ear_timeout_sec = 90           # recovery deadline for an alive-window wake to l
 # arm the ear, choose next wake) are injected by marrow's UserPromptSubmit hook
 # when this exact emoji is submitted in a cortex window.
 wake_prompt = "☀️"
+# Bell marker the marrow UserPromptSubmit hook detects to inject the full wakeup
+# note. The signal line is a BELL ONLY: "<marker> HH:MM" (local), no note body,
+# no read errand. rearm_suffix is appended when the ear died and the pacemaker
+# re-types the marker into an alive window (ladder 2a).
+wake_signal_marker = "[CORTEX-WAKE]"
+rearm_suffix = " (ear died — rearm)"
 # say() = the ONLY place cortex takes focus: it fronts the resident window and
 # plays a system sound (name of a /System/Library/Sounds/*.aiff; "" = silent).
 say_sound = "Glass"
