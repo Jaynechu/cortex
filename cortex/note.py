@@ -129,9 +129,10 @@ def _rate_limit_kv(conn: sqlite3.Connection) -> dict:
 
 
 def _window_tokens(conn: sqlite3.Connection) -> int | None:
-    """NET spend hint (cache-miss rewrite + output) published by lie_down /
-    watchdog into ct_pacemaker_state JSON under 'window_tokens'. Absent -> None
-    (segment omitted). Rendered as the Budget 'net Xk' segment."""
+    """Window occupancy hint (statusline total: input + cache_read +
+    cache_creation + output) published by lie_down / watchdog into
+    ct_pacemaker_state JSON under 'window_tokens'. Absent -> None (segment
+    omitted). Rendered as the Budget 'Net Session Token: Xk' segment."""
     try:
         row = conn.execute(
             "SELECT state FROM ct_pacemaker_state WHERE id = 1"
@@ -421,7 +422,9 @@ def render(cfg: dict, now: datetime, data: dict) -> str:
 def _render_budget(budget: dict | None) -> str | None:
     """Plan Used line — shows utilization (USED %, statusline口径), pipe-joined:
     `Plan Used: 5h 5% (04:50) | 7d 50% (1d2h) | Cortex Today 250k/1M 25% |
-    Net Session Token: 50k`. Any missing datum drops just its segment."""
+    Net Session Token: 50k`. Net Session Token is window occupancy (statusline
+    total), not net spend — label kept for cross-system consistency with
+    marrow's threshold line. Any missing datum drops just its segment."""
     if not budget:
         return None
     parts = []

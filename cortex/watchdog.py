@@ -142,11 +142,11 @@ def run(cfg: dict) -> int:
         silent_min = (time.time() - mt) / 60.0 if mt else 0.0
         tokens = transcript.window_tokens(cfg)
 
-        # Publish the live NET spend (cache-miss rewrite + output) for the next
-        # wake's Budget line; `tokens` (full occupancy) still drives fuse below.
+        # Publish the live window occupancy (statusline total) for the next
+        # wake's Budget line; reuse `tokens` computed above (also drives fuse).
         conn = db.connect(cfg)
         try:
-            integration.store_window_tokens(conn, transcript.net_tokens(cfg))
+            integration.store_window_tokens(conn, tokens)
         finally:
             conn.close()
 

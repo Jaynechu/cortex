@@ -97,9 +97,10 @@ def lie_down(cfg: dict, force_slept: str | None = None, rotate: bool = False,
         # MCP wrapper surfaces to the session.
         next_floor = integration.lie_down(conn, cfg, minutes=next_wake_min)
         # Publish AFTER the floor redraw's save_state (which drops the key), so the
-        # next wake's Plan Used line sees this wake's NET spend (cache-miss rewrite
-        # + output — not the full context occupancy `tokens` used for rotate/fuse).
-        integration.store_window_tokens(conn, net)
+        # next wake's Plan Used line sees this wake's window occupancy (statusline
+        # total: input + cache_read + cache_creation + output — the same metric
+        # `tokens` already computed above for rotate/fuse), not the NET spend.
+        integration.store_window_tokens(conn, tokens)
         _kill_watchdog(cfg)
         # Rotate is now an explicit session decision (the --rotate flag), not an
         # auto token judgement — set it and the NEXT pacemaker wake respawns a

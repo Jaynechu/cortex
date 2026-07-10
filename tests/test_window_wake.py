@@ -652,9 +652,10 @@ def test_lie_down_no_auto_rotate_over_line(cfg):
     assert wake_state.take_rotated(cfg) is False
 
 
-def test_lie_down_publishes_net_not_total(cfg):
-    """lie_down records total occupancy to ct_wake_log but publishes NET spend
-    (cache_creation + output) for the next wake's Budget 'net' line."""
+def test_lie_down_publishes_occupancy_not_net(cfg):
+    """lie_down records both total occupancy and net spend to ct_wake_log, but
+    publishes total occupancy (statusline total) for the next wake's Budget
+    'Net Session Token' line — not net spend."""
     from cortex import note
     from cortex.pacemaker import integration
 
@@ -678,7 +679,7 @@ def test_lie_down_publishes_net_not_total(cfg):
     assert r["tokens"] == 91_500  # ct_wake_log records total occupancy
     conn = db.connect(cfg)
     try:
-        assert note._window_tokens(conn) == 1_500  # Budget 'net' = net spend
+        assert note._window_tokens(conn) == 91_500  # Budget line = window occupancy
         row = conn.execute(
             "SELECT tokens, net_tokens FROM ct_wake_log WHERE id=?", (wid,)).fetchone()
         assert row["tokens"] == 91_500 and row["net_tokens"] == 1_500
