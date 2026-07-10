@@ -1,11 +1,13 @@
 """iTerm2 window control for the resident interactive cortex session. All
 control via iTerm2 AppleScript (works while the screen is locked — no keyboard
-simulation). Primitives: ensure_window, respawn, append_wake_signal (the ear),
-inject_note (schedule windows only), send_esc, say, hard_interrupt (process-level
-SIGINT fallback when esc alone may not land, e.g. no focus). The resident window
-is woken by a signal-file ear (a Monitor tailing wake_signal.log), not by typing.
-The window body is one `claude` running in cortex_home with MARROW_CORTEX=1 set
-explicitly (identity marker).
+simulation). Primitives: ensure_window, respawn (fresh window with the wakeup
+note baked in as its first prompt), spawn_greeting, append_wake_signal (the ear
+for an already-running resident window), inject_note (schedule windows only),
+send_esc, say, hard_interrupt (process-level SIGINT fallback when esc alone may
+not land, e.g. no focus). A fresh window starts acting immediately from its
+baked-in note prompt; an alive resident window is woken by the signal-file ear
+(a Monitor tailing wake_signal.log). The window body is one `claude` running in
+cortex_home with MARROW_CORTEX=1 set explicitly (identity marker).
 """
 from __future__ import annotations
 
@@ -103,26 +105,23 @@ def window_effort(cfg: dict) -> str:
     return cfg["wake"].get("window_effort", "")
 
 
-def arm_prompt(cfg: dict) -> str:
-    """The launch-time initial prompt that arms the Monitor ear, reads the
-    handoff, and lies down. Read from arm_prompt_path with {signal_log}
-    substituted for the live signal-log path. Missing/unreadable -> empty
-    string (window still launches, just unarmed)."""
-    path = config.arm_prompt_path(cfg)
-    try:
-        text = path.read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
-    return text.replace("{signal_log}", str(config.wake_signal_log_path(cfg)))
+def note_read_line(cfg: dict, note_path: str) -> str:
+    """The single-line first prompt handed to a fresh cortex window: read the
+    wakeup note it names and start acting. Template is config-driven ({note} is
+    substituted for the note path) so the wording stays customisable."""
+    tmpl = cfg["wake"].get(
+        "wake_prompt", "Read {note} — this is your wakeup note; act on it")
+    return tmpl.replace("{note}", str(note_path))
 
 
-def launch_command(cfg: dict) -> str:
+def launch_command(cfg: dict, initial_prompt: str | None = None) -> str:
     # Identity + channel markers set explicitly (hooks derive channel from
     # MARROW_CHANNEL; MARROW_CORTEX=1 = cortex identity / kickout immunity).
     # --model/--effort pin tier + reasoning so the window never rides the
-    # system default. Reused by every cortex window spawn. A non-empty arm
-    # prompt is appended as claude's initial positional prompt so a freshly
-    # launched window arms its ear + reads handoff without any typing.
+    # system default. Reused by every cortex window spawn. A non-empty
+    # initial_prompt (the wakeup-note Read line) is baked in as claude's first
+    # positional prompt so a freshly launched window starts acting immediately —
+    # zero typing, no arm/lie-down ritual.
     home = str(config.cortex_home(cfg))
     cmd = cfg["wake"].get("launch_command", "claude")
     flags = f" --model {window_model(cfg)}"
@@ -133,13 +132,12 @@ def launch_command(cfg: dict) -> str:
     # otherwise blocks on the trust prompt). Mirrors marrow's headless call.
     if cfg["wake"].get("skip_permissions", True):
         flags += " --dangerously-skip-permissions"
-    arm = arm_prompt(cfg)
-    arg = f" {_shq(arm)}" if arm else ""
+    arg = f" {_shq(initial_prompt)}" if initial_prompt else ""
     return f"cd {home} && MARROW_CORTEX=1 MARROW_CHANNEL=ct {cmd}{flags}{arg}"
 
 
 def _shq(text: str) -> str:
-    """Single-quote a shell argument (the arm prompt) for the launch command."""
+    """Single-quote a shell argument (the initial prompt) for the launch command."""
     return "'" + text.replace("'", "'\\''") + "'"
 
 
@@ -164,9 +162,9 @@ def append_wake_signal(cfg: dict, note_path: str) -> None:
 _launch_command = launch_command  # back-compat alias
 
 
-def _spawn(cfg: dict) -> str:
+def _spawn(cfg: dict, initial_prompt: str | None = None) -> str:
     name = _esc(cfg["wake"].get("session_name", "cortex"))
-    launch = _esc(launch_command(cfg))
+    launch = _esc(launch_command(cfg, initial_prompt))
     # No `activate` — spawning must not steal keyboard focus. Creating a window
     # still brings iTerm forward, so capture the frontmost app and restore it.
     prev = _frontmost_bid()
@@ -233,12 +231,13 @@ def _close_session(sid: str) -> None:
         pass
 
 
-def respawn(cfg: dict) -> str:
+def respawn(cfg: dict, initial_prompt: str | None = None) -> str:
     """Replace the resident window with a fresh brain: SIGTERM its `claude`
     process (never SIGKILL), close the old iTerm session, then spawn a new
-    window (which self-arms via the launch-time arm prompt). Persists and
-    returns the new resident sid. Reused for rotate, rebirth and the ear
-    recovery path — one fresh-brain path, no /clear typing."""
+    window. A non-empty initial_prompt (the wakeup-note Read line) is baked into
+    the launch command so the fresh window starts acting immediately — no arm
+    prompt, no lie-down-first, no signal. Persists and returns the new resident
+    sid. Reused for rotate, rebirth and the dead/ear-miss recovery path."""
     pid = find_claude_pid(cfg)
     if pid is not None:
         try:
@@ -248,10 +247,30 @@ def respawn(cfg: dict) -> str:
     old = wake_state.get_session_id(cfg)
     if old:
         _close_session(old)
-    sid = _spawn(cfg)
+    sid = _spawn(cfg, initial_prompt)
     wake_state.set_session_id(cfg, sid)
     _wait_ready(sid, cfg)
     return sid
+
+
+def spawn_greeting(cfg: dict) -> None:
+    """Quiet macOS notification when a fresh cortex window is spawned for a wake
+    (a soft 'good morning' ping, no focus steal). Fires through the say() sound
+    channel; the greeting text/emoji is config-driven and empty = silent."""
+    text = cfg["wake"].get("spawn_greeting", "")
+    if not text:
+        return
+    _notify(text)
+
+
+def _notify(text: str) -> None:
+    """Post a macOS Notification Center banner (no focus steal, no sound of its
+    own beyond the system default). Best-effort, never raises."""
+    body = _esc(text)
+    try:
+        _osa(f'display notification "{body}"')
+    except WindowError:
+        pass
 
 
 def submit_prompt_to(sid: str, cfg: dict, text: str) -> None:
