@@ -47,7 +47,7 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
 
 ## 4. Wake runner (`wake.py`)
 
-- run_wake (wake.py:281-382): schedule wakes short-circuit first (only when duties present AND mode='window' AND real caller, wake.py:313); then symlinks.ensure_all, assemble_note, window path (mode='window' AND real caller) else marrow subprocess. No date comparison in run_wake — freshness comes from the rotate flag (night_close sets it once/night; next-morning first wake respawns fresh = the rebirth).
+- run_wake (wake.py:281-382): schedule wakes short-circuit first (only when duties present AND mode='window' AND real caller, wake.py:313); then symlinks.ensure_all, assemble_note, window path (mode='window' AND real caller) else marrow subprocess. No date comparison in run_wake — freshness comes from the rotate flag (night_close sets it once/night; next-morning first wake respawns fresh = the rebirth). Pending ct-plan P0: night lie_down /clears in place (no respawn); cortex_session_date writes are dead residue to delete.
 - WakeTimer latency probe always-on: wake_id + CORTEX_WAKE_ID / CORTEX_WAKE_TIMING_LOG env; marks tick_fire→gate_eval→symlinks→note→window_injected/wake_complete into wake_timing log; marrow subprocess shares origin via env (timing.py, wake.py:297-305).
 - Schedule path _schedule_wake (wake.py:155-187): per duty spawn_fresh (never resident, sid unpersisted) → inject_note(note + duty prompt_path) → say() ping → mark_schedule_fired; window failure audited + skipped.
 - Window path _window_wake (wake.py:240-268): write note file → respawn if _window_rotated (rotate flag | sid dead | claude pid gone | newest transcript ≠ recorded) → append WAKE line to signal log (resident's armed Monitor tails it) → _signal_landed polls transcript mtime 3s up to ear_timeout 90s → on miss: respawn + re-append once → set_awake(wake_log_id, transcript) + watchdog.spawn. Rotate assembles a second note with fresh=True/wake_kind='rotate' — compat args today; the handoff (碎碎念) itself injects at marrow SessionStart, not via note.
@@ -97,7 +97,7 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
 - net_tokens = SUM of cache_creation+output across session → real spend; drives budget gate + note (transcript.py:67-91).
 - Both return 0 silently on read errors; mtime() drives rotation detection + ear polling.
 
-## 8. day_log.md (`day_log.py`)
+## 8. day_log.md (`day_log.py`) — pending rename daybrief, render-only (ct-plan P0)
 
 - Six zones by HTML-comment markers: First + Notes preserved byte-for-byte each re-render; Status/Flow/Tasks(Reminders)/Track fully rebuilt from DB, no reconcile (day_log.py:37-58, 219-253).
 - Status: last-seen (ct_activity via _utc_day_bounds — UTC-correct local day), top usage category, collector health lines (day_log.py:86-132).
