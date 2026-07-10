@@ -25,7 +25,10 @@ handoff_file = ""
 cortex_home = ""
 # Wishlist md, pure append-only, symlinked into NY. Default: <cortex_home>/wishlist.md
 wishlist_file = ""
-# NY db-pages dir day_log.md + wishlist.md get symlinked into.
+# marrow-owned daybrief.md (rendered by marrow.daybrief); cortex only symlinks
+# it into NY. Default: ~/.config/marrow/daybrief.md
+daybrief = ""
+# NY db-pages dir daybrief.md + wishlist.md get symlinked into.
 ny_db_pages = ""
 # Wake-latency probe log (cortex stage marks + marrow stream-event marks).
 # Default: ~/.config/marrow/logs/wake_timing.log

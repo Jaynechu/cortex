@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from cortex import day_log, wake
+from cortex import wake
 
 TZ = timezone(timedelta(hours=10))
 DAY1 = datetime(2026, 7, 3, 21, 0, tzinfo=TZ)
@@ -24,13 +24,19 @@ def events_table(marrow_conn):
     marrow_conn.commit()
 
 
+@pytest.fixture(autouse=True)
+def stub_daybrief(monkeypatch):
+    """daybrief render shells out to marrow's venv (unavailable in tests) —
+    stub it so wake tests exercise only the wake logic."""
+    monkeypatch.setattr(wake, "_render_daybrief", lambda cfg: None)
+
+
 @pytest.fixture
 def wcfg(base_cfg, tmp_path):
     cfg = dict(base_cfg)
     cfg["paths"] = {
         **base_cfg["paths"],
-        "day_log": str(tmp_path / "day_log.md"),
-        "day_log_archive_dir": str(tmp_path / "archive"),
+        "daybrief": str(tmp_path / "daybrief.md"),
         "cortex_home": str(tmp_path / "cortex_home"),
         "wishlist_file": str(tmp_path / "cortex_home" / "wishlist.md"),
         "ny_db_pages": str(tmp_path / "ny"),
@@ -70,11 +76,6 @@ def test_first_wake_no_resume_and_persists_session(marrow_conn, wcfg):
     state = integration.load_state(marrow_conn)
     assert state.cortex_session_id == "sid-abc"
 
-    path = wcfg["paths"]["day_log"]
-    text = open(path).read()
-    assert text.splitlines()[0] == "2026-07-03"
-    assert day_log.STATUS_START in text
-
 
 def test_second_wake_same_day_resumes(marrow_conn, wcfg):
     caller = FakeCaller()
@@ -98,10 +99,6 @@ def test_new_date_resumes_no_rebirth(marrow_conn, wcfg):
 
     assert caller2.calls[0]["resume_sid"] == "sid-day1"  # resumed, not reborn
 
-    from pathlib import Path
-    archive_dir = Path(wcfg["paths"]["day_log_archive_dir"])
-    assert not (archive_dir / "2026-07-03.md").exists()  # no archiving
-
     from cortex.pacemaker import integration
     state = integration.load_state(marrow_conn)
     assert state.cortex_session_id == "sid-day2"
@@ -113,7 +110,7 @@ def test_run_wake_creates_ny_symlinks(marrow_conn, wcfg):
 
     from pathlib import Path
     ny = Path(wcfg["paths"]["ny_db_pages"])
-    assert (ny / "day_log.md").is_symlink()
+    assert (ny / "daybrief.md").is_symlink()
     assert (ny / "wishlist.md").is_symlink()
     assert (ny / "wishlist.md").resolve() == Path(wcfg["paths"]["wishlist_file"]).resolve()
 
@@ -137,9 +134,6 @@ def test_failed_wake_forces_fresh_next_no_archive(marrow_conn, wcfg):
 
     st = integration.load_state(marrow_conn)
     assert st.cortex_session_id is None            # fresh session next wake
-
-    archive_dir = Path(wcfg["paths"]["day_log_archive_dir"])
-    assert not (archive_dir / "2026-07-03.md").exists()
 
     # Retry resumes fresh (resume None) and persists the new sid.
     good2 = FakeCaller(session_id="sid-retry")
@@ -206,7 +200,6 @@ def test_token_cap_breach_forces_fresh_no_rearchive(marrow_conn, wcfg):
                   now=later + timedelta(hours=1), caller=good2)
     assert good2.calls[0]["resume_sid"] is None
     assert integration.load_state(marrow_conn).cortex_session_id == "sid-3"
-    assert not (Path(wcfg["paths"]["day_log_archive_dir"]) / "2026-07-03.md").exists()
 
 
 # --------------------------------------------------------------------------- #

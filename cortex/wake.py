@@ -23,7 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from cortex import config, day_log, db, note, symlinks
+from cortex import config, db, note, symlinks
 from cortex.pacemaker import integration
 from cortex.timing import WakeTimer
 
@@ -117,6 +117,24 @@ def _force_fresh_next(conn: sqlite3.Connection, state, today: str) -> None:
     Used on token-cap breach and marrow call failure/timeout so a broken/oversized
     session is never resumed."""
     integration.save_state(conn, replace(state, cortex_session_id=None))
+
+
+_DAYBRIEF_TIMEOUT_S = 20
+
+
+def _render_daybrief(cfg: dict) -> None:
+    """Re-render marrow's daybrief.md after a wake. marrow owns the renderer
+    (own venv/deps) — invoked as a subprocess against marrow's venv python,
+    same pattern as call_marrow_cortex. Best-effort: never raises, never
+    blocks the wake return."""
+    python = os.path.expanduser(cfg["marrow"]["venv_python"])
+    try:
+        subprocess.run(
+            [python, "-m", "marrow.daybrief"],
+            capture_output=True, text=True, timeout=_DAYBRIEF_TIMEOUT_S,
+        )
+    except Exception:  # noqa: BLE001 - must not kill the wake
+        pass
 
 
 def _latest_wake_log_id(conn: sqlite3.Connection) -> int | None:
@@ -308,7 +326,7 @@ def run_wake(
     timer.mark("symlinks")
 
     # Schedule (duty) wakes short-circuit here: a fresh window per duty, never
-    # the resident session, never resumed, no day_log rollover — pure干活.
+    # the resident session, never resumed, no daybrief render — pure干活.
     duties = _schedule_reasons(decision)
     if duties and cfg["wake"].get("mode", "window") == "window" and caller is call_marrow_cortex:
         result = _schedule_wake(conn, cfg, decision, now, duties)
@@ -318,7 +336,6 @@ def run_wake(
 
     state = integration.load_state(conn)
     resume_sid = state.cortex_session_id
-    path = config.day_log_path(cfg)
     timer.mark("resume")
 
     note_text = assemble_note(conn, cfg, now, decision=decision)
@@ -361,8 +378,8 @@ def run_wake(
         _audit_wake(conn, wake_id,
                     f"token_cap breach total={result.get('total_tokens')} -> fresh")
         timer.mark("capped")
-        day_log.update(path, conn, cfg, now)
-        timer.mark("day_log")
+        _render_daybrief(cfg)
+        timer.mark("daybrief")
         timer.mark("wake_complete")
         return result
 
@@ -372,8 +389,8 @@ def run_wake(
     )
     integration.save_state(conn, new_state)
 
-    day_log.update(path, conn, cfg, now)
-    timer.mark("day_log")
+    _render_daybrief(cfg)
+    timer.mark("daybrief")
     timer.mark("wake_complete")
     return result
 

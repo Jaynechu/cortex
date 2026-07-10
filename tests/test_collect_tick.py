@@ -81,38 +81,39 @@ def test_usage_snapshot_config_gate_off_skips_entirely(monkeypatch, marrow_conn,
     assert _log_rows(marrow_conn) == []
 
 
-def test_render_day_log_skips_quietly_when_file_missing(marrow_conn, base_cfg, tmp_path):
-    cfg = dict(base_cfg)
-    cfg["paths"] = dict(base_cfg["paths"])
-    cfg["paths"]["day_log"] = str(tmp_path / "does_not_exist" / "day_log.md")
+def test_render_daybrief_shells_out_to_marrow_venv(monkeypatch, marrow_conn, base_cfg):
+    cfg = _usage_cfg(base_cfg)
+    captured = {}
 
-    collect_tick._render_day_log(marrow_conn, cfg)  # must not raise
+    def fake_run(cmd, **kw):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-    assert not (tmp_path / "does_not_exist").exists()
+    monkeypatch.setattr(collect_tick.subprocess, "run", fake_run)
+
+    collect_tick._render_daybrief(marrow_conn, cfg)
+
+    assert captured["cmd"] == ["/fake/venv/python", "-m", "marrow.daybrief"]
+    rows = marrow_conn.execute(
+        "SELECT ok, error FROM ct_collector_log WHERE source='daybrief'"
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["ok"] == 1
+    assert rows[0]["error"] is None
 
 
-def test_render_day_log_updates_existing_file(marrow_conn, base_cfg, tmp_path):
-    from cortex import day_log
+def test_render_daybrief_failure_logs_error_never_raises(monkeypatch, marrow_conn, base_cfg):
+    cfg = _usage_cfg(base_cfg)
 
-    marrow_conn.execute(
-        "CREATE TABLE events (id INTEGER PRIMARY KEY, session_id TEXT, "
-        "timestamp TEXT, role TEXT, content TEXT, ts_start TEXT, ts_end TEXT)"
-    )
-    cfg = dict(base_cfg)
-    cfg["paths"] = dict(base_cfg["paths"])
-    path = tmp_path / "day_log.md"
-    cfg["paths"]["day_log"] = str(path)
-    day_log.new_day(path, "2026-07-04")
-    before = path.read_text()
-    assert "pending first update" in before
+    def fake_run(cmd, **kw):
+        raise subprocess.TimeoutExpired(cmd, kw.get("timeout"))
 
-    marrow_conn.execute(
-        "INSERT INTO ct_activity (ts, sid, channel) VALUES (?, ?, ?)",
-        ("2026-07-04T01:00:00+00:00", "sid1", "wx"),
-    )
-    marrow_conn.commit()
+    monkeypatch.setattr(collect_tick.subprocess, "run", fake_run)
 
-    collect_tick._render_day_log(marrow_conn, cfg)
+    collect_tick._render_daybrief(marrow_conn, cfg)  # must not raise
 
-    after = path.read_text()
-    assert "pending first update" not in after
+    rows = marrow_conn.execute(
+        "SELECT ok FROM ct_collector_log WHERE source='daybrief'"
+    ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["ok"] == 0

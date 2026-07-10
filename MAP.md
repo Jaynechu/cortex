@@ -14,7 +14,7 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
                              ct_pacemaker_state       │
                              ct_wake_log        note → iTerm window (resident claude) | marrow subprocess fallback
                                                       │
-                                                day_log.md (symlinked → NY) · watchdog (per-wake)
+                                                daybrief.md (marrow render, symlinked → NY) · watchdog (per-wake)
 ```
 
 - Own repo/venv `~/CC-Lab/cortex/`; ct_ tables live on shared marrow DB (`~/.config/marrow/marrow.db`).
@@ -24,13 +24,13 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
 
 ## 2. Collectors (`collect_tick.py`, `collectors/`)
 
-- Entry collect_tick.py:48-59 (launchd com.cortex.collect-tick): run_all → _run_usage_snapshot → _render_day_log → exit 1 if any run_all source failed (usage not in exit code).
-- run_all: registry {knowledgec, geofence, health}, per-source try/except, result → ct_collector_log (collectors/__init__.py:15-34). day_log Status renders latest row per source, so failures are visible there.
+- Entry collect_tick.py (launchd com.cortex.collect-tick): run_all → _run_usage_snapshot → _render_daybrief (marrow venv subprocess) → exit 1 if any run_all source failed (usage/daybrief not in exit code).
+- run_all: registry {knowledgec, geofence, health}, per-source try/except, result → ct_collector_log (collectors/__init__.py:15-34). daybrief render logged as source='daybrief'.
 - knowledgec (always on): read-only URI open of macOS knowledgeC.db, full re-scan of ZOBJECT stream '/app/usage' per tick (indexed, OS retention-capped ~3wk), aggregate per (local_date, bundle_id) + category map → upsert ct_app_usage/ct_category_usage; aged-out dates freeze at last-seen totals (knowledgec.py:25-96).
 - geofence (default off): byte-offset cursor in ct_geofence_cursor, truncation resets to 0; parses `HH:MM event` complete lines only; date stamped = today-at-tick (assumes near-zero Shortcut latency); PK (date,time,event) ON CONFLICT DO NOTHING (geofence.py:28-111).
 - health (default off, skeleton): full-file JSON flatten to dot-path rows, date from payload date/export_date/day else file mtime; upsert ct_health; no consumer reads ct_health yet (health.py:21-66).
 - usage_snapshot: marrow venv subprocess `-m marrow.usage_snapshot`, 15s timeout, gated tick.usage_snapshot; redundant with marrow watcher's own 5-min loop (collect_tick.py:16-35).
-- activity.py: read-only helper over ct_activity (written by marrow Stop hook). read_activity() has zero production callers; its LIKE date filter is the pattern day_log.py:76 deliberately rejects.
+- activity.py: read-only helper over ct_activity (written by marrow Stop hook). read_activity() has zero production callers.
 
 ## 3. Pacemaker (`pacemaker/`)
 
@@ -52,7 +52,7 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
 - Schedule path _schedule_wake (wake.py:155-187): per duty spawn_fresh (never resident, sid unpersisted) → inject_note(note + duty prompt_path) → say() ping → mark_schedule_fired; window failure audited + skipped.
 - Window path _window_wake (wake.py:240-268): write note file → respawn if _window_rotated (rotate flag | sid dead | claude pid gone | newest transcript ≠ recorded) → append WAKE line to signal log (resident's armed Monitor tails it) → _signal_landed polls transcript mtime 3s up to ear_timeout 90s → on miss: respawn + re-append once → set_awake(wake_log_id, transcript) + watchdog.spawn. Rotate assembles a second note with fresh=True/wake_kind='rotate' — compat args today; the handoff (碎碎念) itself injects at marrow SessionStart, not via note.
 - Headless fallback: window path returning None falls through to call_marrow_cortex — marrow venv subprocess, inner timeout marrow.call_timeout_s 600s, outer +30s margin; non-zero rc or bad JSON tail → WakeError (wake.py:71-99, 349-350).
-- Token-cap breach (result.capped) → _force_fresh_next (clear sid keep date) + audit + day_log.update, no sid persist (wake.py:362-370).
+- Token-cap breach (result.capped) → _force_fresh_next (clear sid keep date) + audit + _render_daybrief, no sid persist.
 - _audit_wake best-effort inserts audit_log rows on shared DB, swallows all (wake.py:102-112). CLI: --force (bypass gates) | --print-note (wake.py:385-409).
 
 ### window.py — iTerm control
@@ -97,18 +97,13 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
 - net_tokens = SUM of cache_creation+output across session → real spend; drives budget gate + note (transcript.py:67-91).
 - Both return 0 silently on read errors; mtime() drives rotation detection + ear polling.
 
-## 8. day_log.md (`day_log.py`)
+## 8. daybrief.md (retired day_log)
 
-- Six zones by HTML-comment markers: First + Notes preserved byte-for-byte each re-render; Status/Flow/Tasks(Reminders)/Track fully rebuilt from DB, no reconcile (day_log.py:37-58, 219-253).
-- Status: last-seen (ct_activity via _utc_day_bounds — UTC-correct local day), top usage category, collector health lines (day_log.py:86-132).
-- Flow: geofence rows (exact local-date match) + tl rows (events role='tl', UTC bounds), merged sorted HH:mm (day_log.py:140-176).
-- Reminders/Track: placeholders by design (day_log.py:179-191).
-- update() = read-existing → render → bare write_text (non-atomic — torn-read window, file is iCloud-symlinked; finding). Callers: collect_tick.py:45, wake.py:367/379.
-- new_day()/archive() unwired (zero callers). new_day overwrites unconditionally (docstring-only contract — finding); archive() protects via FileNotFoundError + -N suffix (day_log.py:297-314).
+- day_log retired; replaced by marrow-owned daybrief (marrow/daybrief.py) reusing the same SessionStart render functions. Cortex triggers a render via marrow venv subprocess (`python -m marrow.daybrief`) at collect_tick.py:_render_daybrief and wake.py:_render_daybrief; symlinks it into NY.
 
 ## 9. Symlinks, install, deploy
 
-- symlinks.py: day_log.md + wishlist.md → NY db-pages; creates wishlist w/ hardcoded WISHLIST_HEADER (persona text in .py — finding); refuses non-symlink clobber (FileExistsError propagates); ensure_all safe per-wake (symlinks.py:11-42).
+- symlinks.py: daybrief.md (marrow-owned source, may dangle until first marrow render) + wishlist.md → NY db-pages; wishlist header from config; refuses non-symlink clobber (FileExistsError propagates); ensure_all safe per-wake (symlinks.py:11-42).
 - install.py: `python -m cortex.install [remove]` — writes 2 plists (collect-tick, pacemaker-tick) with 6 __TOKEN__ replacements from config, launchctl bootout+bootstrap into gui/<uid>; no rollback on partial failure (self-healing on re-run); zero test coverage (install.py:16-97).
 - No pyproject.toml — package importable only because plists set WorkingDirectory=repo root (`-m` resolves cortex/ from cwd); any other cwd needs PYTHONPATH.
 - Plists: RunAtLoad + StartInterval, no KeepAlive/backoff — a crashing tick just re-fires next interval.
@@ -116,13 +111,13 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
 
 ## 10. Tests
 
-- 22 per-module test files under tests/; pure cores (pacemaker, day_log render, note, geofence cursor) well covered.
-- Known gaps: install.py (untested entirely), dry_run schedule-dedup path, geofence same-minute-same-text dup, day_log concurrent write.
+- Per-module test files under tests/; pure cores (pacemaker, note, geofence cursor) well covered.
+- Known gaps: install.py (untested entirely), dry_run schedule-dedup path, geofence same-minute-same-text dup.
 
 ## 11. Status
 
-- Live: collectors (knowledgec) · pacemaker ticks (dry_run) · wake window path + watchdog + fuse · note · day_log render · MCP lie_down/wait/say · symlinks.
-- Unwired: event triggers · cal_busy/at_home real data · Tasks/Track zones · day rollover (new_day/archive callers) · health/geofence collectors (flagged off, no export producer).
+- Live: collectors (knowledgec) · pacemaker ticks (dry_run) · wake window path + watchdog + fuse · note · daybrief render (marrow subprocess) · MCP lie_down/wait/say · symlinks.
+- Unwired: event triggers · cal_busy/at_home real data · health/geofence collectors (flagged off, no export producer).
 - Duties ([[schedule]]): mechanism shipped, both live duties enabled=false pending prompts.
 
 ## 12. Marrow-side organs

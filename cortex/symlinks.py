@@ -1,6 +1,8 @@
-"""One-time idempotent symlinks: day_log.md + wishlist.md into NY db-pages
-(Decided 07-03 eve). Fixed source paths + archive-move-recreate on day_log
-keep the link zero-maintenance. Never touches any other NY file.
+"""One-time idempotent symlinks: daybrief.md + wishlist.md into NY db-pages.
+Fixed source paths keep the links zero-maintenance. daybrief.md is owned by
+marrow (rendered by marrow.daybrief); cortex only links it in, so the link
+may dangle until marrow's first render — that self-heals. Never touches any
+other NY file.
 """
 from __future__ import annotations
 
@@ -32,9 +34,9 @@ def _ensure_symlink(source: Path, target: Path) -> None:
 def ensure_all(cfg: dict) -> None:
     """Idempotent: safe to call on every wake."""
     ny_dir = config.ny_db_pages_dir(cfg)
-    day_log_source = config.day_log_path(cfg)
+    daybrief_source = config.daybrief_path(cfg)
     wishlist_source = config.wishlist_path(cfg)
 
     ensure_wishlist(wishlist_source, config.wishlist_header(cfg))
-    _ensure_symlink(day_log_source, ny_dir / "day_log.md")
+    _ensure_symlink(daybrief_source, ny_dir / "daybrief.md")
     _ensure_symlink(wishlist_source, ny_dir / "wishlist.md")
