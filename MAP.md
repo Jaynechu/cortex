@@ -124,3 +124,15 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
 - Live: collectors (knowledgec) · pacemaker ticks (dry_run) · wake window path + watchdog + fuse · note · day_log render · MCP lie_down/wait/say · symlinks.
 - Unwired: event triggers · cal_busy/at_home real data · Tasks/Track zones · day rollover (new_day/archive callers) · health/geofence collectors (flagged off, no export producer).
 - Duties ([[schedule]]): mechanism shipped, both live duties enabled=false pending prompts.
+
+## 12. Marrow-side organs
+
+> Marrow's half of the bridge — ONE module, marrow/cortex_bridge.py, behind [cortex].enabled (false = none of it exists). Details live in marrow/MAP.md §6; this is the index only.
+
+- Six MCP tools via cortex_bridge.register(): wish (one-way append → wishlist.md) · first (tick/untick Cortex First nudges → ct_first_tick) · goal (set/list/delete → goals table) — all sessions when enabled; lie_down · wait · say — cortex session only, each shells `-m cortex.<mod>` into this repo.
+- Hook organs (bodies in cortex_bridge, one-line gated call sites in marrow hooks.py): SessionStart handoff page-turn (stale-date archive + fresh template, fresh cortex window only) · lie_down deny (rotate / fuse-line lie_down blocked until handoff written this window) · turn_inject 100k 亮牌 (window-occupancy nudge at [cortex_rotate].show_tokens) · kickout immunity (is_cortex_session(), env-only — identity check, deliberately not behind enabled).
+- Session runner: LLMClient.call_cortex (llm.py, thin delegate kept as the stable cross-repo entry — wake.py calls it by exact name) → cortex_bridge.call_cortex / run_claude_cortex — full-env resumed session, origin of MARROW_CORTEX=1 + MARROW_CHANNEL=ct, per-wake token cap + audit; _cortex_stream_timer probe (CORTEX_WAKE_TIMING_LOG).
+
+Two gates, distinct semantics (full model in marrow/MAP.md §6.1): `[cortex].enabled` = organs installed at all (config, default false). `MARROW_CORTEX` (env) = this session IS the cortex session, set at origin by call_cortex.
+
+Not in the bridge module, still marrow-side (marrow/MAP.md §6.5): storage.py migrations v29 (events.flag)/v30 (goals)/v31 (ct_rate_limit)/v32+v34 (ct_first_tick) · config sections [cortex]/[cortex_rotate]/[cortex_usage]/[llm.claude_cli_cortex] in marrow/config.default.toml · deploy/commands/ct-clear.md (slash command wrapping lie_down(rotate=True)) · _window_tokens_from_transcript in hooks.py (shared, not cortex-specific).
