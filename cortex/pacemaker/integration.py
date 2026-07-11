@@ -267,8 +267,9 @@ def lie_down(conn: sqlite3.Connection, cfg: dict, now: datetime | None = None,
              rng: random.Random | None = None,
              minutes: float | None = None) -> datetime:
     """Mark wake end (C-wm): lie_down chooses the next internal wake. `minutes`
-    = an explicit choice (clamped to [floor_min_min, floor_max_min]); None =
-    a uniform "dice" draw within that window (preserves prior behaviour). The
+    = an explicit choice (pre-clamped by the caller to [1, next_wake_max] via
+    clamp_next_wake_minutes, not re-clamped here); None = a uniform "dice"
+    draw within [floor_min_min, floor_max_min] (preserves prior behaviour). The
     clock restarts from lie-down. Called by the tick entry point after a wake
     finishes — including on wake failure, so a crashed wake can't wedge it.
     Returns the redrawn next-floor datetime (local tz)."""

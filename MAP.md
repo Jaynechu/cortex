@@ -122,7 +122,7 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
 - install.py: `python -m cortex.install [remove]` — writes 2 plists (collect-tick, pacemaker-tick) with 6 __TOKEN__ replacements from config, launchctl bootout+bootstrap into gui/<uid>; no rollback on partial failure (self-healing on re-run); zero test coverage (install.py:16-97).
 - pyproject.toml (setuptools, packages cortex/cortex.collectors/cortex.pacemaker, no third-party deps) declares the package; plists still set WorkingDirectory=repo root so `-m` resolves cortex/ from cwd without an install/PYTHONPATH step.
 - Plists: RunAtLoad + StartInterval, no KeepAlive/backoff — a crashing tick just re-fires next interval.
-- Safety default: pacemaker.dry_run=true shipped in example config; live config also true today.
+- Safety default: pacemaker.dry_run=true shipped in example config; live config dry_run=false since 07-11 (wake-v2 release).
 
 ## 10. Tests
 
@@ -131,7 +131,7 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
 
 ## 11. Status
 
-- Live: collectors (knowledgec) · pacemaker ticks (dry_run) · wake window path + watchdog + fuse + sentinel exact-time wake · note · daybrief render (marrow subprocess) · MCP lie_down/wait/say · symlinks.
+- Live: collectors (knowledgec) · pacemaker ticks (live, dry_run=false) · wake window path + watchdog + fuse + sentinel exact-time wake · note · daybrief render (marrow subprocess) · MCP lie_down/wait/say · symlinks.
 - Unwired: event triggers · cal_busy/at_home real data · health/geofence collectors (flagged off, no export producer).
 
 ## 12. Marrow-side organs
