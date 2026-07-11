@@ -478,3 +478,82 @@ def test_gather_survives_naive_due_at_self_schedule(marrow_conn, cfg, tmp_path, 
     ]
     text = note.render(cfg, NOW, data)
     assert "Pending self-schedule" in text
+
+
+# --------------------------------------------------------------------------- #
+# Window-line SID override (caller transcript beats wake_state)
+# --------------------------------------------------------------------------- #
+
+def _isolate_wake_state(cfg, tmp_path, state: dict | None):
+    from cortex import wake_state
+    p = tmp_path / "wake_state.json"
+    cfg["paths"]["wake_state_file"] = str(p)
+    if state is not None:
+        p.write_text(json.dumps(state), encoding="utf-8")
+    return p
+
+
+def test_gather_window_sid_override(marrow_conn, cfg, tmp_path, monkeypatch):
+    """Caller-supplied window_sid wins for the Window line even when wake_state
+    carries a stale (or no) transcript — awake_since still comes from wake_state."""
+    make_events_table(marrow_conn)
+    marrow_conn.commit()
+    monkeypatch.setattr(note, "_frontmost_app", lambda: None)
+    since = (NOW - timedelta(minutes=3)).astimezone(ZoneInfo("UTC")).isoformat()
+    _isolate_wake_state(cfg, tmp_path, {
+        "transcript": "/x/deadbeef00.jsonl", "awake_since": since})
+
+    data = note.gather(marrow_conn, cfg, NOW, window_sid="feed1234")
+    assert data["window_sid"] == "feed1234"
+    assert data["awake_since_hm"] == (NOW - timedelta(minutes=3)).strftime("%H:%M")
+    text = note.render(cfg, NOW, data)
+    assert "Window: since " in text and "SID feed1234" in text
+
+
+def test_gather_window_sid_falls_back_to_wake_state(marrow_conn, cfg, tmp_path, monkeypatch):
+    """No override -> Window SID comes from wake_state.transcript (legacy path)."""
+    make_events_table(marrow_conn)
+    marrow_conn.commit()
+    monkeypatch.setattr(note, "_frontmost_app", lambda: None)
+    _isolate_wake_state(cfg, tmp_path, {"transcript": "/x/abcd1234ef.jsonl"})
+
+    data = note.gather(marrow_conn, cfg, NOW)
+    assert data["window_sid"] == "abcd1234"
+
+
+def test_gather_window_sid_only_when_wake_state_empty(marrow_conn, cfg, tmp_path, monkeypatch):
+    """Override renders the Window SID line even with no awake_since/no state."""
+    make_events_table(marrow_conn)
+    marrow_conn.commit()
+    monkeypatch.setattr(note, "_frontmost_app", lambda: None)
+    _isolate_wake_state(cfg, tmp_path, {})
+
+    data = note.gather(marrow_conn, cfg, NOW, window_sid="cafe0001")
+    assert data["window_sid"] == "cafe0001"
+    assert data["awake_since_hm"] is None
+    assert "Window: SID cafe0001" in note.render(cfg, NOW, data)
+
+
+# --------------------------------------------------------------------------- #
+# note_render CLI entry — fresh render, no side effects
+# --------------------------------------------------------------------------- #
+
+def test_note_render_main_prints_fresh_note_no_writes(tmp_path, monkeypatch, capsys):
+    from cortex import config as _config, db as _db, note_render
+    dbp = tmp_path / "marrow.db"
+    _db.connect_path(dbp).close()  # create schema
+    before = dbp.stat().st_mtime
+
+    _cfg = _config.load(path=tmp_path / "absent.toml")
+    _cfg["paths"]["marrow_db"] = str(dbp)
+    _cfg["paths"]["wake_state_file"] = str(tmp_path / "ws.json")
+    monkeypatch.setattr(_config, "load", lambda path=None: _cfg)
+    monkeypatch.setattr(note, "_frontmost_app", lambda: None)
+    monkeypatch.setattr("sys.argv", ["note_render", "--transcript", "/t/feed1234ab.jsonl"])
+
+    note_render.main()
+    out = capsys.readouterr().out
+    assert "Now: " in out
+    assert "SID feed1234" in out
+    # no wake_state written, DB not mutated by a fresh render
+    assert not (tmp_path / "ws.json").exists()

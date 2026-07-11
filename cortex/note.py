@@ -302,11 +302,17 @@ def gather(
     fresh: bool = False,
     wake_kind: str | None = None,
     died_no_handoff: bool = False,
+    window_sid: str | None = None,
 ) -> dict:
     """Assemble the wakeup note data dict. conn must use sqlite3.Row factory.
     `fresh`/`wake_kind` are accepted for caller compatibility; the handoff
     now injects at SessionStart, not here. `died_no_handoff` = the prior window
-    crashed without a handoff (respawn catchup line)."""
+    crashed without a handoff (respawn catchup line).
+
+    `window_sid` (caller-supplied) overrides the wake_state transcript for the
+    Window line — the caller's own transcript stem is correct even after a
+    rotation, whereas wake_state.transcript was cleared at lie_down and is only
+    re-set after this note is written. awake_since still comes from wake_state."""
     ncfg = _note_cfg(cfg)
 
     from cortex import wake_state
@@ -326,15 +332,15 @@ def gather(
         ws = wake_state.load(cfg)
     except Exception:
         pass
-    window_sid = None
     awake_since_hm = None
-    transcript_raw = ws.get("transcript")
-    if transcript_raw:
-        try:
-            from pathlib import Path
-            window_sid = Path(str(transcript_raw)).stem[:8]
-        except Exception:
-            pass
+    if not window_sid:
+        transcript_raw = ws.get("transcript")
+        if transcript_raw:
+            try:
+                from pathlib import Path
+                window_sid = Path(str(transcript_raw)).stem[:8]
+            except Exception:
+                pass
     since_raw = ws.get("awake_since")
     if since_raw:
         try:
