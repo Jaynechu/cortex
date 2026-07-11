@@ -1,4 +1,4 @@
-2026-07-10
+2026-07-11
 
 # Cortex — MAP
 
@@ -42,7 +42,8 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
 - integration.py = sole I/O owner. State = single-row JSON ct_pacemaker_state id=1; side-channel key window_tokens (store_window_tokens) survives independently of dataclass saves (integration.py).
 - build_context: active_session = ct_activity within 5min; cal_busy/at_home = config defaults (unwired); affect_flag + self_schedule from JSON files; today_tokens = Cortex Today = today's finished-window final occupancies (per-window last `tokens`, closed by an occupancy drop) + live window_tokens hint (integration._today_tokens); events [] (integration.py).
 - run_tick: load → build_context → tick → save_state + write_wake_log (every tick, incl dry_run) → decision (integration.py).
-- Entry pacemaker_tick.py: _night_close (inject wrap-up prompt once/night if awake, else set_rotated once/night) runs BEFORE awake-guard; _handle_awake reaps stale wake (transcript idle >= 15min → proxy lie_down(stale)) else skips tick; wake fired: dry_run → integration.lie_down; live → wake.run_wake, then integration.lie_down only for headless mode ('window' owns its lie_down).
+- Entry pacemaker_tick.py: _night_close (inject wrap-up prompt once/night if awake, else set_rotated once/night) runs BEFORE awake-guard; wake fired: dry_run → integration.lie_down; live → wake.run_wake, then integration.lie_down only for headless mode ('window' owns its lie_down).
+- Awake gate (pacemaker_tick._handle_awake, pacemaker_tick.py:54-81): a wake in progress NEVER emits a new wake signal — instead runs the shared watchdog.silence_action as a backup (dead/rebooted watchdog is not a blind spot). No transcript mtime → passes 0.0 to silence_action (hold, don't insta-sleep — matches watchdog.run's own no-data fallback); the stale-reap check below still uses 1e9 so a genuinely gone transcript is reaped. Stale reap (idle >= wake.stale.threshold_min, 15) unchanged, runs after the silence check. A late sentinel firing into an active wake is silent by construction (this gate, not a sentinel-side check).
 
 ## 4. Wake runner (`wake.py`)
 
@@ -68,20 +69,31 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
 
 ### wake_state.json (`wake_state.py`)
 
-- Keys: awake/awake_since/wake_log_id/transcript (cleared as a set), session id, wait_count (reset on set_awake), silence_wait_until (one-shot), rotated (read-and-clear via take_rotated), night_wrap_key/night_rotated_key (once-per-night dedup, pacemaker_tick.py:38/47).
-- load tolerates missing/corrupt → {}; _save/update = whole-file read-modify-write, no lock, no atomic rename (wake_state.py:34-54 — confirmed cross-process lost-update window, see priority queue).
+- Keys: awake/awake_since/wake_log_id/transcript/silence_wait_until/wait_count/user_replied_this_wake/tuck_pending (the awake set, cleared together by clear_awake/claim_lie_down), session id, rotated (read-and-clear via take_rotated), sentinel_pid, night_wrap_key/night_rotated_key (once-per-night dedup, pacemaker_tick.py:38/47).
+- load tolerates missing/corrupt → {}. All writes go through _flock (blocking exclusive flock on the sibling .lock file, best-effort — unlock failure still proceeds) + _save (temp file same dir + os.replace, so a reader never sees a half-written file) — cross-process lost-update window fixed (wake_state.py:50-127).
+- claim_lie_down (wake_state.py:157-172): atomic read-and-clear of the awake marker under the same flock. Returns the pre-clear snapshot to the single winner (proceeds with the full lie_down); None to any later caller in the same window (already cleared → no-op). Guards the watchdog poll and the tick awake-branch racing silence_action in the same window (lie_down.py:98-106).
+- lock_path (wake_state.py:40-47): sibling `.lock` of wake_state_file. COUPLED with marrow's `_wake_state_lock` (marrow/MAP.md §6.3) — both resolve independently from their own [paths]/[cortex] config; overriding one without the other silently splits the lock (lost update).
 
 ### watchdog (`watchdog.py`)
 
 - Per-wake detached subprocess spawned at set_awake; pidfile self-guarded (only unlinks own pid) (watchdog.py:29-40, 169-181).
-- Poll loop 60s: retires when awake cleared externally; publishes window occupancy via store_window_tokens each poll (own short DB conn, reuses the tokens value already computed for fuse); fuse: window_tokens >= wake.watchdog.fuse_tokens (150k) → _fuse then exit; timeout: silent >= silent_max_min (10) honoring one-shot wait_until extension → proxy lie_down(timeout) (watchdog.py:126-166).
+- Poll loop 60s: retires when awake cleared externally; publishes window occupancy via store_window_tokens each poll (own short DB conn, reuses the tokens value already computed for fuse); fuse: window_tokens >= wake.watchdog.fuse_tokens (150k) → _fuse then exit; else runs silence_action (watchdog.py:202-232).
+- silence_action (watchdog.py:151-199, shared by watchdog.run and pacemaker_tick._handle_awake): two-tier, a live wait_until (cortex.wait) holds both tiers. No-user tier (user never replied this wake) → at wake.watchdog.no_user_gate_min (5) silent, proxy lie_down(force_slept="auto") immediately, no marker. Chat tier (user replied this wake) → at silent_max_min (20) append the wake.tuck_in_text marker once into wake_signal.log (stamps tuck_pending so it isn't re-sent), then after tuck_grace_min (5) more silence with no wait()/lie_down() → proxy lie_down(force_slept="auto"). force_slept="auto" is the routine silence-path marker — note.py renders it neutrally (no force-slept catchup line), distinct from "timeout" (retired on this path) and real incidents (fuse/stale).
 - _fuse: esc → inject fuse_handoff_prompt (summarize + append handoff + lie_down(rotate=True)) → poll awake up to 300s grace; only proxy-lie_down if session didn't do it itself; catchup reason only when handoff NOT written (watchdog.py:76-109). esc verify: transcript still growing after grace → hard_interrupt SIGINT, gated wake.watchdog.hard_interrupt_enabled (watchdog.py:43-66).
+
+### sentinel (`sentinel.py`) — exact-time wake
+
+- One-shot detached process (start_new_session, same pattern as watchdog.spawn): sleeps `--seconds N` then runs one pacemaker_tick.main() — wakes fire on the second instead of up to 5min late. The launchd 5-min tick stays as self-heal fallback (a sentinel lost to reboot/sleep is caught within 5min).
+- Armed at every lie_down (lie_down.py:_arm_sentinel, 135-153): kills the recorded predecessor pid first (never orphaned), then spawns a fresh one for the redrawn next_floor and records its pid via wake_state.set_sentinel_pid. Gated by [wake].sentinel (default true; false = tick-only, no sentinel spawned).
+- Self-guarded clear (sentinel.run, sentinel.py:40-48): on fire, clears its own sentinel_pid record via wake_state.clear_sentinel_pid(only_if_pid=self) BEFORE running the tick — only if the record still matches its own pid (a newer lie_down may already have re-armed a different one), same self-guard pattern as the watchdog pidfile.
+- Killed on re-arm (lie_down._kill_sentinel) and on user-wake reset (marrow cortex_bridge._cortex_user_wake_reset, marrow/MAP.md §6.3) — SIGTERM + clear record.
+- A sentinel firing late into an already-active wake is harmless: pacemaker_tick's awake gate (§3) never emits a new wake while awake, it just runs the shared silence checks.
 
 ## 5. lie_down / wait / say
 
 - Exposed as env-gated MCP tools in marrow daemon (MARROW_CORTEX=1), subprocess `-m cortex.<mod>`; also CLI mains for watchdog proxy use.
-- lie_down (lie_down.py): record window occupancy `tokens` into ct_wake_log (sole writer; bare `except: pass` — known silent-drop finding; net_tokens column now historical, unwritten) → clear due self_schedule entries → integration.lie_down floor redraw from now (explicit next_wake_min clamped, or dice; returns next_floor dt) → publish window occupancy (tokens) via store_window_tokens → kill watchdog (SIGTERM, skip if self) → optional set_rotated → clear_awake. Result dict adds next_wake=HH:MM (local tz, marrow MCP wrapper surfaces it); CLI main prints result JSON.
-- wait (wait.py:23-35): one-shot watchdog silence extension; cap wake.wait_max_per_wake (2) per wake; minutes clamped via triggers floor_min_min/floor_max_min (10/55 defaults — shared with the wake-window bounds, retuning one retunes both); writes deadline + bumps counter (two separate RMW writes).
+- lie_down (lie_down.py): next_wake_min is now REQUIRED at the MCP/CLI layer (no session-facing dice); clamped via triggers.clamp_next_wake_minutes to [1, wake.next_wake_max] (240). Python callers (proxy paths — watchdog auto/stale/fuse) may still pass None for a uniform dice draw within the floor window. wake_state.claim_lie_down() is the atomic awake-claim guard (§4): the watchdog poll and the tick awake-branch can both fire silence_action in the same window — only the winner runs the full body (ct_wake_log update + floor redraw + sentinel arm); a later caller gets `{"skipped": "not awake", ...}`, a no-op. Body: record window occupancy `tokens` into ct_wake_log (sole writer; bare `except: pass` — known silent-drop finding; net_tokens column now historical, unwritten) → clear due self_schedule entries → integration.lie_down floor redraw from now (returns next_floor dt) → publish window occupancy (tokens) via store_window_tokens → kill watchdog (SIGTERM, skip if self) → optional set_rotated → _arm_sentinel(next_floor) (§4 sentinel). Result dict adds next_wake=HH:MM (local tz, marrow MCP wrapper surfaces it); CLI main prints result JSON.
+- wait (wait.py:23-35): one-shot watchdog silence extension; cap wake.wait_max_per_wake (2) per wake; minutes clamped via triggers.clamp_window_minutes to [wake.wait_min, wake.wait_max] (1/55 defaults) — its OWN bounds, decoupled from the floor draw window (triggers.floor_min_min/floor_max_min, 10/55, used by lie_down's dice draw and next_wake_min's separate clamp); writes deadline + bumps counter (two separate RMW writes).
 - say (say.py, window.py:476-483): sound + front resident window — urgent-only attention ping (marrow 4c6209a), everything else stays silent; --note flag accepted but ignored (CLI symmetry only).
 
 ## 6. Wakeup note (`note.py`)
@@ -108,7 +120,7 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
 
 - symlinks.py: daybrief.md (marrow-owned source, may dangle until first marrow render) + wishlist.md → NY db-pages; wishlist header from config; refuses non-symlink clobber (FileExistsError propagates); ensure_all safe per-wake (symlinks.py:11-42).
 - install.py: `python -m cortex.install [remove]` — writes 2 plists (collect-tick, pacemaker-tick) with 6 __TOKEN__ replacements from config, launchctl bootout+bootstrap into gui/<uid>; no rollback on partial failure (self-healing on re-run); zero test coverage (install.py:16-97).
-- No pyproject.toml — package importable only because plists set WorkingDirectory=repo root (`-m` resolves cortex/ from cwd); any other cwd needs PYTHONPATH.
+- pyproject.toml (setuptools, packages cortex/cortex.collectors/cortex.pacemaker, no third-party deps) declares the package; plists still set WorkingDirectory=repo root so `-m` resolves cortex/ from cwd without an install/PYTHONPATH step.
 - Plists: RunAtLoad + StartInterval, no KeepAlive/backoff — a crashing tick just re-fires next interval.
 - Safety default: pacemaker.dry_run=true shipped in example config; live config also true today.
 
@@ -119,7 +131,7 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
 
 ## 11. Status
 
-- Live: collectors (knowledgec) · pacemaker ticks (dry_run) · wake window path + watchdog + fuse · note · daybrief render (marrow subprocess) · MCP lie_down/wait/say · symlinks.
+- Live: collectors (knowledgec) · pacemaker ticks (dry_run) · wake window path + watchdog + fuse + sentinel exact-time wake · note · daybrief render (marrow subprocess) · MCP lie_down/wait/say · symlinks.
 - Unwired: event triggers · cal_busy/at_home real data · health/geofence collectors (flagged off, no export producer).
 
 ## 12. Marrow-side organs
