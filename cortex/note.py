@@ -188,6 +188,22 @@ def _replay_events(conn: sqlite3.Connection, cfg: dict, limit: int, per_chars: i
     return events
 
 
+def _latest_replay_ts(conn: sqlite3.Connection, cfg: dict) -> str | None:
+    """ISO timestamp of the most recent non-ct user/assistant event, or None."""
+    exclude = _replay_exclude_channels(cfg)
+    ph = ",".join("?" for _ in exclude) if exclude else ""
+    where_ch = f" AND COALESCE(channel,'') NOT IN ({ph})" if exclude else ""
+    try:
+        row = conn.execute(
+            "SELECT MAX(timestamp) as ts FROM events "
+            "WHERE role IN ('user', 'assistant')" + where_ch,
+            (*exclude,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    return row["ts"] if row and row["ts"] else None
+
+
 # --------------------------------------------------------------------------- #
 # External best-effort facts (cadence CLI, osascript, handoff file)
 # --------------------------------------------------------------------------- #
@@ -273,19 +289,31 @@ def gather(
 
     kv = _safe(_rate_limit_kv, conn, default={})
     budget = _safe(_build_budget, conn, cfg, now, kv, ncfg)
+    last_wake = _safe(_last_wake, conn, now)
+    replay = _safe(
+        _replay_events, conn, cfg,
+        ncfg.get("replay_events", 4),
+        ncfg.get("replay_event_chars", 300),
+        default=[],
+    )
+    replay_stale = False
+    if replay and last_wake:
+        latest_ts = _safe(_latest_replay_ts, conn, cfg)
+        if latest_ts:
+            try:
+                last_wake_dt = now - timedelta(minutes=last_wake["minutes_ago"])
+                replay_stale = _parse_utc(latest_ts) < last_wake_dt
+            except (TypeError, ValueError):
+                pass
 
     return {
-        "last_wake": _safe(_last_wake, conn, now),
+        "last_wake": last_wake,
         "budget": budget,
         "active_app": _safe(_frontmost_app),
         "pending": _safe(_pending, cfg, now, default=[]),
         "died_no_handoff": died_no_handoff,
-        "replay": _safe(
-            _replay_events, conn, cfg,
-            ncfg.get("replay_events", 4),
-            ncfg.get("replay_event_chars", 300),
-            default=[],
-        ),
+        "replay": replay,
+        "replay_stale": replay_stale,
     }
 
 
@@ -384,7 +412,9 @@ def render(cfg: dict, now: datetime, data: dict) -> str:
         blocks.append("Pending self-schedule: " + " · ".join(segs))
 
     replay = data.get("replay") or []
-    if replay:
+    if data.get("replay_stale"):
+        blocks.append("No new messages since last wake.")
+    elif replay:
         rlines = ["### Replay"]
         for ev in replay:
             role = ev.get("role", "")
