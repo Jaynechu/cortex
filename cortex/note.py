@@ -287,9 +287,33 @@ def gather(
     crashed without a handoff (respawn catchup line)."""
     ncfg = _note_cfg(cfg)
 
+    from cortex import wake_state
+
     kv = _safe(_rate_limit_kv, conn, default={})
     budget = _safe(_build_budget, conn, cfg, now, kv, ncfg)
     last_wake = _safe(_last_wake, conn, now)
+
+    ws = {}
+    try:
+        ws = wake_state.load(cfg)
+    except Exception:
+        pass
+    window_sid = None
+    awake_since_hm = None
+    transcript_raw = ws.get("transcript")
+    if transcript_raw:
+        try:
+            from pathlib import Path
+            window_sid = Path(str(transcript_raw)).stem[:8]
+        except Exception:
+            pass
+    since_raw = ws.get("awake_since")
+    if since_raw:
+        try:
+            since_dt = _parse_utc(since_raw)
+            awake_since_hm = since_dt.astimezone(_tz(cfg)).strftime("%H:%M")
+        except (TypeError, ValueError):
+            pass
     replay = _safe(
         _replay_events, conn, cfg,
         ncfg.get("replay_events", 4),
@@ -314,6 +338,8 @@ def gather(
         "died_no_handoff": died_no_handoff,
         "replay": replay,
         "replay_stale": replay_stale,
+        "window_sid": window_sid,
+        "awake_since_hm": awake_since_hm,
     }
 
 
@@ -388,6 +414,16 @@ def render(cfg: dict, now: datetime, data: dict) -> str:
     app = data.get("active_app")
     if app:
         header.append(f"Active (Mac): {app}")
+
+    w_sid = data.get("window_sid")
+    w_since = data.get("awake_since_hm")
+    if w_sid or w_since:
+        parts = []
+        if w_since:
+            parts.append(f"since {w_since}")
+        if w_sid:
+            parts.append(f"SID {w_sid}")
+        header.append("Window: " + " | ".join(parts))
 
     # Prior window was force-slept without writing its handoff -> tell this
     # window to backfill from DB events (recall/tl), never from raw jsonl.
