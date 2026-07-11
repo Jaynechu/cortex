@@ -16,13 +16,16 @@ Assumes [marrow](../marrow) + synapse already installed and a Claude Code max pl
    ```
    Override the path with the `CORTEX_CONFIG` env var if needed.
 3. Enable the marrow-side bridge: set `[cortex] enabled = true` in marrow's config.toml, then restart the marrow watcher. This installs the MCP tools (`lie_down` / `wait` / `say` for the cortex session; `wish` / `first` / `goal` everywhere) and the wake hooks.
-4. Seed the cortex home dir `~/.config/marrow/cortex/` (configurable via `[paths] cortex_home`) — this is the resident session's cwd and inner world:
+4. Seed the cortex home dir `~/.config/marrow/cortex/` (configurable via `[paths] cortex_home`) — this is the resident session's cwd and inner world. Copy [templates/](templates/) there and customise names/paths:
+   ```
+   cp templates/*.md ~/.config/marrow/cortex/
+   ```
    - `CLAUDE.md` — world rules + house rules for the resident session
    - `playbook.md` — activity menu (what to do when awake)
    - `notebook.md` — long-term memory, self-maintained
    - `handoff_template.md` — daily journal template (new page each day, old pages auto-archived)
    - `wishlist.md` — created automatically on first `wish`; template optional
-   Start from the templates and customise names/paths; everything else under cortex_home (wakeup_note, wake_state, handoff.md, logs) is generated at runtime.
+   Everything else under cortex_home (wakeup_note, wake_state, handoff.md, logs) is generated at runtime.
 5. Install the launchd jobs (collect-tick + pacemaker-tick):
    ```
    .venv/bin/python -m cortex.install
