@@ -346,7 +346,9 @@ def render(cfg: dict, now: datetime, data: dict) -> str:
     last = data.get("last_wake")
     if last:
         seg = f"Last wake: {last['minutes_ago']}min ago"
-        if last.get("force_slept"):
+        # "auto" = routine proxy sleep on the silence path -> render neutrally,
+        # never as a force incident. Only real force incidents get the tag.
+        if last.get("force_slept") and last.get("force_slept") != "auto":
             seg += " (force-slept mid-task)"
         now_seg += f" | {seg}"
     header.append(now_seg)
@@ -361,7 +363,8 @@ def render(cfg: dict, now: datetime, data: dict) -> str:
 
     # Prior window was force-slept without writing its handoff -> tell this
     # window to backfill from DB events (recall/tl), never from raw jsonl.
-    if last and last.get("force_slept"):
+    # "auto" (routine silence sleep) is not an incident -> no catchup line.
+    if last and last.get("force_slept") and last.get("force_slept") != "auto":
         catchup = _note_cfg(cfg).get("force_slept_catchup_text", "")
         if catchup:
             header.append(catchup)

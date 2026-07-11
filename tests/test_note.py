@@ -110,6 +110,16 @@ def test_render_force_slept_marker_and_catchup(cfg):
     assert "recall all events from DB" in text
 
 
+def test_render_auto_sleep_is_neutral(cfg):
+    """force_slept='auto' = routine silence sleep -> NO force-incident tag, NO
+    catchup hint. Rows stay queryable, but the note reads it as ordinary."""
+    data = {"last_wake": {"minutes_ago": 40, "force_slept": "auto"}}
+    text = note.render(cfg, NOW, data)
+    assert "Last wake: 40min ago" in text
+    assert "force-slept mid-task" not in text
+    assert "recall all events from DB" not in text
+
+
 def test_render_no_wake_line_ever(cfg):
     """The 'Wake:' reason line is fully retired — gone from every render."""
     for data in ({}, {"wake_parts": ["wander"]}, {"last_wake": {"minutes_ago": 5, "force_slept": None}}):

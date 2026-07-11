@@ -115,13 +115,14 @@ def test_lie_down_explicit_minutes_sets_exact_next_wake(conn, cfg):
     assert state.next_floor_due_at == now + timedelta(minutes=25)
 
 
-def test_lie_down_explicit_minutes_clamped_to_window(conn, cfg):
+def test_lie_down_explicit_minutes_verbatim(conn, cfg):
     now = datetime(2026, 7, 4, 10, 0, tzinfo=MEL)
     integration.save_state(conn, PacemakerState())
+    # integration.lie_down no longer clamps: the lie_down.py wrapper clamps to
+    # [1, next_wake_max] before calling in. Verbatim minutes here.
     integration.lie_down(conn, cfg, now=now, rng=random.Random(1), minutes=999)
     state = integration.load_state(conn)
-    # clamps to floor_max_min (default 55)
-    assert state.next_floor_due_at == now + timedelta(minutes=55)
+    assert state.next_floor_due_at == now + timedelta(minutes=999)
 
 
 # --- context builder -------------------------------------------------------

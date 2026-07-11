@@ -92,11 +92,20 @@ rearm_suffix = " (ear died — rearm)"
 # plays a system sound (name of a /System/Library/Sounds/*.aiff; "" = silent).
 say_sound = "Glass"
 wait_max_per_wake = 2       # max wait() calls per wake (reset on wake start / lie_down); a call past this is refused
+wait_min = 1                # wait(N) clamp lower bound (minutes) — own bounds, decoupled from the floor draw window
+wait_max = 55               # wait(N) clamp upper bound (minutes) — hot cache-TTL guard
+next_wake_max = 240         # lie_down(next_wake_min=N) clamp upper bound; min 1
+sentinel = true             # arm cortex.sentinel (one-shot exact-time wake) at every lie_down; false = tick-only fallback
+# Chat-tier tuck-in marker appended to wake_signal.log at silent_max_min when the
+# user replied this wake ({n}/{cap} = live wait count). No-user tier gets no marker.
+tuck_in_text = "⏳ [TUCK-IN] It's been 20 mins - Call wait(N) if you don't want to sleep; Otherwise lie_down(next_wake_min=N). (Wait cap {n}/{cap})"
 
 # Per-wake watchdog thresholds (spawned at injection, killed at lie_down).
 [wake.watchdog]
 poll_sec = 60
-silent_max_min = 10            # (b) silent this long w/o lie_down -> proxy lie_down (timeout)
+silent_max_min = 20            # chat tier: user replied this wake -> at this silence, append TUCK-IN marker (no live wait_until)
+no_user_gate_min = 5           # no-user tier: no user reply this wake -> at this silence, proxy lie_down(auto) directly, no marker
+tuck_grace_min = 5             # after TUCK-IN, no wait/lie_down within this -> proxy lie_down(auto)
 fuse_tokens = 150000           # (c) window tokens >= this -> esc + proxy lie_down (fuse)
 # Process-level hard interrupt (SIGINT), a guaranteed esc-equivalent for when the
 # osascript esc may not land (no window focus). Fires after esc on the fuse

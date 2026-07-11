@@ -66,6 +66,20 @@ _DEFAULTS: dict[str, Any] = {
         # Max wait() calls allowed per wake (reset on wake start / lie_down).
         # A call past this returns a refusal result (not an exception).
         "wait_max_per_wake": 2,
+        # wait() clamp bounds (minutes). Own bounds, decoupled from the floor
+        # draw window (triggers.floor_*): wait guards the hot cache TTL.
+        "wait_min": 1,
+        "wait_max": 55,
+        # lie_down(next_wake_min=N) clamp: 1..next_wake_max minutes.
+        "next_wake_max": 240,
+        # Exact-time wake: arm cortex.sentinel (one-shot detached sleep-then-tick)
+        # at every lie_down. false = tick-only (launchd 5-min fallback).
+        "sentinel": True,
+        # Chat-tier tuck-in marker appended to wake_signal.log at silent_max_min
+        # when the user replied this wake. {n}/{cap} = live wait count.
+        "tuck_in_text":
+            "⏳ [TUCK-IN] It's been 20 mins - Call wait(N) if you don't want to "
+            "sleep; Otherwise lie_down(next_wake_min=N). (Wait cap {n}/{cap})",
     },
     # marrow repo invocation for the wake call (separate venv/deps, C3).
     "marrow": {

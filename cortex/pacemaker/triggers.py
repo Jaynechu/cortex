@@ -109,23 +109,33 @@ def evaluate(
 
 
 def clamp_window_minutes(minutes: float, config: dict) -> float:
-    """Clamp an explicit wake choice to [floor_min_min, floor_max_min] — the
-    min guards against thrash, the max protects the cache TTL."""
-    trig_config = config.get("triggers", {})
-    lo = trig_config.get("floor_min_min", 10)
-    hi = trig_config.get("floor_max_min", 55)
+    """Clamp a wait(N) choice to [wake.wait_min, wake.wait_max] — the min guards
+    against thrash, the max protects the hot cache TTL. Own bounds, decoupled
+    from the floor draw window (triggers.floor_*)."""
+    wcfg = config.get("wake", {})
+    lo = wcfg.get("wait_min", 1)
+    hi = wcfg.get("wait_max", 55)
     return max(lo, min(hi, minutes))
+
+
+def clamp_next_wake_minutes(minutes: float, config: dict) -> float:
+    """Clamp a lie_down(next_wake_min=N) choice to [1, wake.next_wake_max]. The
+    session-facing wake window is wider than the floor draw (dice retired for
+    the session; proxy paths still draw within the floor window)."""
+    hi = config.get("wake", {}).get("next_wake_max", 240)
+    return max(1, min(hi, minutes))
 
 
 def reschedule_floor(now: datetime, config: dict, rng: random.Random,
                      minutes: float | None = None) -> datetime:
     """Draw the next wake due time from `now`. `minutes` = an explicit choice
-    (clamped to [floor_min_min, floor_max_min]); None = a uniform "dice" draw
-    within that window. Callers pass lie-down time as `now` on the wake path
-    (C-wm: the clock runs from lie-down, not wake); gated firings redraw from
-    tick time so a blocked floor doesn't re-fire every tick."""
+    (already clamped by the caller — lie_down clamps to [1, next_wake_max]);
+    None = a uniform "dice" draw within [floor_min_min, floor_max_min]. Callers
+    pass lie-down time as `now` on the wake path (C-wm: the clock runs from
+    lie-down, not wake); gated firings redraw from tick time so a blocked floor
+    doesn't re-fire every tick."""
     trig_config = config.get("triggers", {})
     lo = trig_config.get("floor_min_min", 10)
     hi = trig_config.get("floor_max_min", 55)
-    draw = rng.uniform(lo, hi) if minutes is None else clamp_window_minutes(minutes, config)
+    draw = rng.uniform(lo, hi) if minutes is None else minutes
     return now + timedelta(minutes=draw)

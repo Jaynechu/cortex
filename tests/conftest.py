@@ -15,6 +15,11 @@ _BLOCKED_BINS = {
 }
 
 
+# Detached background modules a test must never really launch (they sleep +
+# run a tick / poll loop, leaking a live process past the test).
+_BLOCKED_MODULES = {"cortex.sentinel", "cortex.watchdog"}
+
+
 def _guarded(orig, name):
     def wrapper(cmd, *a, **kw):
         first = None
@@ -26,6 +31,13 @@ def _guarded(orig, name):
             raise AssertionError(
                 f"test isolation: real subprocess.{name}({first!r}) blocked — "
                 f"mock this call (spawn/osascript/afplay/discovery) in the test")
+        if isinstance(cmd, (list, tuple)) and "-m" in cmd:
+            mods = {str(x) for x in cmd}
+            if mods & _BLOCKED_MODULES:
+                raise AssertionError(
+                    f"test isolation: real subprocess.{name} spawning a cortex "
+                    f"background module blocked — stub cortex.sentinel/watchdog "
+                    f"Popen in the test")
         return orig(cmd, *a, **kw)
     return wrapper
 
@@ -38,6 +50,20 @@ def _block_real_processes(monkeypatch):
     override this guard for their own scope."""
     monkeypatch.setattr(subprocess, "run", _guarded(subprocess.run, "run"))
     monkeypatch.setattr(subprocess, "Popen", _guarded(subprocess.Popen, "Popen"))
+
+
+@pytest.fixture(autouse=True)
+def _no_real_sentinel(monkeypatch):
+    """lie_down arms a detached sentinel (subprocess.Popen(-m cortex.sentinel)).
+    _arm_sentinel swallows spawn errors by design, so the process-guard's
+    AssertionError alone would not stop a real spawn. Stub the spawn to a no-op
+    fake pid so no test leaks a live sentinel; tests that assert sentinel
+    behaviour override this with their own Popen stub."""
+    try:
+        import cortex.sentinel as _s
+        monkeypatch.setattr(_s, "spawn", lambda cfg, seconds: 424242)
+    except ImportError:
+        pass
 
 
 @pytest.fixture

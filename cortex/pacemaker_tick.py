@@ -64,18 +64,28 @@ def _mark_dry_run_schedule_fired(conn, decision: dict, now) -> None:
 
 
 def _handle_awake(conn, cfg: dict, st: dict) -> str:
-    """A wake is in progress. Reap it if the transcript has been idle past the
-    stale threshold (watchdog presumed dead -> never leave the marker wedged);
-    otherwise skip this tick so we never double-fire."""
-    stale_min = float(cfg["wake"].get("stale", {}).get("threshold_min", 15))
+    """A wake is in progress -> the awake gate: NEVER emit a wake signal while
+    awake (the alarm stops once up). Instead run the two-tier silence checks as
+    a watchdog backup, so a dead/rebooted watchdog is not a blind spot. The tick
+    fires every ~5 min, so the chat-tier grace is approximated to a whole-tick
+    granularity (the marker is stamped one tick, the auto sleep fires the next
+    tick once grace has elapsed). Falls back to the stale reap only when the
+    silence tier held (e.g. a live wait_until) yet the transcript is long idle."""
+    from cortex.watchdog import silence_action
     mt = transcript.mtime(cfg)
     idle = (time.time() - mt) / 60.0 if mt else 1e9
+    action = silence_action(cfg, idle)
+    if action and not wake_state.load(cfg).get("awake"):
+        return f"awake gate: {action} (idle {idle:.0f}min)"
+    stale_min = float(cfg["wake"].get("stale", {}).get("threshold_min", 15))
     if idle >= stale_min:
         from cortex import lie_down as lie_down_mod
         r = lie_down_mod.lie_down(cfg, force_slept="stale")
         sys.stderr.write(
             f"[cortex] STALE WAKE reaped: idle={idle:.1f}min tokens={r['tokens']}\n")
         return f"stale wake reaped (idle {idle:.0f}min) -> proxy lie_down"
+    if action:
+        return f"awake gate: {action} (idle {idle:.0f}min)"
     return f"wake in progress (idle {idle:.0f}min) -> tick skipped"
 
 

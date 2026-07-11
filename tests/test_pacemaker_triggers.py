@@ -1,7 +1,8 @@
 import random
 from datetime import datetime, timedelta, timezone
 
-from cortex.pacemaker.triggers import clamp_window_minutes, evaluate, reschedule_floor
+from cortex.pacemaker.triggers import (
+    clamp_next_wake_minutes, clamp_window_minutes, evaluate, reschedule_floor)
 
 TZ = timezone(timedelta(hours=10))
 NOW = datetime(2026, 7, 3, 12, 0, tzinfo=TZ)
@@ -12,7 +13,12 @@ def base_config():
         "triggers": {
             "floor_min_min": 10,
             "floor_max_min": 55,
-        }
+        },
+        "wake": {
+            "wait_min": 1,
+            "wait_max": 55,
+            "next_wake_max": 240,
+        },
     }
 
 
@@ -113,20 +119,28 @@ def test_reschedule_floor_explicit_minutes_ignores_rng():
     assert next_due == NOW + timedelta(minutes=20)
 
 
-def test_reschedule_floor_explicit_minutes_clamped_to_max():
+def test_reschedule_floor_explicit_minutes_no_reclamp():
+    # reschedule_floor no longer re-clamps: the caller (lie_down) already
+    # clamped to [1, next_wake_max]. An explicit value is used verbatim.
     config = base_config()
     next_due = reschedule_floor(NOW, config, random.Random(1), minutes=999)
-    assert next_due == NOW + timedelta(minutes=55)
-
-
-def test_reschedule_floor_explicit_minutes_clamped_to_min():
-    config = base_config()
+    assert next_due == NOW + timedelta(minutes=999)
     next_due = reschedule_floor(NOW, config, random.Random(1), minutes=1)
-    assert next_due == NOW + timedelta(minutes=10)
+    assert next_due == NOW + timedelta(minutes=1)
 
 
-def test_clamp_window_minutes():
+def test_clamp_window_minutes_uses_wait_bounds():
+    # wait(N) clamp now reads [wake.wait_min, wake.wait_max], decoupled from
+    # the floor draw window.
     config = base_config()
     assert clamp_window_minutes(30, config) == 30
-    assert clamp_window_minutes(5, config) == 10
+    assert clamp_window_minutes(0, config) == 1
     assert clamp_window_minutes(90, config) == 55
+
+
+def test_clamp_next_wake_minutes_bounds():
+    # lie_down(next_wake_min=N) clamp = [1, wake.next_wake_max].
+    config = base_config()
+    assert clamp_next_wake_minutes(120, config) == 120
+    assert clamp_next_wake_minutes(0, config) == 1
+    assert clamp_next_wake_minutes(999, config) == 240

@@ -123,12 +123,85 @@ def _handoff_written(handoff, before_mtime: float | None) -> bool:
         return False
 
 
-def run(cfg: dict) -> int:
+def _wait_until_live(cfg: dict) -> bool:
+    """True if a one-shot silence window (cortex.wait) is still in the future.
+    A live wait_until holds off every silence action (tuck-in / auto sleep)."""
+    wu = wake_state.get_wait_until(cfg)
+    return wu is not None and datetime.now(timezone.utc) < wu
+
+
+def _append_tuck_in(cfg: dict) -> None:
+    """Chat-tier tuck-in: append the config marker line to wake_signal.log (the
+    ear Monitor delivers it as a session turn). {n}/{cap} = live wait count."""
+    tmpl = str(cfg["wake"].get("tuck_in_text") or "").strip()
+    if not tmpl:
+        return
+    cap = int(cfg["wake"].get("wait_max_per_wake", 2) or 0)
+    n = wake_state.get_wait_count(cfg)
+    line = tmpl.replace("{n}", str(n)).replace("{cap}", str(cap))
+    try:
+        p = config.wake_signal_log_path(cfg)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "a") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
+
+
+def silence_action(cfg: dict, silent_min: float, *, allow_tuck: bool = True) -> str | None:
+    """Two-tier silence decision, shared by the watchdog and the tick awake gate.
+
+    Chat tier (user replied this wake): at silent_max_min, with no live
+    wait_until, append the TUCK-IN marker once (tuck_pending stamped so it isn't
+    re-appended); after tuck_grace_min more with no wait/lie_down -> proxy
+    lie_down(auto).
+    No-user tier (no reply this wake): at no_user_gate_min, no live wait_until
+    -> proxy lie_down(auto) immediately, no marker.
+    A live wait_until holds everything. Returns an action label for logging, or
+    None (keep waiting / handled without sleeping)."""
     from cortex import lie_down as lie_down_mod
 
     wcfg = cfg["wake"].get("watchdog", {})
+    if _wait_until_live(cfg):
+        return None
+
+    if not wake_state.user_replied_this_wake(cfg):
+        gate = float(wcfg.get("no_user_gate_min", 5))
+        if silent_min >= gate:
+            lie_down_mod.lie_down(cfg, force_slept="auto")
+            return "no-user gate -> auto sleep"
+        return None
+
+    # Chat tier.
+    silent_max = float(wcfg.get("silent_max_min", 20))
+    grace = float(wcfg.get("tuck_grace_min", 5))
+    if silent_min < silent_max:
+        return None
+    st = wake_state.load(cfg)
+    tuck_at = st.get("tuck_pending")
+    if tuck_at is None:
+        if allow_tuck:
+            _append_tuck_in(cfg)
+        wake_state.update(cfg, tuck_pending=datetime.now(timezone.utc).isoformat())
+        return "tuck-in appended"
+    # Marker already sent; wait out the grace window (measured from the marker).
+    try:
+        marked = datetime.fromisoformat(str(tuck_at).replace("Z", "+00:00"))
+        if marked.tzinfo is None:
+            marked = marked.replace(tzinfo=timezone.utc)
+    except ValueError:
+        marked = None
+    grace_over = marked is None or (
+        datetime.now(timezone.utc) - marked).total_seconds() / 60.0 >= grace
+    if grace_over:
+        lie_down_mod.lie_down(cfg, force_slept="auto")
+        return "tuck grace elapsed -> auto sleep"
+    return None
+
+
+def run(cfg: dict) -> int:
+    wcfg = cfg["wake"].get("watchdog", {})
     poll = int(wcfg.get("poll_sec", 60))
-    silent_max = float(wcfg.get("silent_max_min", 10))
     fuse = int(wcfg.get("fuse_tokens", 150_000))
     grace = float(wcfg.get("hard_interrupt_grace_sec", 30))
 
@@ -153,16 +226,9 @@ def run(cfg: dict) -> int:
         if fuse and tokens >= fuse:
             _fuse(cfg, grace)
             return 0
-        if silent_min >= silent_max:
-            # Model may declare a one-shot silence window (cortex.wait): hold the
-            # routine timeout until the deadline, then reset to default (fires
-            # once). The fuse above is never held.
-            wait_until = wake_state.get_wait_until(cfg)
-            if wait_until is not None and datetime.now(timezone.utc) < wait_until:
-                continue
-            if wait_until is not None:
-                wake_state.clear_wait_until(cfg)
-            lie_down_mod.lie_down(cfg, force_slept="timeout")
+        # Two-tier silence: chat (tuck-in then grace) / no-user (short gate).
+        # A proxy sleep here is force_slept="auto" (routine, not an incident).
+        if silence_action(cfg, silent_min) and not wake_state.load(cfg).get("awake"):
             return 0
 
 

@@ -87,8 +87,14 @@ def _record_tokens(conn, cfg: dict, state: dict, force_slept: str | None) -> int
 def lie_down(cfg: dict, force_slept: str | None = None, rotate: bool = False,
              next_wake_min: float | None = None) -> dict:
     """End the current wake. `next_wake_min` picks the next internal wake:
-    an explicit minutes-from-now (clamped to the wake window), or None = a
-    uniform "dice" draw within the window (preserves prior behaviour)."""
+    an explicit minutes-from-now (clamped to [1, wake.next_wake_max]), or None =
+    a uniform "dice" draw within the floor window (proxy paths: watchdog auto,
+    stale reap, fuse — session-facing dice retired, N required at the MCP/CLI
+    layer)."""
+    from cortex.pacemaker.triggers import clamp_next_wake_minutes
+
+    if next_wake_min is not None:
+        next_wake_min = clamp_next_wake_minutes(next_wake_min, cfg)
     conn = db.connect(cfg)
     try:
         state = wake_state.load(cfg)
@@ -109,12 +115,46 @@ def lie_down(cfg: dict, force_slept: str | None = None, rotate: bool = False,
         if rotate:
             wake_state.set_rotated(cfg)
         wake_state.clear_awake(cfg)
+        _arm_sentinel(cfg, next_floor)
         next_wake = _local_hm(next_floor, cfg)
         return {"tokens": tokens, "cleared_due": cleared,
                 "force_slept": force_slept, "rotated": rotate,
                 "next_wake": next_wake}
     finally:
         conn.close()
+
+
+def _arm_sentinel(cfg: dict, next_floor: datetime) -> None:
+    """Arm the one-shot exact-time wake sentinel for `next_floor`. Kills the
+    recorded predecessor first (never orphaned — single detached process), then
+    spawns a fresh one and records its pid. Gated by [wake].sentinel; false =
+    tick-only (the launchd 5-min tick is the sole waker)."""
+    _kill_sentinel(cfg)
+    if not cfg["wake"].get("sentinel", True):
+        return
+    if next_floor is None:
+        return
+    seconds = (next_floor - _now_utc()).total_seconds()
+    if seconds < 0:
+        seconds = 0.0
+    try:
+        from cortex import sentinel
+        pid = sentinel.spawn(cfg, seconds)
+        wake_state.set_sentinel_pid(cfg, pid)
+    except Exception:  # spawning the sentinel must never wedge the lie_down
+        pass
+
+
+def _kill_sentinel(cfg: dict) -> None:
+    """SIGTERM the recorded sentinel predecessor and clear its record. A newer
+    lie_down / user-wake reset calls this before arming a fresh one."""
+    pid = wake_state.get_sentinel_pid(cfg)
+    if pid is not None and pid != os.getpid():
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+    wake_state.clear_sentinel_pid(cfg)
 
 
 def _local_hm(dt: datetime | None, cfg: dict) -> str | None:
@@ -130,9 +170,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="mark a proxy lie-down (timeout|fuse|stale)")
     parser.add_argument("--rotate", action="store_true",
                         help="respawn a fresh window on the next wake")
-    parser.add_argument("--next-wake-min", type=float, default=None,
-                        help="minutes until the next internal wake (clamped to "
-                             "the wake window); omit for a uniform dice draw")
+    parser.add_argument("--next-wake-min", type=float, required=True,
+                        help="minutes until the next internal wake "
+                             "(required, clamped to [1, wake.next_wake_max])")
     args = parser.parse_args(argv)
     cfg = config.load()
     result = lie_down(cfg, force_slept=args.force_slept, rotate=args.rotate,

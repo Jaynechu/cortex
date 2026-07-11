@@ -805,6 +805,49 @@ def test_lie_down_returns_next_wake_hm(cfg):
         (_dt.now(tz) + timedelta(minutes=21)).strftime("%H:%M"))
 
 
+def test_lie_down_clamps_next_wake_min_to_240(cfg):
+    """lie_down(next_wake_min=N) clamps to [1, next_wake_max=240] — the wider
+    session-facing window, not the 10-55 floor draw. 999 -> 240."""
+    from datetime import datetime as _dt
+    from zoneinfo import ZoneInfo
+
+    conn = db.connect(cfg)
+    conn.execute(
+        "INSERT INTO ct_wake_log (ts, wake, dry_run, explanation) VALUES (?,1,0,?)",
+        (db.utcnow_iso(), "clamp"))
+    conn.commit()
+    wid = conn.execute("SELECT MAX(id) AS id FROM ct_wake_log").fetchone()["id"]
+    conn.close()
+    wake_state.set_awake(cfg, wid, None)
+
+    r = lie_down.lie_down(cfg, next_wake_min=999)
+    tz = ZoneInfo(cfg["core"]["timezone"])
+    expected = (_dt.now(tz) + timedelta(minutes=240)).strftime("%H:%M")
+    assert r["next_wake"] in (
+        expected, (_dt.now(tz) + timedelta(minutes=241)).strftime("%H:%M"))
+
+
+def test_lie_down_clamps_next_wake_min_to_1(cfg):
+    """A tiny value clamps up to the 1-min floor (anti-thrash)."""
+    from datetime import datetime as _dt
+    from zoneinfo import ZoneInfo
+
+    conn = db.connect(cfg)
+    conn.execute(
+        "INSERT INTO ct_wake_log (ts, wake, dry_run, explanation) VALUES (?,1,0,?)",
+        (db.utcnow_iso(), "clamp-lo"))
+    conn.commit()
+    wid = conn.execute("SELECT MAX(id) AS id FROM ct_wake_log").fetchone()["id"]
+    conn.close()
+    wake_state.set_awake(cfg, wid, None)
+
+    r = lie_down.lie_down(cfg, next_wake_min=0)
+    tz = ZoneInfo(cfg["core"]["timezone"])
+    expected = (_dt.now(tz) + timedelta(minutes=1)).strftime("%H:%M")
+    assert r["next_wake"] in (
+        expected, (_dt.now(tz) + timedelta(minutes=2)).strftime("%H:%M"))
+
+
 # --- resume vs fresh (item 6) -------------------------------------------------
 
 def _write_marker_jsonl(tdir, stem: str, marker: str = "[CORTEX-WAKE]") -> None:
