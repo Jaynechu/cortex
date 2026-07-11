@@ -159,7 +159,7 @@ cal_busy_default = false       # until calendar busy state is wired in
 
 [gates]
 # Night window: zero self-wakes 23-06 (floor/self_scheduled/affect_flag all
-# silent); only schedule (duty) pierces. cap = 0 = no self-wake at night.
+# silent). cap = 0 = no self-wake at night.
 [gates.night]
 start = "23:00"
 end = "06:00"
@@ -171,19 +171,10 @@ cap = 0
 close_prompt = "Night window is open. Write your handoff entry now, then call lie_down to end this wake."
 # Daily wake-token budget: once today's SUM(NET spend — cache-miss rewrite +
 # output, ct_wake_log.net_tokens with a tokens fallback) reaches tokens,
-# self-wakes stop; schedule pierces; resets naturally at local midnight.
+# self-wakes stop; resets naturally at local midnight.
 # Net semantics — cache reads are near-free, net is the real cost.
 [gates.daily_budget]
 tokens = 1000000
-
-# Schedule (duty) blocks: fixed recurring duties, rare + explicit. Each fires
-# once per day at its local time in a FRESH iTerm window (no handoff), pierces
-# night + daily budget. Add a block per duty; enabled = false keeps it inert.
-# [[schedule]]
-# name = "review+plan"
-# time = "20:30"
-# enabled = true
-# prompt_path = "~/.config/marrow/cortex/prompts/review.md"  # optional
 
 [triggers]
 # Wake-window (minutes) from lie-down. lie_down picks the next wake: an explicit

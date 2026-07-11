@@ -51,18 +51,6 @@ def _night_close(cfg: dict, now, st: dict) -> str | None:
     return "night close: resident session marked non-resumable"
 
 
-def _mark_dry_run_schedule_fired(conn, decision: dict, now) -> None:
-    """Under dry_run, mark each fired schedule (duty) reason so a due duty does
-    not re-fire every 5-min tick until midnight (live run_wake, which normally
-    marks fired, is never called in dry_run)."""
-    date = now.date().isoformat()
-    for r in decision.get("reasons", []) or []:
-        if getattr(r, "kind", None) == "schedule":
-            name = (getattr(r, "facts", {}) or {}).get("name")
-            if name:
-                integration.mark_schedule_fired(conn, name, date)
-
-
 def _handle_awake(conn, cfg: dict, st: dict) -> str:
     """A wake is in progress -> the awake gate: NEVER emit a wake signal while
     awake (the alarm stops once up). Instead run the two-tier silence checks as
@@ -111,17 +99,10 @@ def main() -> int:
         if decision["wake"]:
             if dry_run:
                 integration.lie_down(conn, cfg)  # log-only: still advance floor
-                # Mark fired schedule duties so a due duty does not re-fire every
-                # tick until midnight under dry_run (run_wake — the live marker —
-                # is never called here).
-                _mark_dry_run_schedule_fired(conn, decision, now)
             else:
                 result = run_wake(conn, cfg, decision,
                                   tick_started=t_tick, gate_done=t_gate)
-                mode = result.get("mode")
-                if mode == "schedule":
-                    pass  # fresh duty window is self-contained; floor untouched.
-                elif mode != "window":
+                if result.get("mode") != "window":
                     # headless path finished -> wake over, redraw floor now.
                     integration.lie_down(conn, cfg)
                 # window path: marker set, watchdog owns lie_down.

@@ -59,7 +59,7 @@ def parse_due_at(value: str | None, tz: ZoneInfo) -> datetime | None:
 # --------------------------------------------------------------------------
 
 def _state_to_json(state: PacemakerState, base: dict | None = None) -> str:
-    obj = dict(base or {})  # preserve side-channel keys (window_tokens, schedule_fired)
+    obj = dict(base or {})  # preserve side-channel keys (window_tokens)
     # Drop any legacy desire/expect_reply/cortex_session_date keys carried in
     # from an old row (cortex_session_date: rebirth retired, 3155246).
     obj.pop("desire", None)
@@ -135,29 +135,8 @@ def window_tokens_hint(conn: sqlite3.Connection) -> int:
         return 0
 
 
-def load_schedule_fired(conn: sqlite3.Connection) -> dict:
-    """{duty name: last-fired local date} — kept on the raw state JSON (not the
-    pure PacemakerState) so it survives tick saves independently."""
-    val = _raw_state(conn).get("schedule_fired")
-    return dict(val) if isinstance(val, dict) else {}
-
-
-def mark_schedule_fired(conn: sqlite3.Connection, name: str, date: str) -> None:
-    obj = _raw_state(conn)
-    fired = obj.get("schedule_fired")
-    fired = dict(fired) if isinstance(fired, dict) else {}
-    fired[name] = date
-    obj["schedule_fired"] = fired
-    conn.execute(
-        "INSERT INTO ct_pacemaker_state (id, state, updated_at) VALUES (1, ?, ?)"
-        " ON CONFLICT(id) DO UPDATE SET state=excluded.state, updated_at=excluded.updated_at",
-        (json.dumps(obj), db.utcnow_iso()),
-    )
-    conn.commit()
-
-
 def save_state(conn: sqlite3.Connection, state: PacemakerState) -> None:
-    base = _raw_state(conn)  # keep side-channel keys (window_tokens, schedule_fired)
+    base = _raw_state(conn)  # keep side-channel keys (window_tokens)
     conn.execute(
         "INSERT INTO ct_pacemaker_state (id, state, updated_at) VALUES (1, ?, ?)"
         " ON CONFLICT(id) DO UPDATE SET state=excluded.state, updated_at=excluded.updated_at",
@@ -250,14 +229,6 @@ def _self_scheduled(cfg: dict) -> list[dict]:
     return out
 
 
-def _schedule_due(conn: sqlite3.Connection, cfg: dict, now: datetime) -> list[dict]:
-    from cortex.pacemaker import schedule as schedule_mod
-
-    entries = cfg.get("schedule", []) or []
-    fired = load_schedule_fired(conn)
-    return schedule_mod.due_duties(entries, now, fired)
-
-
 def build_context(conn: sqlite3.Connection, cfg: dict, now: datetime, state: PacemakerState) -> dict:
     pm = cfg["pacemaker"]
     last_activity = _latest_activity_at(conn)
@@ -271,7 +242,6 @@ def build_context(conn: sqlite3.Connection, cfg: dict, now: datetime, state: Pac
         "at_home": pm.get("at_home_default", True),
         "affect_flag": _read_json_file(config.affect_flag_path(cfg), None),
         "self_scheduled": _self_scheduled(cfg),
-        "schedule": _schedule_due(conn, cfg, now),
         "today_tokens": _today_tokens(conn, now),
         "events": [],
     }

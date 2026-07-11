@@ -108,19 +108,6 @@ def test_tick_resets_night_counter_on_new_night():
     assert new_state.night_wake_count == 1  # reset to 0, then incremented once
 
 
-def test_tick_pierce_wake_does_not_increment_night_counter():
-    state = PacemakerState(
-        night_cap_key="2026-07-04",
-        night_wake_count=0,
-        next_floor_due_at=NIGHT_NOW + timedelta(hours=1),
-    )
-    context = {"schedule": [{"name": "duty"}]}
-    decision, new_state = tick(state, context, base_config(), NIGHT_NOW, random.Random(1))
-    assert decision["wake"] is True
-    assert any(r.kind == "schedule" for r in decision["reasons"])
-    assert new_state.night_wake_count == 0  # schedule pierces, doesn't consume cap
-
-
 def test_tick_night_counter_untouched_outside_window():
     state = PacemakerState(
         next_floor_due_at=NOW - timedelta(seconds=1),

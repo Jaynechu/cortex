@@ -20,7 +20,6 @@ import sqlite3
 import time
 from dataclasses import replace
 from datetime import datetime
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from cortex import config, db, note, symlinks
@@ -163,66 +162,6 @@ def _latest_wake_log_id(conn: sqlite3.Connection) -> int | None:
         "SELECT id FROM ct_wake_log WHERE wake = 1 ORDER BY id DESC LIMIT 1"
     ).fetchone()
     return row["id"] if row else None
-
-
-def _schedule_reasons(decision: dict) -> list[dict]:
-    """Fired schedule (duty) reasons as fact dicts (name/prompt_path)."""
-    out = []
-    for r in decision.get("reasons", []) or []:
-        kind = r.get("kind") if isinstance(r, dict) else getattr(r, "kind", "")
-        if kind == "schedule":
-            facts = r.get("facts", {}) if isinstance(r, dict) else getattr(r, "facts", {})
-            out.append(dict(facts or {}))
-    return out
-
-
-def _duty_prompt(duty: dict) -> str | None:
-    """Read the duty's prompt_path (the actual task instructions for a
-    schedule/duty wake). Missing/unreadable file -> None, never crashes."""
-    raw = duty.get("prompt_path")
-    if not raw:
-        return None
-    path = Path(os.path.expanduser(str(raw)))
-    try:
-        text = path.read_text(encoding="utf-8").strip()
-    except OSError:
-        return None
-    return text or None
-
-
-def _schedule_wake(conn, cfg, decision, now, duties) -> dict:
-    """Schedule (duty) wake: a fresh iTerm window per duty (attention hygiene —
-    no roaming context, no handoff). Not the resident session and not resumed;
-    cortex ends it itself when the duty is done. A quiet say() requests
-    attention on spawn. Budget/night-exempt (schedule pierces the gates).
-
-    The wakeup note (Wake/budget line) gives minimal orientation; the duty's
-    prompt_path (if set and readable) carries the actual task instructions and
-    is appended after it — schedule wakes are pure-work windows, so the duty
-    prompt is the main payload. Missing/unreadable prompt file -> generic note
-    only, logged, never crashes."""
-    from cortex import window
-
-    home = str(config.cortex_home(cfg))
-    for duty in duties:
-        name = duty.get("name") or "duty"
-        note_text = assemble_note(conn, cfg, now, decision=decision,
-                                  fresh=False, wake_kind="schedule")
-        duty_prompt = _duty_prompt(duty)
-        if duty.get("prompt_path") and duty_prompt is None:
-            _audit_wake(conn, wake_id_of(now),
-                        f"schedule duty prompt_path unreadable: {name}")
-        if duty_prompt:
-            note_text = f"{note_text}\n\n{duty_prompt}"
-        try:
-            sid = window.spawn_fresh(cfg)
-            window.inject_note(cfg, note_text, sid=sid)
-            window.say(cfg)  # quiet attention request (notification), no focus steal
-        except window.WindowError:
-            _audit_wake(conn, wake_id_of(now), f"schedule window failed: {name}")
-            continue
-        integration.mark_schedule_fired(conn, name, now.date().isoformat())
-    return {"mode": "schedule", "session_id": None, "text": None, "duties": duties}
 
 
 def wake_id_of(now: datetime) -> str:
@@ -522,15 +461,6 @@ def run_wake(
 
     symlinks.ensure_all(cfg)
     timer.mark("symlinks")
-
-    # Schedule (duty) wakes short-circuit here: a fresh window per duty, never
-    # the resident session, never resumed, no daybrief render — pure干活.
-    duties = _schedule_reasons(decision)
-    if duties and cfg["wake"].get("mode", "window") == "window" and caller is call_marrow_cortex:
-        result = _schedule_wake(conn, cfg, decision, now, duties)
-        timer.mark("schedule_spawned")
-        timer.mark("wake_complete")
-        return result
 
     state = integration.load_state(conn)
     resume_sid = state.cortex_session_id

@@ -20,7 +20,7 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
 - Own repo/venv `~/CC-Lab/cortex/`; ct_ tables live on shared marrow DB (`~/.config/marrow/marrow.db`).
 - DB contract: journal_mode owned by marrow (DELETE, marrow/storage.py:399); cortex sets busy_timeout=30000 only (db.py:100). Comment-only contract, no runtime assert.
 - migrate() (9 CREATE IF NOT EXISTS + 3 guarded ALTERs on ct_wake_log: tokens/force_slept/net_tokens) runs on every connect; each tick process connects once (db.py:98-129).
-- Config: TOML `~/.config/marrow/cortex.toml` (env CORTEX_CONFIG), tolerant deep-merge over _DEFAULTS; legacy [bulletin]→note; [[schedule]] passed raw (config.py:165-193).
+- Config: TOML `~/.config/marrow/cortex.toml` (env CORTEX_CONFIG), tolerant deep-merge over _DEFAULTS; legacy [bulletin]→note (config.py).
 
 ## 2. Collectors (`collect_tick.py`, `collectors/`)
 
@@ -35,21 +35,19 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
 ## 3. Pacemaker (`pacemaker/`)
 
 - core.tick(state, context, config, now, rng) pure — no I/O/wall-clock (core.py:1-8). PacemakerState frozen: next_floor_due_at, last_wake_at, last_lie_down_at, night_cap_key/count, cortex_session_id/date (core.py:19-32). Desire/expect_reply retired; legacy keys dropped on load (integration.py:61-90).
-- Triggers (triggers.py): kinds event (unwired, always []) · affect_flag · self_scheduled (due_at <= now) · schedule · floor (due when now >= next_floor_due_at). Facts only, no motive strings. Collision: any real reason silences plain floor for that tick (triggers.py:81-108). reschedule_floor = uniform draw [floor_min_min, floor_max_min] (10/55) or explicit clamped minutes (triggers.py:111-131).
+- Triggers (triggers.py): kinds event (unwired, always []) · affect_flag · self_scheduled (due_at <= now) · floor (due when now >= next_floor_due_at). Facts only, no motive strings. Collision: any real reason silences plain floor for that tick. reschedule_floor = uniform draw [floor_min_min, floor_max_min] (10/55) or explicit clamped minutes.
 - Floor redraw on fire happens BEFORE gates, from tick time; real wakes get re-anchored to lie-down time later by integration.lie_down — gated ticks correctly keep the tick-time anchor (core.py:56-59, verified intended).
-- Gates (gates.py): night window (wrap-capable, night_key = ISO date window started) cap night_wake_count vs gates.night.cap; daily_budget vs context today_tokens (1M default, <=0 disables). PIERCE_KINDS = {schedule} only — event/affect_flag/self_scheduled/floor all gated. run_gates evaluates all gates, no short-circuit; wake = reasons and not gated_by (gates.py:26-111, core.py:65-67).
-- NB "pierce" is overloaded: triggers.py:96 local `pierce` = real-reason set (4 kinds) silencing floor; gates.PIERCE_KINDS = gate bypass (1 kind). Two unrelated concepts.
-- integration.py = sole I/O owner. State = single-row JSON ct_pacemaker_state id=1; side-channel keys window_tokens (store_window_tokens) + schedule_fired {duty: local_date} survive independently of dataclass saves (integration.py:61-142).
-- build_context: active_session = ct_activity within 5min; cal_busy/at_home = config defaults (unwired); affect_flag + self_schedule from JSON files; schedule = due_duties(entries, now, fired); today_tokens = Cortex Today = today's finished-window final occupancies (per-window last `tokens`, closed by an occupancy drop) + live window_tokens hint (integration._today_tokens); events [] (integration.py:164-238).
-- run_tick: load → build_context → tick → save_state + write_wake_log (every tick, incl dry_run) → decision (integration.py:278-292).
-- schedule.due_duties pure: skips disabled/malformed/future/already-fired-today; a passed duty stays due till fired recorded or midnight (schedule.py:22-43).
-- Entry pacemaker_tick.py:70-104: _night_close (inject wrap-up prompt once/night if awake, else set_rotated once/night) runs BEFORE awake-guard; _handle_awake reaps stale wake (transcript idle >= 15min → proxy lie_down(stale)) else skips tick; wake fired: dry_run → integration.lie_down + _mark_dry_run_schedule_fired (marks kind=='schedule' reasons fired so a due duty does not re-fire every tick till midnight); live → wake.run_wake, then integration.lie_down only for headless mode ('schedule'/'window' own their lie_down).
+- Gates (gates.py): night window (wrap-capable, night_key = ISO date window started) cap night_wake_count vs gates.night.cap; daily_budget vs context today_tokens (1M default, <=0 disables). No gate bypass — all wake sources gated. run_gates evaluates all gates, no short-circuit; wake = reasons and not gated_by (gates.py, core.py).
+- NB triggers.py local `pierce` = real-reason set silencing floor (floor-collision only, not a gate bypass).
+- integration.py = sole I/O owner. State = single-row JSON ct_pacemaker_state id=1; side-channel key window_tokens (store_window_tokens) survives independently of dataclass saves (integration.py).
+- build_context: active_session = ct_activity within 5min; cal_busy/at_home = config defaults (unwired); affect_flag + self_schedule from JSON files; today_tokens = Cortex Today = today's finished-window final occupancies (per-window last `tokens`, closed by an occupancy drop) + live window_tokens hint (integration._today_tokens); events [] (integration.py).
+- run_tick: load → build_context → tick → save_state + write_wake_log (every tick, incl dry_run) → decision (integration.py).
+- Entry pacemaker_tick.py: _night_close (inject wrap-up prompt once/night if awake, else set_rotated once/night) runs BEFORE awake-guard; _handle_awake reaps stale wake (transcript idle >= 15min → proxy lie_down(stale)) else skips tick; wake fired: dry_run → integration.lie_down; live → wake.run_wake, then integration.lie_down only for headless mode ('window' owns its lie_down).
 
 ## 4. Wake runner (`wake.py`)
 
-- run_wake (wake.py:281-382): schedule wakes short-circuit first (only when duties present AND mode='window' AND real caller, wake.py:313); then symlinks.ensure_all, assemble_note, window path (mode='window' AND real caller) else marrow subprocess. No date comparison in run_wake — freshness comes from the rotate flag (night_close sets it once/night; next-morning first wake respawns fresh = the rebirth).
-- WakeTimer latency probe always-on: wake_id + CORTEX_WAKE_ID / CORTEX_WAKE_TIMING_LOG env; marks tick_fire→gate_eval→symlinks→note→window_injected/wake_complete into wake_timing log; marrow subprocess shares origin via env (timing.py, wake.py:297-305).
-- Schedule path _schedule_wake (wake.py:155-187): per duty spawn_fresh (never resident, sid unpersisted) → inject_note(note + duty prompt_path) → say() ping → mark_schedule_fired; window failure audited + skipped.
+- run_wake (wake.py): symlinks.ensure_all, assemble_note, window path (mode='window' AND real caller) else marrow subprocess. No date comparison in run_wake — freshness comes from the rotate flag (night_close sets it once/night; next-morning first wake respawns fresh = the rebirth).
+- WakeTimer latency probe always-on: wake_id + CORTEX_WAKE_ID / CORTEX_WAKE_TIMING_LOG env; marks tick_fire→gate_eval→symlinks→note→window_injected/wake_complete into wake_timing log; marrow subprocess shares origin via env (timing.py, wake.py).
 - Wake classifier _window_wake_plan (wake.py): fresh (rotate flag via take_rotated | newest transcript ≠ recorded = deliberate /clear) | resume (sid dead/gone | claude pid gone, no flag) | ear (alive+unrotated; None recorded hint stays ear). Consumes rotate flag once/wake. _window_rotated = back-compat bool (plan != ear).
 - Window path _window_wake (wake.py): write note file (marrow hook reads it) → fresh (respawn=True) → _spawn_wake(resume=False) emoji prompt; dead+no-flag → _resume_or_fresh_dead: claude_session_id present → _spawn_wake(resume=True) relaunch `--resume <uuid>` same conversation no catchup; absent → fresh + died_no_handoff catchup note when handoff not written this window. Alive resident → append bell line to signal log → _signal_landed polls transcript mtime 3s up to ear_timeout 90s.
 - Ear-miss ladder (alive window, wake.py _ear_miss_ladder): (a) type_wake_signal rearm line into window, poll again → land = ear wake; (b) claude dead → _resume_or_fresh_dead; rearmed-unconfirmed → caller set_awake anyway. Respawn failure (WindowError in _spawn_wake) = SOLE alert point → _alert_respawn_failed writes marrow alerts row (audit_log fallback).
@@ -123,7 +121,6 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
 
 - Live: collectors (knowledgec) · pacemaker ticks (dry_run) · wake window path + watchdog + fuse · note · daybrief render (marrow subprocess) · MCP lie_down/wait/say · symlinks.
 - Unwired: event triggers · cal_busy/at_home real data · health/geofence collectors (flagged off, no export producer).
-- Duties ([[schedule]]): mechanism shipped, both live duties enabled=false pending prompts.
 
 ## 12. Marrow-side organs
 
