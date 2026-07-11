@@ -61,8 +61,12 @@ def _handle_awake(conn, cfg: dict, st: dict) -> str:
     silence tier held (e.g. a live wait_until) yet the transcript is long idle."""
     from cortex.watchdog import silence_action
     mt = transcript.mtime(cfg)
+    # No transcript mtime = no data. silence_action must see 0.0 (hold, don't
+    # insta-sleep on a missing transcript — matches watchdog.run's fallback so
+    # the shared silence_action gets one "no data" behaviour). The stale-reap
+    # below keeps 1e9 so a genuinely gone transcript is still reaped.
     idle = (time.time() - mt) / 60.0 if mt else 1e9
-    action = silence_action(cfg, idle)
+    action = silence_action(cfg, idle if mt else 0.0)
     if action and not wake_state.load(cfg).get("awake"):
         return f"awake gate: {action} (idle {idle:.0f}min)"
     stale_min = float(cfg["wake"].get("stale", {}).get("threshold_min", 15))

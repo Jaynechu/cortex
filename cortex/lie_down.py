@@ -95,9 +95,17 @@ def lie_down(cfg: dict, force_slept: str | None = None, rotate: bool = False,
 
     if next_wake_min is not None:
         next_wake_min = clamp_next_wake_minutes(next_wake_min, cfg)
+    # Atomic awake claim: the watchdog (60s poll) and the tick awake-branch can
+    # both run silence_action in the same window; only the caller that clears the
+    # awake marker here proceeds, so the ct_wake_log update + floor redraw fire
+    # once. A later caller (already cleared) no-ops. awake=true callers win as
+    # before.
+    state = wake_state.claim_lie_down(cfg)
+    if state is None:
+        return {"skipped": "not awake", "force_slept": force_slept,
+                "rotated": rotate, "next_wake": None}
     conn = db.connect(cfg)
     try:
-        state = wake_state.load(cfg)
         tokens = _record_tokens(conn, cfg, state, force_slept)
         cleared = _clear_due_self_schedule(cfg)
         # wake redraw from now; next_floor drives the next_wake HH:MM the marrow
@@ -114,7 +122,7 @@ def lie_down(cfg: dict, force_slept: str | None = None, rotate: bool = False,
         # fresh window (SIGTERM claude + fresh spawn) that reads the handoff.
         if rotate:
             wake_state.set_rotated(cfg)
-        wake_state.clear_awake(cfg)
+        # awake marker already cleared atomically by claim_lie_down at entry.
         _arm_sentinel(cfg, next_floor)
         next_wake = _local_hm(next_floor, cfg)
         return {"tokens": tokens, "cleared_due": cleared,

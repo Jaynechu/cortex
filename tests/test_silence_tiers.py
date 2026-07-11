@@ -155,3 +155,40 @@ def test_awake_gate_asleep_still_fires(cfg, monkeypatch):
     normal tick decision path runs (asleep+due -> emit as today)."""
     # No awake marker set -> is_awake False.
     assert wake_state.is_awake(cfg) is False
+
+
+# --- double-fire guard (watchdog poll + tick awake-branch same window) ---------
+
+def test_lie_down_double_fire_single_effect(awake_no_sentinel, monkeypatch):
+    """Watchdog (60s poll) and tick awake-branch can both proxy lie_down in the
+    same window. The atomic awake claim => exactly one acts (real result), the
+    other no-ops; ct_wake_log force_slept + floor redraw happen once each."""
+    from cortex import lie_down as lie_down_mod
+    from cortex.pacemaker import integration
+    cfg = awake_no_sentinel
+
+    redraws = []
+    real_floor = integration.lie_down
+    monkeypatch.setattr(
+        "cortex.pacemaker.integration.lie_down",
+        lambda conn, cfg, minutes=None: redraws.append(1) or real_floor(conn, cfg, minutes=minutes))
+
+    wid = wake_state.load(cfg)["wake_log_id"]
+    r1 = lie_down_mod.lie_down(cfg, force_slept="auto")
+    r2 = lie_down_mod.lie_down(cfg, force_slept="auto")
+
+    # One winner (has next_wake / tokens), one no-op (skipped).
+    winners = [r for r in (r1, r2) if "skipped" not in r]
+    skipped = [r for r in (r1, r2) if r.get("skipped") == "not awake"]
+    assert len(winners) == 1 and len(skipped) == 1
+    assert wake_state.is_awake(cfg) is False
+    # Single floor redraw.
+    assert len(redraws) == 1
+    # Single ct_wake_log write: force_slept stamped exactly once on this row.
+    conn = db.connect(cfg)
+    try:
+        row = conn.execute(
+            "SELECT force_slept FROM ct_wake_log WHERE id=?", (wid,)).fetchone()
+    finally:
+        conn.close()
+    assert row["force_slept"] == "auto"

@@ -39,7 +39,11 @@ def watchdog_pidfile_path(cfg: dict) -> Path:
 
 def lock_path(cfg: dict) -> Path:
     """Sibling .lock file guarding load-modify-write. Shared byte-for-byte with
-    the marrow hook side so cross-process updates never lose each other."""
+    the marrow hook side so cross-process updates never lose each other.
+    COUPLED: base = [paths].wake_state_file / [paths].cortex_home. Marrow's side
+    (cortex_bridge._wake_state_lock via _cortex_wake_state_path) resolves from
+    marrow [cortex].wake_state_file / [cortex].home — override one without the
+    other and the two lock files split (silent lost update)."""
     return wake_state_path(cfg).with_suffix(".lock")
 
 
@@ -148,6 +152,24 @@ def clear_awake(cfg: dict) -> None:
         for k in _AWAKE_KEYS:
             d.pop(k, None)
         _save(cfg, d)
+
+
+def claim_lie_down(cfg: dict) -> dict | None:
+    """Atomic read-and-clear of the awake marker under the wake_state flock, so
+    exactly one lie_down proceeds when the watchdog (60s poll) and the tick
+    awake-branch both fire silence_action in the same window. Returns the
+    pre-clear state snapshot (incl. wake_log_id) to the single winner (was awake,
+    now cleared -> do the full lie_down); None to any later caller (already
+    cleared -> no-op). Same lock/keys as clear_awake."""
+    with _flock(cfg):
+        d = load(cfg)
+        if not d.get("awake"):
+            return None
+        snapshot = dict(d)
+        for k in _AWAKE_KEYS:
+            d.pop(k, None)
+        _save(cfg, d)
+        return snapshot
 
 
 def user_replied_this_wake(cfg: dict) -> bool:
