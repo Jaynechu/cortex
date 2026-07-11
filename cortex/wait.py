@@ -25,8 +25,7 @@ def wait(cfg: dict, minutes: float) -> dict:
     used = wake_state.get_wait_count(cfg)
     if cap > 0 and used >= cap:
         return {"ok": False, "refused": True, "wait_count": used, "cap": cap,
-                "reason": f"wait() cap reached ({used}/{cap} this wake) — "
-                          "lie_down or do nothing (10min silence auto-sleeps)."}
+                "reason": f"Wait cap reached ({used}/{cap}) - lie_down now."}
     minutes = clamp_window_minutes(minutes, cfg)
     until = datetime.now(timezone.utc) + timedelta(minutes=minutes)
     wake_state.set_wait_until(cfg, until.isoformat())

@@ -146,10 +146,10 @@ _DEFAULTS: dict[str, Any] = {
         # One-line turn-end reminder appended at the very end of every rendered
         # note. "" omits it.
         "turn_end_text":
-            "NOTE: choose wait time or next wake time at the end of each turn. "
-            "Wait: empty (default) / wait(N) [N=11-55]; sleep: "
-            "lie_down(next_wake_min=N, or omit = dice). Pls leave empty during "
-            "casual chat with user.",
+            "NOTE: Call MCP tool to wait or lie_down at the end of each turn. "
+            "Wait=wait(N) [N=1-55]; sleep=lie_down(next_wake_min=N) [1-240]. "
+            "Skip call = sleep in 5 mins. Auto timer is on during active chat "
+            "- no call needed.",
         # Header written into a freshly-created wishlist.md (append-only file,
         # never overwritten). Display text — customise freely.
         "wishlist_header":

@@ -78,16 +78,16 @@ def test_render_omits_absent_lines(cfg):
 def test_render_turn_end_line_appears_every_render(cfg):
     text = note.render(cfg, NOW, {})
     assert text.rstrip().endswith(
-        "NOTE: choose wait time or next wake time at the end of each turn. "
-        "Wait: empty (default) / wait(N) [N=11-55]; sleep: "
-        "lie_down(next_wake_min=N, or omit = dice). Pls leave empty during "
-        "casual chat with user.")
+        "NOTE: Call MCP tool to wait or lie_down at the end of each turn. "
+        "Wait=wait(N) [N=1-55]; sleep=lie_down(next_wake_min=N) [1-240]. "
+        "Skip call = sleep in 5 mins. Auto timer is on during active chat "
+        "- no call needed.")
 
 
 def test_render_turn_end_line_omitted_when_blank(cfg):
     cfg["note"]["turn_end_text"] = ""
     text = note.render(cfg, NOW, {})
-    assert "NOTE: choose wait time" not in text
+    assert "NOTE: Call MCP tool" not in text
 
 
 def test_render_title_prepended_with_blank_line(cfg):
