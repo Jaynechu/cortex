@@ -179,20 +179,29 @@ def test_last_wake_none_when_only_current(marrow_conn):
 
 
 def test_today_tokens_melbourne_local_boundary(marrow_conn):
+    """Only today's local-date rows enter the per-window metric. Two of today's
+    rows form one window (30k -> 60k); a yesterday and a tomorrow row are
+    excluded by the local-date filter, so they never open a spurious window /
+    drop. The single today-run is the current window -> its final is added via
+    the live hint (60k here)."""
+    from cortex.pacemaker import integration
     # now = 2026-07-08 00:30 AEST (+10) => UTC 2026-07-07T14:30Z
     now = datetime(2026, 7, 8, 0, 30, tzinfo=MEL)
     rows = [
-        # 2026-07-07T20:00Z -> 2026-07-08 06:00 AEST = today local -> counted
-        ("2026-07-07T20:00:00+00:00", 100),
         # 2026-07-07T13:00Z -> 2026-07-07 23:00 AEST = yesterday local -> excluded
         ("2026-07-07T13:00:00+00:00", 999),
+        # 2026-07-07T20:00Z -> 2026-07-08 06:00 AEST = today local -> counted
+        ("2026-07-07T20:00:00+00:00", 30_000),
+        # 2026-07-07T20:30Z -> today local, same window grows -> final 60k
+        ("2026-07-07T20:30:00+00:00", 60_000),
         # 2026-07-08T15:00Z -> 2026-07-09 01:00 AEST = tomorrow local -> excluded
         ("2026-07-08T15:00:00+00:00", 555),
     ]
     marrow_conn.executemany(
         "INSERT INTO ct_wake_log (ts, wake, dry_run, tokens) VALUES (?, 1, 0, ?)", rows)
     marrow_conn.commit()
-    assert note._today_tokens(marrow_conn, now) == 100
+    integration.store_window_tokens(marrow_conn, 60_000)  # today's run is the live window
+    assert note._today_tokens(marrow_conn, now) == 60_000
 
 
 def test_replay_events_channel_time_and_truncation(marrow_conn, cfg):

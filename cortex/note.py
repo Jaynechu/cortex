@@ -22,6 +22,7 @@ from zoneinfo import ZoneInfo
 
 from cortex import config
 from cortex.pacemaker.integration import parse_due_at
+from cortex.pacemaker.integration import _today_tokens as _integration_today_tokens
 
 # ct_rate_limit is a flat kv table (key, value, updated_at) the marrow-side
 # collector owns (usage_snapshot). Keys read here: five_hour_pct /
@@ -93,34 +94,11 @@ def _last_wake(conn: sqlite3.Connection, now: datetime) -> dict | None:
 
 
 def _today_tokens(conn: sqlite3.Connection, now: datetime) -> int:
-    """SUM(COALESCE(net_tokens, tokens)) for today's Melbourne-local date — must
-    agree with the daily-budget gate (pacemaker.integration._today_tokens): NET
-    spend (cache-miss rewrite + output), pre-migration rows fall back to total
-    `tokens`. net_tokens is now a PER-WAKE DELTA (lie_down._record_tokens records
-    the spend since the last cumulative, not the running cumulative), so summing
-    the column gives the true day total instead of re-counting each cumulative.
-    ts is UTC ISO, so filter from local midnight converted to UTC then compare
-    local dates."""
-    start_local = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    start_utc = start_local.astimezone(ZoneInfo("UTC")).isoformat()
-    try:
-        rows = conn.execute(
-            "SELECT ts, COALESCE(net_tokens, tokens) AS spend FROM ct_wake_log "
-            "WHERE tokens IS NOT NULL AND ts >= ?",
-            (start_utc,),
-        ).fetchall()
-    except sqlite3.OperationalError:
-        return 0
-    total = 0
-    today = now.date()
-    tz = now.tzinfo
-    for row in rows:
-        try:
-            if _parse_utc(row["ts"]).astimezone(tz).date() == today:
-                total += int(row["spend"])
-        except (TypeError, ValueError):
-            continue
-    return total
+    """Cortex Today = sum of today's finished-window final occupancies + the
+    current live window occupancy. Delegates to the daily-budget gate's helper
+    (pacemaker.integration._today_tokens) so the note line and the gate always
+    show the same figure (parity by construction, not by two copies)."""
+    return _integration_today_tokens(conn, now)
 
 
 def _rate_limit_kv(conn: sqlite3.Connection) -> dict:

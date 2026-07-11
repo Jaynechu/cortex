@@ -103,10 +103,10 @@ _DEFAULTS: dict[str, Any] = {
             "close_prompt": "Night window is open. Write your handoff entry now, "
                             "then call lie_down to end this wake.",
         },
-        # Daily wake-token budget: once today's SUM(NET spend — cache-miss
-        # rewrite + output, ct_wake_log.net_tokens with a tokens fallback)
+        # Daily wake-token budget: once Cortex Today (sum of today's finished-
+        # window final context occupancies + the current live window occupancy)
         # reaches this, self-wakes stop; schedule pierces; resets at local
-        # midnight. Net semantics — cache reads are near-free.
+        # midnight.
         "daily_budget": {"tokens": 1_000_000},
     },
     "triggers": {

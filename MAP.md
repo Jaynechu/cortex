@@ -40,7 +40,7 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
 - Gates (gates.py): night window (wrap-capable, night_key = ISO date window started) cap night_wake_count vs gates.night.cap; daily_budget vs context today_tokens (1M default, <=0 disables). PIERCE_KINDS = {schedule} only — event/affect_flag/self_scheduled/floor all gated. run_gates evaluates all gates, no short-circuit; wake = reasons and not gated_by (gates.py:26-111, core.py:65-67).
 - NB "pierce" is overloaded: triggers.py:96 local `pierce` = real-reason set (4 kinds) silencing floor; gates.PIERCE_KINDS = gate bypass (1 kind). Two unrelated concepts.
 - integration.py = sole I/O owner. State = single-row JSON ct_pacemaker_state id=1; side-channel keys window_tokens (store_window_tokens) + schedule_fired {duty: local_date} survive independently of dataclass saves (integration.py:61-142).
-- build_context: active_session = ct_activity within 5min; cal_busy/at_home = config defaults (unwired); affect_flag + self_schedule from JSON files; schedule = due_duties(entries, now, fired); today_tokens = SUM COALESCE(net_tokens,tokens) local-day from ct_wake_log; events [] (integration.py:164-238).
+- build_context: active_session = ct_activity within 5min; cal_busy/at_home = config defaults (unwired); affect_flag + self_schedule from JSON files; schedule = due_duties(entries, now, fired); today_tokens = Cortex Today = today's finished-window final occupancies (per-window last `tokens`, closed by an occupancy drop) + live window_tokens hint (integration._today_tokens); events [] (integration.py:164-238).
 - run_tick: load → build_context → tick → save_state + write_wake_log (every tick, incl dry_run) → decision (integration.py:278-292).
 - schedule.due_duties pure: skips disabled/malformed/future/already-fired-today; a passed duty stays due till fired recorded or midnight (schedule.py:22-43).
 - Entry pacemaker_tick.py:70-104: _night_close (inject wrap-up prompt once/night if awake, else set_rotated once/night) runs BEFORE awake-guard; _handle_awake reaps stale wake (transcript idle >= 15min → proxy lie_down(stale)) else skips tick; wake fired: dry_run → integration.lie_down + _mark_dry_run_schedule_fired (marks kind=='schedule' reasons fired so a due duty does not re-fire every tick till midnight); live → wake.run_wake, then integration.lie_down only for headless mode ('schedule'/'window' own their lie_down).
@@ -82,7 +82,7 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
 ## 5. lie_down / wait / say
 
 - Exposed as env-gated MCP tools in marrow daemon (MARROW_CORTEX=1), subprocess `-m cortex.<mod>`; also CLI mains for watchdog proxy use.
-- lie_down (lie_down.py): record tokens+net into ct_wake_log (sole writer of those columns; bare `except: pass` — known silent-drop finding) → clear due self_schedule entries → integration.lie_down floor redraw from now (explicit next_wake_min clamped, or dice; returns next_floor dt) → publish window occupancy (tokens) via store_window_tokens → kill watchdog (SIGTERM, skip if self) → optional set_rotated → clear_awake. Result dict adds next_wake=HH:MM (local tz, marrow MCP wrapper surfaces it); CLI main prints result JSON.
+- lie_down (lie_down.py): record window occupancy `tokens` into ct_wake_log (sole writer; bare `except: pass` — known silent-drop finding; net_tokens column now historical, unwritten) → clear due self_schedule entries → integration.lie_down floor redraw from now (explicit next_wake_min clamped, or dice; returns next_floor dt) → publish window occupancy (tokens) via store_window_tokens → kill watchdog (SIGTERM, skip if self) → optional set_rotated → clear_awake. Result dict adds next_wake=HH:MM (local tz, marrow MCP wrapper surfaces it); CLI main prints result JSON.
 - wait (wait.py:23-35): one-shot watchdog silence extension; cap wake.wait_max_per_wake (2) per wake; minutes clamped via triggers floor_min_min/floor_max_min (10/55 defaults — shared with the wake-window bounds, retuning one retunes both); writes deadline + bumps counter (two separate RMW writes).
 - say (say.py, window.py:476-483): sound + front resident window — urgent-only attention ping (marrow 4c6209a), everything else stays silent; --note flag accepted but ignored (CLI symmetry only).
 
@@ -90,7 +90,7 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
 
 - gather (note.py:311-340): every section behind _safe() — assembly never crashes. render pure, sections omit cleanly when absent (note.py:386-446).
 - Sections: header Now/Plan Used/Active [+ force_slept_catchup_text | + died_no_handoff_catchup_text when data.died_no_handoff, gather/render kwarg] · Pending self-schedule (due within note.pending_window_min 15) · Replay (last note.replay_events 4 user/assistant events, excl channels ('ct',), marker-stripped, 300ch each) · note.turn_end_text trailer · note.title prefix. "Wake:" reason line retired (wander-only, no signal; _wake_parts/_reason_kind_detail gone).
-- Budget line (note.py:449-475): `Plan Used: 5h X% | 7d Y% | Cortex Today Nk/Mk | Net Session Token: Wk` — 5h/7d from ct_rate_limit kv (marrow usage_snapshot); Cortex Today = ct_wake_log local-day sum (dup of integration._today_tokens, must stay in sync — note.py:132); Net Session = window_tokens key from ct_pacemaker_state, carries window occupancy (statusline total, published by watchdog/lie_down) — label kept for cross-system consistency with marrow's threshold line, not net spend.
+- Budget line (note.py:449-475): `Plan Used: 5h X% | 7d Y% | Cortex Today Nk/Mk | Net Session Token: Wk` — 5h/7d from ct_rate_limit kv (marrow usage_snapshot); Cortex Today = today's finished-window final occupancies + live window (note._today_tokens delegates to integration._today_tokens — parity by construction); Net Session = window_tokens key from ct_pacemaker_state, carries window occupancy (statusline total, published by watchdog/lie_down) — label kept for cross-system consistency with marrow's threshold line, not net spend.
 - _last_wake skips rows younger than 90s to avoid self-reporting the current wake (note.py:106-127).
 - _strip_markers = deliberate local copy of marrow strip_media_markers (marrow not importable from cortex venv), regexes byte-identical today (note.py:189-204 vs marrow/transcript.py:97-117) — drift risk tracked in priority queue.
 - Handoff injection happens at marrow SessionStart, not note.py; cal/rem lines retired pending global inject (note.py:9-10).
@@ -99,8 +99,8 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
 
 - _munge replicates CC cwd→projects dirname; transcript_dir overridable via paths.transcript_dir (transcript.py:14-26). newest() = latest-mtime top-level *.jsonl (subagent files live in subagents/ subdir, naturally excluded).
 - window_tokens = LAST usage line's input+cache_read+cache_creation+output → current context occupancy; drives watchdog fuse only (rotate is flag/liveness-based, not token) (transcript.py:42-64, watchdog.py:153).
-- net_tokens = SUM of cache_creation+output across session → real spend; drives budget gate + note (transcript.py:67-91).
-- Both return 0 silently on read errors; mtime() drives rotation detection + ear polling.
+- net_tokens transcript helper retired; Cortex Today (budget gate + note) now sums per-window final occupancy, not per-turn net spend.
+- window_tokens returns 0 silently on read errors; mtime() drives rotation detection + ear polling.
 
 ## 8. daybrief.md (retired day_log)
 

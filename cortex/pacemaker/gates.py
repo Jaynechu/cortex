@@ -12,7 +12,7 @@ Expected config shape (config["gates"]):
 
 Expected context keys used here:
     "trigger_kinds": list[str]           # fired TriggerReason kinds, set by core.tick
-    "today_tokens": int                  # SUM(ct_wake_log.tokens) for today (integration)
+    "today_tokens": int                  # Cortex Today: today's finished-window final occupancies + live window (integration)
 """
 
 from __future__ import annotations

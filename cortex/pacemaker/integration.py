@@ -122,35 +122,17 @@ def _raw_state(conn: sqlite3.Connection) -> dict:
         return {}
 
 
-# Side-channel key holding the LAST-reported whole-session cumulative net spend
-# (transcript.net_tokens). lie_down records only the DELTA since this baseline
-# into ct_wake_log.net_tokens, so one window lying down N times a night no
-# longer re-counts its running cumulative N times (the 647k-vs-170k bug).
-_NET_REPORTED_KEY = "net_reported_cum"
-
-
-def load_net_reported(conn: sqlite3.Connection) -> int:
-    """Last-reported whole-session cumulative net spend (0 if unseeded). The
-    delta baseline for lie_down._record_tokens — kept on the raw state JSON so
-    it survives tick/floor-redraw save_state independently of the dataclass."""
-    val = _raw_state(conn).get(_NET_REPORTED_KEY)
+def window_tokens_hint(conn: sqlite3.Connection) -> int:
+    """Live window occupancy published on the ct_pacemaker_state JSON
+    (store_window_tokens). 0 if absent/unparseable. This is the current window's
+    contribution to Cortex Today (the last finished-window run has already lain
+    down; the live window's growth is only visible here, fresher than its last
+    ct_wake_log row)."""
+    val = _raw_state(conn).get("window_tokens")
     try:
         return int(val) if val is not None else 0
     except (TypeError, ValueError):
         return 0
-
-
-def store_net_reported(conn: sqlite3.Connection, cum: int | None) -> None:
-    """Persist the new cumulative baseline (merged into the raw JSON so it
-    survives independently of tick saves — same mechanism as window_tokens)."""
-    obj = _raw_state(conn)
-    obj[_NET_REPORTED_KEY] = int(cum) if cum else 0
-    conn.execute(
-        "INSERT INTO ct_pacemaker_state (id, state, updated_at) VALUES (1, ?, ?)"
-        " ON CONFLICT(id) DO UPDATE SET state=excluded.state, updated_at=excluded.updated_at",
-        (json.dumps(obj), db.utcnow_iso()),
-    )
-    conn.commit()
 
 
 def load_schedule_fired(conn: sqlite3.Connection) -> dict:
@@ -193,35 +175,57 @@ def _latest_activity_at(conn: sqlite3.Connection) -> datetime | None:
     return _parse_dt(row["ts"]) if row and row["ts"] else None
 
 
-def _today_tokens(conn: sqlite3.Connection, now: datetime) -> int:
-    """SUM(COALESCE(net_tokens, tokens)) for `now`'s local date — the daily
-    budget gate counts NET spend (cache-miss rewrite + output); a pre-migration
-    row with no net_tokens degrades to its total `tokens`. net_tokens is a
-    PER-WAKE DELTA (lie_down._record_tokens records spend since the last
-    cumulative), so the SUM is the true day total, not re-counted cumulatives —
-    twin of note._today_tokens, keep in sync. ts is stored UTC ISO; filter from
-    local midnight (converted to UTC) then confirm the local date so the gate
-    resets naturally at local midnight."""
+def _finished_window_finals(conn: sqlite3.Connection, now: datetime) -> int:
+    """Cortex Today, finished part = SUM over today's finished windows of each
+    window's FINAL context occupancy (ct_wake_log.tokens, recorded by lie_down).
+
+    Occupancy grows monotonically within a window (each lie_down of the same
+    window is >= the last); a fresh/respawned or resumed window restarts lower,
+    so a drop vs the previous row marks a new window. Walking today's tokens
+    rows in ts order, each monotonic run is one window and its LAST value is
+    that window's final. The trailing run is the CURRENT window — excluded here
+    (its live occupancy is added on top via window_tokens_hint) so it is counted
+    once, from the fresher live figure, not double-counted.
+
+    Agent/subagent tokens never appear in occupancy by construction, so they are
+    excluded automatically. ts is stored UTC ISO; filter from local midnight
+    (converted to UTC) then confirm the local date so the day resets at local
+    midnight."""
     tz = now.tzinfo
     start_utc = now.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(
         ZoneInfo("UTC")).isoformat()
     try:
         rows = conn.execute(
-            "SELECT ts, COALESCE(net_tokens, tokens) AS spend FROM ct_wake_log "
-            "WHERE tokens IS NOT NULL AND ts >= ?",
+            "SELECT ts, tokens FROM ct_wake_log "
+            "WHERE tokens IS NOT NULL AND ts >= ? ORDER BY ts ASC",
             (start_utc,),
         ).fetchall()
     except sqlite3.OperationalError:
         return 0
-    total = 0
     today = now.date()
+    occ: list[int] = []
     for row in rows:
         try:
             if _parse_dt(row["ts"]).astimezone(tz).date() == today:
-                total += int(row["spend"])
+                occ.append(int(row["tokens"]))
         except (TypeError, ValueError, AttributeError):
             continue
+    total = 0
+    prev = None
+    for i, val in enumerate(occ):
+        # A drop from the previous row closes a window: the previous value was
+        # its final. The very last run (current window) is never closed here.
+        if prev is not None and val < prev:
+            total += prev
+        prev = val
     return total
+
+
+def _today_tokens(conn: sqlite3.Connection, now: datetime) -> int:
+    """Cortex Today = today's finished-window finals + the current live window
+    occupancy. Drives the daily budget gate; twin of note._today_tokens (they
+    must agree — same helpers, same figure)."""
+    return _finished_window_finals(conn, now) + window_tokens_hint(conn)
 
 
 def _read_json_file(path, default):

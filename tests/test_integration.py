@@ -226,10 +226,15 @@ def test_schedule_fired_persists_across_save_state(conn, cfg):
 
 def test_daily_budget_gates_floor_and_schedule_pierces(conn, cfg):
     now = datetime(2026, 7, 8, 12, 0, tzinfo=MEL)  # daytime, outside night
-    start_utc = now.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(
-        timezone.utc).isoformat()
-    conn.execute("INSERT INTO ct_wake_log (ts, wake, dry_run, tokens) VALUES (?,1,0,?)",
-                 (start_utc, cfg["gates"]["daily_budget"]["tokens"]))
+    day = now.replace(hour=1, minute=0, second=0, microsecond=0).astimezone(
+        timezone.utc)
+    cap = cfg["gates"]["daily_budget"]["tokens"]
+    # a FINISHED window (run peaks over cap, then a lower window closes it) puts
+    # Cortex Today over the cap
+    conn.executemany(
+        "INSERT INTO ct_wake_log (ts, wake, dry_run, tokens) VALUES (?,1,0,?)",
+        [(day.isoformat(), cap + 5_000),
+         ((day + timedelta(minutes=5)).isoformat(), 3_000)])
     conn.commit()
     # floor is gated by daily budget
     integration.save_state(conn, PacemakerState(next_floor_due_at=now - timedelta(minutes=1)))
@@ -243,32 +248,39 @@ def test_daily_budget_gates_floor_and_schedule_pierces(conn, cfg):
     assert any(r.kind == "schedule" for r in decision2["reasons"])
 
 
-def test_daily_budget_uses_net_tokens_over_total(conn, cfg):
-    """The gate sums COALESCE(net_tokens, tokens): a row with net_tokens set
-    counts NET spend, not the (much larger) total occupancy in `tokens`."""
+def test_daily_budget_single_open_window_under_cap(conn, cfg):
+    """One window's occupancy (a single monotonic run, still the current window)
+    is NOT a finished final and is counted only via the live hint. With no live
+    hint published, Cortex Today = 0 even if the occupancy row is huge -> not
+    gated."""
     now = datetime(2026, 7, 8, 12, 0, tzinfo=MEL)
     start_utc = now.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(
         timezone.utc).isoformat()
     cap = cfg["gates"]["daily_budget"]["tokens"]
-    # total occupancy is way over cap, but net spend is a small fraction of it
-    conn.execute(
-        "INSERT INTO ct_wake_log (ts, wake, dry_run, tokens, net_tokens) VALUES (?,1,0,?,?)",
-        (start_utc, cap * 3, 100))
+    conn.execute("INSERT INTO ct_wake_log (ts, wake, dry_run, tokens) VALUES (?,1,0,?)",
+                 (start_utc, cap * 3))  # trailing (open) window -> not a finished final
     conn.commit()
     integration.save_state(conn, PacemakerState(next_floor_due_at=now - timedelta(minutes=1)))
     decision = integration.run_tick(conn, cfg, now=now, rng=random.Random(1))
-    assert decision["wake"] is True  # net (100) is far under cap -> not gated
+    assert decision["wake"] is True  # 0 today (no finished final, no live hint)
     assert not any(g.name == "daily_budget" for g in decision["gated_by"])
 
 
-def test_daily_budget_falls_back_to_tokens_when_net_missing(conn, cfg):
-    """A pre-migration row (net_tokens NULL) degrades to `tokens` — unchanged
-    behaviour for old rows."""
+def test_daily_budget_finished_window_final_over_cap_gates(conn, cfg):
+    """A FINISHED window (its run peaks over cap, then a later window's lower
+    occupancy marks the drop that closes it) contributes its final to Cortex
+    Today -> gate trips."""
     now = datetime(2026, 7, 8, 12, 0, tzinfo=MEL)
-    start_utc = now.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(
-        timezone.utc).isoformat()
-    conn.execute("INSERT INTO ct_wake_log (ts, wake, dry_run, tokens) VALUES (?,1,0,?)",
-                 (start_utc, cfg["gates"]["daily_budget"]["tokens"]))
+    day = now.replace(hour=1, minute=0, second=0, microsecond=0).astimezone(
+        timezone.utc)
+    cap = cfg["gates"]["daily_budget"]["tokens"]
+    rows = [
+        # window 1 peaks over cap, then window 2 restarts lower (drop closes w1)
+        ((day).isoformat(), cap + 5_000),
+        ((day + timedelta(minutes=5)).isoformat(), 3_000),
+    ]
+    conn.executemany(
+        "INSERT INTO ct_wake_log (ts, wake, dry_run, tokens) VALUES (?,1,0,?)", rows)
     conn.commit()
     integration.save_state(conn, PacemakerState(next_floor_due_at=now - timedelta(minutes=1)))
     decision = integration.run_tick(conn, cfg, now=now, rng=random.Random(1))

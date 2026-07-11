@@ -65,36 +65,23 @@ def _kill_watchdog(cfg: dict) -> None:
     p.unlink(missing_ok=True)
 
 
-def _record_tokens(conn, cfg: dict, state: dict, force_slept: str | None) -> tuple[int, int]:
-    """Record this wake's total context occupancy (`tokens`, drives rotate/fuse)
-    and its NET spend DELTA (`net_tokens` — cache-miss rewrite + output; drives
-    the daily budget gate + Budget note line).
-
-    transcript.net_tokens is the WHOLE-SESSION cumulative (sum over every usage
-    row), so a window lying down N times a night would re-count that running
-    total N times. Record only the delta since the last reported cumulative:
-    `delta = cum - prev` when monotonic; a fresh window's cum starts near 0
-    (below prev) -> treat the full cum as the delta and reset the baseline.
-    Persist the new cumulative as the next delta's baseline. Returns
-    (tokens, delta)."""
+def _record_tokens(conn, cfg: dict, state: dict, force_slept: str | None) -> int:
+    """Record this wake's context occupancy (`tokens` — last assistant usage
+    totals) into its ct_wake_log row. Occupancy grows monotonically within a
+    window; the daily Cortex-Today metric sums each window's final occupancy
+    (integration._finished_window_finals) plus the live window, so no per-wake
+    net delta is stored. Returns the recorded occupancy."""
     tokens = transcript.window_tokens(cfg)
-    cum = transcript.net_tokens(cfg)
-    prev = integration.load_net_reported(conn)
-    delta = cum - prev if cum >= prev else cum
     wid = state.get("wake_log_id")
     if wid:
         try:
             conn.execute(
-                "UPDATE ct_wake_log SET tokens=?, net_tokens=?, force_slept=? WHERE id=?",
-                (tokens or None, delta or None, force_slept, wid))
+                "UPDATE ct_wake_log SET tokens=?, force_slept=? WHERE id=?",
+                (tokens or None, force_slept, wid))
             conn.commit()
         except Exception:  # column race with concurrent migrate; best-effort
             pass
-    # Publish the new baseline. Merged into the raw state JSON (ON CONFLICT), so
-    # the later floor-redraw save_state (which preserves side-channel keys) does
-    # not drop it — same survival mechanism as window_tokens.
-    integration.store_net_reported(conn, cum)
-    return tokens, delta
+    return tokens
 
 
 def lie_down(cfg: dict, force_slept: str | None = None, rotate: bool = False,
@@ -105,7 +92,7 @@ def lie_down(cfg: dict, force_slept: str | None = None, rotate: bool = False,
     conn = db.connect(cfg)
     try:
         state = wake_state.load(cfg)
-        tokens, net = _record_tokens(conn, cfg, state, force_slept)
+        tokens = _record_tokens(conn, cfg, state, force_slept)
         cleared = _clear_due_self_schedule(cfg)
         # wake redraw from now; next_floor drives the next_wake HH:MM the marrow
         # MCP wrapper surfaces to the session.

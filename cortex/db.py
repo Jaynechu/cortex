@@ -115,11 +115,12 @@ def connect_path(path: Path) -> sqlite3.Connection:
 
 
 # Columns added after the initial CREATE (idempotent guarded ALTER, matching
-# SCHEMA's IF-NOT-EXISTS convention). ct_wake_log.tokens / force_slept are
-# written by the interactive-window watchdog and read by the wakeup note.
-# net_tokens = NET spend (cache-miss rewrite + output, excludes cache_read and
-# plain input) for the same wake; nullable so pre-migration rows degrade to
-# `tokens` via COALESCE(net_tokens, tokens) at every read site.
+# SCHEMA's IF-NOT-EXISTS convention). ct_wake_log.tokens = window context
+# occupancy (last assistant usage totals), written by lie_down / watchdog and
+# read by the wakeup note + daily budget. force_slept marks a proxy lie-down.
+# net_tokens is HISTORICAL — kept only so old rows survive the migration; no
+# code writes or reads it any more (Cortex Today now sums per-window final
+# occupancy, not a per-wake net delta).
 _ADDED_COLUMNS = (
     ("ct_wake_log", "tokens", "INTEGER"),
     ("ct_wake_log", "force_slept", "TEXT"),

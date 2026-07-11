@@ -67,28 +67,10 @@ def test_window_tokens_no_transcript(cfg):
     assert transcript.mtime(cfg) is None
 
 
-def test_net_tokens_sums_creation_plus_output(cfg):
-    """net_tokens = SUM over every assistant usage of (cache_creation + output);
-    excludes cache_read (hit ~free) and plain input (mostly cached)."""
-    d = transcript.transcript_dir(cfg)
-    d.mkdir(parents=True)
-    rows = [
-        {"type": "assistant", "message": {"usage": {
-            "input_tokens": 10, "cache_read_input_tokens": 5_000,
-            "cache_creation_input_tokens": 200, "output_tokens": 50}}},
-        {"type": "user", "message": {"role": "user"}},
-        {"type": "assistant", "message": {"usage": {
-            "input_tokens": 20, "cache_read_input_tokens": 90_000,
-            "cache_creation_input_tokens": 1_000, "output_tokens": 500}}},
-    ]
-    (d / "s.jsonl").write_text("\n".join(json.dumps(r) for r in rows))
-    # (200+50) + (1000+500) = 1750 ; window_tokens (last-msg occupancy) differs
-    assert transcript.net_tokens(cfg) == 1_750
-    assert transcript.window_tokens(cfg) == 20 + 90_000 + 1_000 + 500
-
-
-def test_net_tokens_no_transcript(cfg):
-    assert transcript.net_tokens(cfg) == 0
+def test_net_tokens_helper_removed():
+    """transcript.net_tokens is deleted — Cortex Today now sums per-window final
+    occupancy, not a per-turn net spend."""
+    assert not hasattr(transcript, "net_tokens")
 
 
 # --- lie_down: self-schedule clearing ----------------------------------------
@@ -652,12 +634,11 @@ def test_lie_down_no_auto_rotate_over_line(cfg):
     assert wake_state.take_rotated(cfg) is False
 
 
-def test_lie_down_publishes_occupancy_not_net(cfg):
-    """lie_down records both total occupancy and net spend to ct_wake_log, but
-    publishes total occupancy (statusline total) for the next wake's Budget
-    'Net Session Token' line — not net spend."""
+def test_lie_down_publishes_occupancy(cfg):
+    """lie_down records window occupancy to ct_wake_log.tokens and publishes it
+    for the next wake's Budget 'Net Session Token' line. net_tokens is no longer
+    written (historical column stays NULL)."""
     from cortex import note
-    from cortex.pacemaker import integration
 
     conn = db.connect(cfg)
     conn.execute(
@@ -669,7 +650,7 @@ def test_lie_down_publishes_occupancy_not_net(cfg):
 
     d = transcript.transcript_dir(cfg)
     d.mkdir(parents=True)
-    # total occupancy 91_500 (big cache_read); net spend = 1_000 + 500 = 1_500
+    # total occupancy 91_500 (big cache_read)
     (d / "s.jsonl").write_text(json.dumps({"type": "assistant", "message": {
         "usage": {"input_tokens": 0, "cache_read_input_tokens": 90_000,
                   "cache_creation_input_tokens": 1_000, "output_tokens": 500}}}))
@@ -682,38 +663,19 @@ def test_lie_down_publishes_occupancy_not_net(cfg):
         assert note._window_tokens(conn) == 91_500  # Budget line = window occupancy
         row = conn.execute(
             "SELECT tokens, net_tokens FROM ct_wake_log WHERE id=?", (wid,)).fetchone()
-        assert row["tokens"] == 91_500 and row["net_tokens"] == 1_500
+        assert row["tokens"] == 91_500 and row["net_tokens"] is None
     finally:
         conn.close()
 
 
-def test_daily_budget_line_sums_net_not_total(cfg):
-    """note._today_tokens (the 'today X/Y' note line) sums NET spend, the
-    same figure the gate reads — display and gate must agree."""
-    from cortex import note
-    from datetime import datetime as _dt, timezone as _tz
-
-    now = _dt.now(_tz.utc)
-    conn = db.connect(cfg)
-    try:
-        conn.execute(
-            "INSERT INTO ct_wake_log (ts, wake, dry_run, tokens, net_tokens) "
-            "VALUES (?,1,0,?,?)",
-            (db.utcnow_iso(), 90_000, 1_500))
-        conn.commit()
-        assert note._today_tokens(conn, now) == 1_500  # net, not the 90k total
-    finally:
-        conn.close()
-
-
-# --- lie_down net-token DELTA recording (cumulative re-count fix) -------------
+# --- Cortex Today: per-window final occupancy + live window --------------------
 
 def _seed_wake_row(cfg) -> int:
     conn = db.connect(cfg)
     try:
         conn.execute(
             "INSERT INTO ct_wake_log (ts, wake, dry_run, explanation) VALUES (?,1,0,?)",
-            (db.utcnow_iso(), "delta"))
+            (db.utcnow_iso(), "occ"))
         conn.commit()
         return conn.execute("SELECT MAX(id) AS id FROM ct_wake_log").fetchone()["id"]
     finally:
@@ -721,92 +683,97 @@ def _seed_wake_row(cfg) -> int:
 
 
 def _write_transcript(cfg, *usages) -> None:
-    """Write a session jsonl with one assistant row per usage dict (net_tokens
-    sums cache_creation+output over all rows)."""
+    """Write a session jsonl with one assistant row per usage dict (window_tokens
+    = last row's occupancy)."""
     d = transcript.transcript_dir(cfg)
     d.mkdir(parents=True, exist_ok=True)
     lines = [json.dumps({"type": "assistant", "message": {"usage": u}}) for u in usages]
     (d / "s.jsonl").write_text("\n".join(lines))
 
 
-def test_lie_down_records_net_delta_across_two_lie_downs(cfg):
-    """One session lying down twice: each lie_down records only the DELTA of its
-    cumulative net spend, not the running cumulative. Summing the two rows gives
-    the true spend (fixes the 647k re-count bug)."""
+def test_today_tokens_single_window_counts_final_once(cfg):
+    """One window lying down many times (occupancy grows monotonically) counts
+    ONCE — its final occupancy — not the sum of every lie-down snapshot. No live
+    window occupancy published, so the whole run is the current (open) window and
+    contributes only via window_tokens_hint (0 here)."""
     from cortex import note
     from datetime import datetime as _dt, timezone as _tz
 
     now = _dt.now(_tz.utc)
-    usage = lambda cc, out: {"input_tokens": 0, "cache_read_input_tokens": 90_000,
-                             "cache_creation_input_tokens": cc, "output_tokens": out}
-
-    # First lie_down: cumulative net = 1000+500 = 1500, prev baseline = 0 -> delta 1500
-    wid1 = _seed_wake_row(cfg)
-    _write_transcript(cfg, usage(1_000, 500))
-    wake_state.set_awake(cfg, wid1, str(transcript.transcript_dir(cfg) / "s.jsonl"))
-    lie_down.lie_down(cfg, force_slept="timeout")
-
-    # Same session grows: cumulative net = 1500 + (6000+17) = 7517 -> delta 6017
-    wid2 = _seed_wake_row(cfg)
-    _write_transcript(cfg, usage(1_000, 500), usage(6_000, 17))
-    wake_state.set_awake(cfg, wid2, str(transcript.transcript_dir(cfg) / "s.jsonl"))
-    lie_down.lie_down(cfg, force_slept="timeout")
-
     conn = db.connect(cfg)
     try:
-        r1 = conn.execute("SELECT net_tokens FROM ct_wake_log WHERE id=?", (wid1,)).fetchone()
-        r2 = conn.execute("SELECT net_tokens FROM ct_wake_log WHERE id=?", (wid2,)).fetchone()
-        assert r1["net_tokens"] == 1_500
-        assert r2["net_tokens"] == 6_017  # delta, NOT the 7517 cumulative
-        # summed day total = true cumulative, not re-counted
-        assert note._today_tokens(conn, now) == 7_517
+        for occ in (5_000, 20_000, 50_000):  # one window, monotonic growth
+            conn.execute(
+                "INSERT INTO ct_wake_log (ts, wake, dry_run, tokens) VALUES (?,1,0,?)",
+                (db.utcnow_iso(), occ))
+        conn.commit()
+        # The single monotonic run is the trailing (current) window -> no finished
+        # final; live occupancy hint is unset -> 0. Not 5k+20k+50k.
+        assert note._today_tokens(conn, now) == 0
     finally:
         conn.close()
 
 
-def test_lie_down_fresh_window_fallback_when_cum_below_prev(cfg):
-    """A fresh window's cumulative restarts near 0, below the stale baseline —
-    the monotonicity fallback records the full cum as the delta (no negative)."""
+def test_today_tokens_two_windows_sum_finals(cfg):
+    """Two windows in a day: occupancy drops when the second window starts. The
+    FIRST window's final (its peak before the drop) is a finished final; the
+    second run is the current window (added via the live hint). Finished finals
+    sum to the first window's final only."""
+    from cortex import note
     from cortex.pacemaker import integration
+    from datetime import datetime as _dt, timezone as _tz
 
+    now = _dt.now(_tz.utc)
     conn = db.connect(cfg)
     try:
-        integration.store_net_reported(conn, 160_000)  # stale baseline from a dead window
+        # window 1: 10k -> 40k (final 40k), window 2 restarts lower: 3k -> 25k
+        for occ in (10_000, 40_000, 3_000, 25_000):
+            conn.execute(
+                "INSERT INTO ct_wake_log (ts, wake, dry_run, tokens) VALUES (?,1,0,?)",
+                (db.utcnow_iso(), occ))
+        conn.commit()
+        # finished finals = window 1 final (40k); window 2 is current -> live hint
+        integration.store_window_tokens(conn, 30_000)  # live occupancy grew past 25k
+        assert note._today_tokens(conn, now) == 40_000 + 30_000
+        # gate agrees with the note line (same helper)
+        assert integration._today_tokens(conn, now) == 40_000 + 30_000
     finally:
         conn.close()
 
-    wid = _seed_wake_row(cfg)
-    # fresh cum = 200+50 = 250, well below 160000 -> fallback: delta = full cum
-    _write_transcript(cfg, {"input_tokens": 0, "cache_read_input_tokens": 0,
-                            "cache_creation_input_tokens": 200, "output_tokens": 50})
-    wake_state.set_awake(cfg, wid, str(transcript.transcript_dir(cfg) / "s.jsonl"))
-    lie_down.lie_down(cfg, force_slept="timeout")
 
-    conn = db.connect(cfg)
-    try:
-        row = conn.execute("SELECT net_tokens FROM ct_wake_log WHERE id=?", (wid,)).fetchone()
-        assert row["net_tokens"] == 250  # full cum, not 250-160000
-        assert integration.load_net_reported(conn) == 250  # baseline reset to the fresh cum
-    finally:
-        conn.close()
-
-
-def test_net_baseline_survives_floor_redraw(cfg):
-    """The net_reported_cum baseline persists across lie_down's floor-redraw
-    save_state (side-channel key, like window_tokens) so the NEXT lie_down still
-    sees it."""
+def test_today_tokens_current_window_added_from_live_hint(cfg):
+    """The current window's contribution comes from the live window_tokens hint
+    (fresher than its last ct_wake_log row), added on top of finished finals."""
+    from cortex import note
     from cortex.pacemaker import integration
+    from datetime import datetime as _dt, timezone as _tz
 
-    wid = _seed_wake_row(cfg)
-    _write_transcript(cfg, {"input_tokens": 0, "cache_read_input_tokens": 0,
-                            "cache_creation_input_tokens": 5_000, "output_tokens": 300})
-    wake_state.set_awake(cfg, wid, str(transcript.transcript_dir(cfg) / "s.jsonl"))
-    lie_down.lie_down(cfg)  # runs integration.lie_down (floor redraw) internally
-
+    now = _dt.now(_tz.utc)
     conn = db.connect(cfg)
     try:
-        # baseline = the cumulative just recorded, not wiped by the floor redraw
-        assert integration.load_net_reported(conn) == 5_300
+        integration.store_window_tokens(conn, 12_345)  # only a live window, no finished rows
+        assert note._today_tokens(conn, now) == 12_345
+    finally:
+        conn.close()
+
+
+def test_today_tokens_note_and_gate_agree(cfg):
+    """note._today_tokens and the gate's integration._today_tokens are the same
+    number by construction (note delegates to the gate helper)."""
+    from cortex import note
+    from cortex.pacemaker import integration
+    from datetime import datetime as _dt, timezone as _tz
+
+    now = _dt.now(_tz.utc)
+    conn = db.connect(cfg)
+    try:
+        for occ in (8_000, 30_000, 2_000, 15_000):
+            conn.execute(
+                "INSERT INTO ct_wake_log (ts, wake, dry_run, tokens) VALUES (?,1,0,?)",
+                (db.utcnow_iso(), occ))
+        conn.commit()
+        integration.store_window_tokens(conn, 18_000)
+        assert note._today_tokens(conn, now) == integration._today_tokens(conn, now)
     finally:
         conn.close()
 
