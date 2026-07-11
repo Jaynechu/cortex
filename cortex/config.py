@@ -80,6 +80,9 @@ _DEFAULTS: dict[str, Any] = {
         "tuck_in_text":
             "⏳ [TUCK-IN] It's been 20 mins - Call wait(N) if you don't want to "
             "sleep; Otherwise lie_down(next_wake_min=N). (Wait cap {n}/{cap})",
+        # When a declared wait(N) expires, append a freshly rendered wakeup note
+        # to the TUCK-IN marker (note content only, no behavioural nudge).
+        "wait_expiry_note": True,
     },
     # marrow repo invocation for the wake call (separate venv/deps, C3).
     "marrow": {

@@ -130,15 +130,49 @@ def _wait_until_live(cfg: dict) -> bool:
     return wu is not None and datetime.now(timezone.utc) < wu
 
 
+def _wait_expiry_note(cfg: dict) -> str:
+    """Freshly rendered wakeup note for a wait(N)-expiry tuck-in, or "" when the
+    toggle is off / render fails / it is not a wait-expiry (no wait declared this
+    wake). Never raises — the tuck-in must land regardless."""
+    if not cfg["wake"].get("wait_expiry_note", True):
+        return ""
+    if wake_state.get_wait_count(cfg) <= 0:
+        return ""  # no wait declared this wake -> plain tuck-in, not a wait-expiry
+    try:
+        from datetime import datetime
+        from pathlib import Path
+        from zoneinfo import ZoneInfo
+        from cortex import note
+
+        tz = ZoneInfo(cfg.get("core", {}).get("timezone", "Australia/Melbourne"))
+        now = datetime.now(tz)
+        sid = None
+        raw = wake_state.load(cfg).get("transcript")
+        if raw:
+            sid = Path(str(raw)).stem[:8]
+        conn = db.connect(cfg)
+        try:
+            data = note.gather(conn, cfg, now, window_sid=sid)
+            return note.render(cfg, now, data).strip()
+        finally:
+            conn.close()
+    except Exception:
+        return ""
+
+
 def _append_tuck_in(cfg: dict) -> None:
     """Chat-tier tuck-in: append the config marker line to wake_signal.log (the
-    ear Monitor delivers it as a session turn). {n}/{cap} = live wait count."""
+    ear Monitor delivers it as a session turn). {n}/{cap} = live wait count. On a
+    wait(N)-expiry, a freshly rendered wakeup note is appended below the marker."""
     tmpl = str(cfg["wake"].get("tuck_in_text") or "").strip()
     if not tmpl:
         return
     cap = int(cfg["wake"].get("wait_max_per_wake", 2) or 0)
     n = wake_state.get_wait_count(cfg)
     line = tmpl.replace("{n}", str(n)).replace("{cap}", str(cap))
+    fresh = _wait_expiry_note(cfg)
+    if fresh:
+        line = line + "\n" + fresh
     try:
         p = config.wake_signal_log_path(cfg)
         p.parent.mkdir(parents=True, exist_ok=True)

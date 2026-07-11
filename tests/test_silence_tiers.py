@@ -120,6 +120,58 @@ def test_wait_cancels_pending_auto_sleep(awake_no_sentinel):
     assert wake_state.is_awake(cfg) is True
 
 
+# --- wait-expiry note ---------------------------------------------------------
+
+def test_wait_expiry_tuck_in_carries_fresh_note(awake_no_sentinel):
+    """A wait(N) was declared this wake and has expired -> the TUCK-IN marker is
+    followed by a freshly rendered note (a `Now:` line)."""
+    cfg = awake_no_sentinel
+    wake_state.update(cfg, user_replied_this_wake=True)
+    wake_state.bump_wait_count(cfg)  # a wait() was declared -> expiry, not plain
+    a1 = watchdog.silence_action(cfg, silent_min=21.0)
+    assert a1 == "tuck-in appended"
+    text = "\n".join(_signal_lines(cfg))
+    assert "[TUCK-IN]" in text
+    assert "Now:" in text  # fresh note appended
+
+
+def test_plain_tuck_in_no_note(awake_no_sentinel):
+    """No wait declared this wake -> plain tuck-in, no rendered note appended."""
+    cfg = awake_no_sentinel
+    wake_state.update(cfg, user_replied_this_wake=True)  # wait_count stays 0
+    watchdog.silence_action(cfg, silent_min=21.0)
+    text = "\n".join(_signal_lines(cfg))
+    assert "[TUCK-IN]" in text
+    assert "Now:" not in text
+
+
+def test_wait_expiry_note_toggle_off(awake_no_sentinel):
+    """Toggle off -> plain marker even on a wait-expiry."""
+    cfg = awake_no_sentinel
+    cfg["wake"]["wait_expiry_note"] = False
+    wake_state.update(cfg, user_replied_this_wake=True)
+    wake_state.bump_wait_count(cfg)
+    watchdog.silence_action(cfg, silent_min=21.0)
+    text = "\n".join(_signal_lines(cfg))
+    assert "[TUCK-IN]" in text
+    assert "Now:" not in text
+
+
+def test_wait_expiry_render_failure_falls_back(awake_no_sentinel, monkeypatch):
+    """A render blow-up must never block the tuck-in -> plain marker still lands."""
+    cfg = awake_no_sentinel
+    wake_state.update(cfg, user_replied_this_wake=True)
+    wake_state.bump_wait_count(cfg)
+    monkeypatch.setattr(
+        "cortex.note.gather",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    a1 = watchdog.silence_action(cfg, silent_min=21.0)
+    assert a1 == "tuck-in appended"
+    text = "\n".join(_signal_lines(cfg))
+    assert "[TUCK-IN]" in text
+    assert "Now:" not in text  # note omitted, marker survived
+
+
 # --- awake gate (tick) --------------------------------------------------------
 
 def _fresh_transcript(cfg):

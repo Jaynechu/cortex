@@ -99,6 +99,7 @@ sentinel = true             # arm cortex.sentinel (one-shot exact-time wake) at 
 # Chat-tier tuck-in marker appended to wake_signal.log at silent_max_min when the
 # user replied this wake ({n}/{cap} = live wait count). No-user tier gets no marker.
 tuck_in_text = "⏳ [TUCK-IN] It's been 20 mins - Call wait(N) if you don't want to sleep; Otherwise lie_down(next_wake_min=N). (Wait cap {n}/{cap})"
+wait_expiry_note = true      # on a wait(N)-expiry TUCK-IN, append a freshly rendered wakeup note (note content only)
 
 # Per-wake watchdog thresholds (spawned at injection, killed at lie_down).
 [wake.watchdog]
