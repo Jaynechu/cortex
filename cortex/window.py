@@ -3,8 +3,8 @@ control via iTerm2 AppleScript (works while the screen is locked — no keyboard
 simulation). Primitives: ensure_window, respawn (fresh window with the emoji +
 bell-marker wake prompt baked in as its first prompt, see fresh_initial_prompt),
 append_wake_signal (the ear bell for an already-running resident window),
-type_wake_signal (typed rearm on ear death), inject_note (schedule windows
-only), send_esc, say, hard_interrupt (process-level SIGINT fallback when esc
+type_wake_signal (typed rearm on ear death), send_esc, say,
+hard_interrupt (process-level SIGINT fallback when esc
 alone may not land, e.g. no focus). A fresh window wakes silently — the baked-in
 prompt is the only trace, no notification, but carries the same bell marker as
 the ear so the marrow UserPromptSubmit hook detects it and injects the full
@@ -99,7 +99,7 @@ return "no"
 
 def window_model(cfg: dict) -> str:
     """Explicit model for cortex windows — never inherit the (expensive top-tier)
-    system default. Reused by every cortex window spawn (schedule/review too)."""
+    system default. Reused by every cortex window spawn."""
     return cfg["wake"].get("window_model", "opus")
 
 
@@ -246,15 +246,6 @@ def _relaunch(sid: str, cfg: dict) -> None:
     _wait_ready(sid, cfg)
 
 
-def spawn_fresh(cfg: dict) -> str:
-    """Spawn a brand-new cortex window (attention hygiene for schedule duties —
-    no roaming context, no handoff). NOT the resident session: its sid is never
-    persisted, so it can't be resumed and cortex ends it itself when done."""
-    sid = _spawn(cfg)
-    _wait_ready(sid, cfg)
-    return sid
-
-
 def _close_session(sid: str) -> None:
     """Close a specific iTerm session (the old resident window's tab)."""
     try:
@@ -324,14 +315,6 @@ def respawn(cfg: dict, initial_prompt: str | None = None,
     wake_state.set_session_id(cfg, sid)
     _wait_ready(sid, cfg)
     return sid
-
-
-def submit_prompt_to(sid: str, cfg: dict, text: str) -> None:
-    """Inject one prompt into a specific (non-resident) session, restoring
-    focus afterwards. Used for schedule windows keyed by their own sid."""
-    prev = _frontmost_bid()
-    _submit_prompt(sid, text)
-    _guard_focus(prev)
 
 
 def _read_session(sid: str) -> str:
@@ -407,28 +390,12 @@ def _submit_prompt(sid: str, text: str) -> None:
 
 def write_note(cfg: dict, text: str):
     """Persist the wakeup note to its file and return the path. The ear-based
-    wake references this path in the signal line (no typing); schedule windows
-    still type a Read line via inject_note."""
+    wake references this path in the signal line (no typing); the marrow hook
+    reads it to inject the full note when it sees the bell marker."""
     note_path = wake_state.wakeup_note_path(cfg)
     note_path.parent.mkdir(parents=True, exist_ok=True)
     note_path.write_text(text)
     return note_path
-
-
-def inject_note(cfg: dict, text: str, sid: str | None = None) -> None:
-    """Deliver the multi-line wakeup note as ONE prompt: write it to a file,
-    then inject a single line telling cortex to read that file. `write text`
-    submits each newline separately, so file transit is the reliable path.
-    `sid` targets a specific (e.g. schedule) window; None = the resident one.
-    Used only by schedule (fresh duty) windows now — the resident window is
-    woken by the signal-file ear, not by typing."""
-    prev = _frontmost_bid()
-    if sid is None:
-        sid = ensure_window(cfg)
-    note_path = write_note(cfg, text)
-    line = f"Read {note_path} — this is your wakeup note; act on it"
-    _submit_prompt(sid, line)
-    _guard_focus(prev)
 
 
 def inject_prompt(cfg: dict, text: str) -> bool:

@@ -148,7 +148,7 @@ def test_build_context_inactive_when_stale(conn, cfg):
     assert ctx["active_session"] is False
 
 
-def test_build_context_reads_flag_and_schedule_files(conn, cfg, tmp_path):
+def test_build_context_reads_flag_and_self_schedule_files(conn, cfg, tmp_path):
     now = datetime.now(MEL)
     (tmp_path / "affect_flag.json").write_text(json.dumps({"kind": "upset"}))
     due = (now - timedelta(minutes=1)).isoformat()
@@ -199,32 +199,7 @@ def test_second_tick_no_wake_while_floor_not_due(conn, cfg):
     assert conn.execute("SELECT COUNT(*) AS n FROM ct_wake_log").fetchone()["n"] == 2
 
 
-def test_schedule_due_wakes_and_pierces_night(conn, cfg):
-    # 23:30 (night, cap 0) — a due duty still wakes; floor would be silenced.
-    now = datetime(2026, 7, 8, 23, 30, tzinfo=MEL)
-    cfg["schedule"] = [{"name": "review+plan", "time": "20:30", "enabled": True}]
-    decision = integration.run_tick(conn, cfg, now=now, rng=random.Random(1))
-    assert decision["wake"] is True
-    assert any(r.kind == "schedule" for r in decision["reasons"])
-    assert decision["gated_by"] == []
-
-
-def test_schedule_disabled_does_not_wake(conn, cfg):
-    now = datetime(2026, 7, 8, 21, 0, tzinfo=MEL)
-    cfg["schedule"] = [{"name": "wp", "time": "08:00", "enabled": False}]
-    integration.save_state(conn, PacemakerState(next_floor_due_at=now + timedelta(hours=1)))
-    decision = integration.run_tick(conn, cfg, now=now, rng=random.Random(1))
-    assert not any(r.kind == "schedule" for r in decision["reasons"])
-
-
-def test_schedule_fired_persists_across_save_state(conn, cfg):
-    integration.mark_schedule_fired(conn, "review+plan", "2026-07-08")
-    # A plain tick save must not wipe the side-channel key.
-    integration.save_state(conn, PacemakerState(night_wake_count=3))
-    assert integration.load_schedule_fired(conn) == {"review+plan": "2026-07-08"}
-
-
-def test_daily_budget_gates_floor_and_schedule_pierces(conn, cfg):
+def test_daily_budget_gates_floor(conn, cfg):
     now = datetime(2026, 7, 8, 12, 0, tzinfo=MEL)  # daytime, outside night
     day = now.replace(hour=1, minute=0, second=0, microsecond=0).astimezone(
         timezone.utc)
@@ -241,11 +216,6 @@ def test_daily_budget_gates_floor_and_schedule_pierces(conn, cfg):
     decision = integration.run_tick(conn, cfg, now=now, rng=random.Random(1))
     assert decision["wake"] is False
     assert any(g.name == "daily_budget" for g in decision["gated_by"])
-    # schedule pierces the same budget
-    cfg["schedule"] = [{"name": "wp", "time": "08:00", "enabled": True}]
-    decision2 = integration.run_tick(conn, cfg, now=now + timedelta(minutes=5), rng=random.Random(1))
-    assert decision2["wake"] is True
-    assert any(r.kind == "schedule" for r in decision2["reasons"])
 
 
 def test_daily_budget_single_open_window_under_cap(conn, cfg):
@@ -286,31 +256,6 @@ def test_daily_budget_finished_window_final_over_cap_gates(conn, cfg):
     decision = integration.run_tick(conn, cfg, now=now, rng=random.Random(1))
     assert decision["wake"] is False
     assert any(g.name == "daily_budget" for g in decision["gated_by"])
-
-
-def test_dry_run_marks_schedule_fired_no_refire(conn, cfg):
-    """Regression: under dry_run a due duty must be marked fired so it does not
-    re-fire every 5-min tick until midnight (run_wake, the live marker, is never
-    called). _mark_dry_run_schedule_fired records the fire; the next tick's
-    due_duties then skips it."""
-    from cortex import pacemaker_tick
-
-    cfg["pacemaker"]["dry_run"] = True
-    cfg["schedule"] = [{"name": "review+plan", "time": "20:30", "enabled": True}]
-
-    now1 = datetime(2026, 7, 8, 20, 31, tzinfo=MEL)
-    decision1 = integration.run_tick(conn, cfg, now=now1, rng=random.Random(1))
-    assert decision1["wake"] is True
-    assert any(r.kind == "schedule" for r in decision1["reasons"])
-
-    # tick entry marks the fired duty under dry_run
-    pacemaker_tick._mark_dry_run_schedule_fired(conn, decision1, now1)
-    assert integration.load_schedule_fired(conn) == {"review+plan": "2026-07-08"}
-
-    # a later tick the same day no longer re-fires the duty
-    now2 = datetime(2026, 7, 8, 20, 36, tzinfo=MEL)
-    decision2 = integration.run_tick(conn, cfg, now=now2, rng=random.Random(1))
-    assert not any(r.kind == "schedule" for r in decision2["reasons"])
 
 
 def test_night_mode_gates_floor_wake(conn, cfg):

@@ -57,23 +57,20 @@ def tick(
     if floor_fired:
         new_next_floor_due_at = reschedule_floor(now, config, rng)
 
-    # 2. gates (see the fired trigger kinds — night mode piercing keys on them)
-    gates_context = dict(context)
-    gates_context["trigger_kinds"] = [r.kind for r in reasons]
-    gate_results = gates.run_gates(state, gates_context, config, now)
+    # 2. gates
+    gate_results = gates.run_gates(state, context, config, now)
     gated_by = [g for g in gate_results if not g.allowed]
 
     wake = bool(reasons) and not gated_by
 
-    # Night cap accounting: a wake with no piercing trigger consumes the cap.
+    # Night cap accounting: a night wake consumes the cap.
     new_night_cap_key = state.night_cap_key
     new_night_wake_count = state.night_wake_count
     current_night = gates.night_key(config, now)
     if current_night is not None and current_night != state.night_cap_key:
         new_night_cap_key, new_night_wake_count = current_night, 0
     if wake and current_night is not None:
-        if not ({r.kind for r in reasons} & gates.PIERCE_KINDS):
-            new_night_wake_count += 1
+        new_night_wake_count += 1
 
     new_last_wake_at = now if wake else state.last_wake_at
 

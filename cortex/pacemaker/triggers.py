@@ -1,5 +1,5 @@
 """Wake-reason evaluation (Decided 07-02): event, affect flag, self-scheduled,
-schedule, floor. Returns fired reasons carrying facts — never pre-written motive
+floor. Returns fired reasons carrying facts — never pre-written motive
 lines (Design: reasoning happens in the cortex session, not here).
 
 Expected config shape (config["triggers"]):
@@ -43,17 +43,6 @@ def _affect_flag_trigger(context: dict) -> list[TriggerReason]:
     return [TriggerReason(kind="affect_flag", detail=f"affect flag: {flag}", facts=dict(flag))]
 
 
-def _schedule_triggers(context: dict) -> list[TriggerReason]:
-    """Fixed recurring duties already resolved to due-and-unfired by the
-    integration layer (see pacemaker.schedule.due_duties)."""
-    items = context.get("schedule") or []
-    return [
-        TriggerReason(kind="schedule", detail=f"schedule: {item.get('name')}", facts=dict(item))
-        for item in items
-        if isinstance(item, dict)
-    ]
-
-
 def _self_scheduled_triggers(context: dict, now: datetime) -> list[TriggerReason]:
     items = context.get("self_scheduled") or []
     reasons = []
@@ -88,16 +77,14 @@ def evaluate(
     is a separate step, see reschedule_floor()).
 
     Collision model (C-wm): the floor timer governs the plain heartbeat ONLY.
-    event/affect_flag (trigger) and self_scheduled (schedule) pierce anytime
-    and are never held back — ordered trigger > schedule. Coincident firings
-    collapse to one wake; the plain floor heartbeat stays silent whenever any
-    other source already fired this tick.
+    event/affect_flag and self_scheduled fire anytime and are never held back.
+    Coincident firings collapse to one wake; the plain floor heartbeat stays
+    silent whenever any other source already fired this tick.
     """
     pierce: list[TriggerReason] = []
     pierce.extend(_event_triggers(context))
     pierce.extend(_affect_flag_trigger(context))
     pierce.extend(_self_scheduled_triggers(context, now))
-    pierce.extend(_schedule_triggers(context))
 
     floor_due = next_floor_due_at is None or now >= next_floor_due_at
     if not floor_due:

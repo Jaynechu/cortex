@@ -95,7 +95,7 @@ _DEFAULTS: dict[str, Any] = {
     },
     "gates": {
         # Night window (plan 07-08): zero self-wakes 23-06 — floor/
-        # self_scheduled/affect_flag all silent; only schedule (duty) pierces.
+        # self_scheduled/affect_flag all silent.
         # close_prompt = wrap-up instruction injected once into a still-awake
         # resident window when the night window opens (write handoff + lie_down).
         "night": {
@@ -105,8 +105,7 @@ _DEFAULTS: dict[str, Any] = {
         },
         # Daily wake-token budget: once Cortex Today (sum of today's finished-
         # window final context occupancies + the current live window occupancy)
-        # reaches this, self-wakes stop; schedule pierces; resets at local
-        # midnight.
+        # reaches this, self-wakes stop; resets at local midnight.
         "daily_budget": {"tokens": 1_000_000},
     },
     "triggers": {
@@ -201,11 +200,6 @@ def load(path: Path | None = None) -> dict[str, Any]:
     loaded_categories = loaded.get("knowledgec", {}).get("categories", {})
     categories.update(loaded_categories)
     cfg["knowledgec"]["categories"] = categories
-
-    # Schedule (duty) blocks: an array of tables ([[schedule]]), not a merged
-    # section — pass the user's list straight through (empty when unset).
-    sched = loaded.get("schedule", [])
-    cfg["schedule"] = sched if isinstance(sched, list) else []
 
     return cfg
 

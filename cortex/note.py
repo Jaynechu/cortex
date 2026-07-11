@@ -9,7 +9,7 @@ Layout: a header block (Now / Plan Used / Active), then `---`-separated blocks
 for pending self-schedule and Replay. The handoff injects at
 SessionStart (marrow), not here. Cal/Rem lines retired (global inject pending).
 The old "Wake:" reason line is gone — reasons carry no signal (desire engine
-retired, wander-only) and schedule/duty windows get their own prompt.
+retired, wander-only).
 """
 from __future__ import annotations
 

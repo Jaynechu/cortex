@@ -16,7 +16,7 @@ def base_config():
     }
 
 
-# --- night mode (23-06, zero self-wakes; only schedule pierces) --------------
+# --- night mode (23-06, zero self-wakes) -------------------------------------
 
 NIGHT_NOW = datetime(2026, 7, 4, 2, 0, tzinfo=TZ)  # inside 23:00-06:00
 LATE_NOW = datetime(2026, 7, 4, 23, 30, tzinfo=TZ)  # inside, before midnight
@@ -41,11 +41,6 @@ def test_night_blocks_self_scheduled_and_affect_flag():
     for kind in ("desire", "floor", "self_scheduled", "affect_flag"):
         result = gates.gate_night_mode(PacemakerState(), {"trigger_kinds": [kind]}, base_config(), NIGHT_NOW)
         assert result.allowed is False, kind
-
-
-def test_night_schedule_pierces():
-    result = gates.gate_night_mode(PacemakerState(), {"trigger_kinds": ["schedule"]}, base_config(), NIGHT_NOW)
-    assert result.allowed is True
 
 
 def test_rebirth_first_wake_after_0600_allowed():
@@ -78,11 +73,6 @@ def test_budget_blocks_desire_self_affect_at_cap():
     for kind in ("floor", "desire", "self_scheduled", "affect_flag"):
         ctx = {"trigger_kinds": [kind], "today_tokens": 1_500_000}
         assert gates.gate_daily_budget(PacemakerState(), ctx, base_config(), NOW).allowed is False, kind
-
-
-def test_budget_schedule_pierces_over_cap():
-    ctx = {"trigger_kinds": ["schedule"], "today_tokens": 2_000_000}
-    assert gates.gate_daily_budget(PacemakerState(), ctx, base_config(), NOW).allowed is True
 
 
 def test_budget_disabled_when_zero():

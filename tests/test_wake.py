@@ -411,54 +411,6 @@ def test_night_close_no_session_no_rotate(night_cfg):
     assert wake_state.load(night_cfg).get("rotated") is None
 
 
-# --------------------------------------------------------------------------- #
-# Schedule (duty) wake: prompt_path injection
-# --------------------------------------------------------------------------- #
-
-def test_schedule_wake_injects_duty_prompt_content(monkeypatch, marrow_conn, wcfg, tmp_path):
-    """A duty with prompt_path set must inject the file's content, not just
-    the generic wakeup note."""
-    from cortex import window
-
-    prompt_file = tmp_path / "duty.md"
-    prompt_file.write_text("Do the weekly review now.", encoding="utf-8")
-
-    captured = {}
-    monkeypatch.setattr(window, "spawn_fresh", lambda cfg: "sid-duty")
-    monkeypatch.setattr(window, "inject_note",
-                        lambda cfg, text, sid=None: captured.update(text=text))
-    monkeypatch.setattr(window, "say", lambda cfg: None)
-
-    duties = [{"name": "review", "prompt_path": str(prompt_file)}]
-    decision = {"wake": True, "reasons": [
-        {"kind": "schedule", "detail": "schedule: review", "facts": {"name": "review"}}]}
-    result = wake._schedule_wake(marrow_conn, wcfg, decision, DAY1, duties)
-
-    assert result["mode"] == "schedule"
-    assert "Do the weekly review now." in captured["text"]
-    assert "Now:" in captured["text"]  # generic note still present
-
-
-def test_schedule_wake_missing_prompt_file_falls_back_generic(monkeypatch, marrow_conn, wcfg):
-    """Missing/unreadable prompt_path -> generic note only, no crash."""
-    from cortex import window
-
-    captured = {}
-    monkeypatch.setattr(window, "spawn_fresh", lambda cfg: "sid-duty")
-    monkeypatch.setattr(window, "inject_note",
-                        lambda cfg, text, sid=None: captured.update(text=text))
-    monkeypatch.setattr(window, "say", lambda cfg: None)
-
-    duties = [{"name": "review", "prompt_path": "/nonexistent/duty.md"}]
-    decision = {"wake": True, "reasons": [
-        {"kind": "schedule", "detail": "schedule: review", "facts": {"name": "review"}}]}
-    result = wake._schedule_wake(marrow_conn, wcfg, decision, DAY1, duties)
-
-    assert result["mode"] == "schedule"
-    assert "Now:" in captured["text"]
-    assert "duty.md" not in captured["text"]
-
-
 def test_main_print_note_no_marrow_call(monkeypatch, marrow_conn, wcfg, capsys):
     monkeypatch.setattr(wake.config, "load", lambda: wcfg)
     monkeypatch.setattr(wake.db, "connect", lambda cfg: marrow_conn)

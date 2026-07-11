@@ -43,7 +43,7 @@ def test_floor_silent_when_pierce_source_fires():
 
 
 def test_pierce_source_fires_even_when_floor_not_due():
-    # event/affect_flag/self_scheduled/schedule pierce regardless of the floor.
+    # event/affect_flag/self_scheduled fire regardless of the floor.
     context = {"events": [{"id": 1}]}
     reasons = evaluate(context, base_config(), NOW, next_floor_due_at=NOW + timedelta(minutes=30))
     assert any(r.kind == "event" for r in reasons)
