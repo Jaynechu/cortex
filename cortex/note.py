@@ -89,8 +89,30 @@ def _last_wake(conn: sqlite3.Connection, now: datetime) -> dict | None:
         return {
             "minutes_ago": int(age.total_seconds() // 60),
             "force_slept": row["force_slept"],
+            "ts": row["ts"],
         }
     return None
+
+
+def _handoff_after(cfg: dict, prev_ts: str | None) -> bool:
+    """True if the handoff file is non-empty and was modified after `prev_ts`
+    (the prior wake=1 row's ISO-UTC ts). Uses the DB row ts as the stable
+    reference (wake_state.awake_since is cleared by lie_down / rewritten by
+    external resets, so it is not reliable here)."""
+    if not prev_ts:
+        return False
+    try:
+        prev_epoch = _parse_utc(prev_ts).timestamp()
+    except (TypeError, ValueError):
+        return False
+    from cortex import config as _config
+    handoff = _config.handoff_path(cfg)
+    try:
+        if not handoff.exists() or handoff.stat().st_mtime <= prev_epoch:
+            return False
+        return bool(handoff.read_text(encoding="utf-8").strip())
+    except OSError:
+        return False
 
 
 def _today_tokens(conn: sqlite3.Connection, now: datetime) -> int:
@@ -292,6 +314,12 @@ def gather(
     kv = _safe(_rate_limit_kv, conn, default={})
     budget = _safe(_build_budget, conn, cfg, now, kv, ncfg)
     last_wake = _safe(_last_wake, conn, now)
+    # Catchup suppression: the prior window may have been reaped (force_slept set)
+    # yet still wrote its handoff before dying. If the handoff was touched after
+    # that prior wake row's ts and is non-empty, there is nothing to backfill ->
+    # skip the catchup line and its 30-40k token re-read.
+    catchup_handoff_written = bool(
+        last_wake and _handoff_after(cfg, last_wake.get("ts")))
 
     ws = {}
     try:
@@ -340,6 +368,7 @@ def gather(
         "replay_stale": replay_stale,
         "window_sid": window_sid,
         "awake_since_hm": awake_since_hm,
+        "catchup_handoff_written": catchup_handoff_written,
     }
 
 
@@ -428,7 +457,10 @@ def render(cfg: dict, now: datetime, data: dict) -> str:
     # Prior window was force-slept without writing its handoff -> tell this
     # window to backfill from DB events (recall/tl), never from raw jsonl.
     # "auto" (routine silence sleep) is not an incident -> no catchup line.
-    if last and last.get("force_slept") and last.get("force_slept") != "auto":
+    # If the handoff was written after the prior wake (catchup_handoff_written),
+    # there is nothing to backfill -> skip the catchup + its costly re-read.
+    if (last and last.get("force_slept") and last.get("force_slept") != "auto"
+            and not data.get("catchup_handoff_written")):
         catchup = _note_cfg(cfg).get("force_slept_catchup_text", "")
         if catchup:
             header.append(catchup)

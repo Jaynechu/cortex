@@ -177,7 +177,9 @@ def test_last_wake_skips_current_and_marks_force_slept(marrow_conn):
     )
     marrow_conn.commit()
     lw = note._last_wake(marrow_conn, NOW)
-    assert lw == {"minutes_ago": 30, "force_slept": "timeout"}
+    assert lw["minutes_ago"] == 30
+    assert lw["force_slept"] == "timeout"
+    assert lw["ts"] == prev
 
 
 def test_last_wake_none_when_only_current(marrow_conn):
@@ -186,6 +188,73 @@ def test_last_wake_none_when_only_current(marrow_conn):
         "INSERT INTO ct_wake_log (ts, wake, dry_run) VALUES (?, 1, 0)", (cur,))
     marrow_conn.commit()
     assert note._last_wake(marrow_conn, NOW) is None
+
+
+# --------------------------------------------------------------------------- #
+# catchup suppression — handoff written after the prior wake ts
+# --------------------------------------------------------------------------- #
+
+def _handoff_cfg(cfg, tmp_path):
+    p = tmp_path / "handoff.md"
+    cfg["paths"]["handoff_file"] = str(p)
+    return p
+
+
+def test_handoff_after_written_post_wake(cfg, tmp_path):
+    prev = (NOW - timedelta(minutes=40)).astimezone(ZoneInfo("UTC")).isoformat()
+    p = _handoff_cfg(cfg, tmp_path)
+    p.write_text("handoff body")  # written now -> mtime > prev ts
+    assert note._handoff_after(cfg, prev) is True
+
+
+def test_handoff_after_older_than_wake(cfg, tmp_path):
+    import os
+    import time
+    p = _handoff_cfg(cfg, tmp_path)
+    p.write_text("stale handoff")
+    old = time.time() - 3600
+    os.utime(p, (old, old))  # handoff mtime an hour before the prior wake
+    prev = datetime.now(ZoneInfo("UTC")).isoformat()  # wake after the handoff
+    assert note._handoff_after(cfg, prev) is False
+
+
+def test_handoff_after_empty_file(cfg, tmp_path):
+    prev = (NOW - timedelta(minutes=40)).astimezone(ZoneInfo("UTC")).isoformat()
+    p = _handoff_cfg(cfg, tmp_path)
+    p.write_text("   \n")  # non-empty mtime but blank content
+    assert note._handoff_after(cfg, prev) is False
+
+
+def test_handoff_after_missing_file(cfg, tmp_path):
+    prev = (NOW - timedelta(minutes=40)).astimezone(ZoneInfo("UTC")).isoformat()
+    _handoff_cfg(cfg, tmp_path)  # path set, file never created
+    assert note._handoff_after(cfg, prev) is False
+
+
+def test_handoff_after_none_ts(cfg):
+    assert note._handoff_after(cfg, None) is False
+
+
+def test_render_catchup_suppressed_when_handoff_written(cfg):
+    """Prior window force-slept but its handoff was written after -> the catchup
+    line is skipped (nothing to backfill)."""
+    data = {
+        "last_wake": {"minutes_ago": 40, "force_slept": "stale"},
+        "catchup_handoff_written": True,
+    }
+    text = note.render(cfg, NOW, data)
+    assert "Last wake: 40min ago (force-slept mid-task)" in text  # tag still shown
+    assert "recall all events from DB" not in text  # catchup suppressed
+
+
+def test_render_catchup_fires_when_no_handoff(cfg):
+    """Prior window force-slept and no handoff written -> catchup fires."""
+    data = {
+        "last_wake": {"minutes_ago": 40, "force_slept": "stale"},
+        "catchup_handoff_written": False,
+    }
+    text = note.render(cfg, NOW, data)
+    assert "recall all events from DB" in text
 
 
 def test_today_tokens_melbourne_local_boundary(marrow_conn):

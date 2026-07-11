@@ -150,6 +150,36 @@ def test_awake_gate_late_sentinel_race_is_silent(awake_no_sentinel):
     assert wake_state.is_awake(cfg) is True
 
 
+def test_stale_hold_when_window_alive(awake_no_sentinel, monkeypatch):
+    """Long transcript-idle but the resident window is ALIVE (user reading/typing)
+    -> hold, do NOT reap. Alive-but-quiet is not a dead window."""
+    from cortex import pacemaker_tick, wake
+    cfg = awake_no_sentinel
+    # No transcript -> idle 1e9 >= stale_min, past the silence check (idle 0.0).
+    monkeypatch.setattr(wake, "_window_alive", lambda c: True)
+    conn = db.connect(cfg)
+    try:
+        msg = pacemaker_tick._handle_awake(conn, cfg, wake_state.load(cfg))
+    finally:
+        conn.close()
+    assert "stale hold: window alive" in msg
+    assert wake_state.is_awake(cfg) is True  # not reaped
+
+
+def test_stale_reap_when_window_dead(awake_no_sentinel, monkeypatch):
+    """Long transcript-idle and the resident window is GONE -> reap as before."""
+    from cortex import pacemaker_tick, wake
+    cfg = awake_no_sentinel
+    monkeypatch.setattr(wake, "_window_alive", lambda c: False)
+    conn = db.connect(cfg)
+    try:
+        msg = pacemaker_tick._handle_awake(conn, cfg, wake_state.load(cfg))
+    finally:
+        conn.close()
+    assert "stale wake reaped" in msg
+    assert wake_state.is_awake(cfg) is False  # reaped
+
+
 def test_awake_gate_asleep_still_fires(cfg, monkeypatch):
     """Sanity contrast: when NOT awake, the awake gate is not taken at all — the
     normal tick decision path runs (asleep+due -> emit as today)."""

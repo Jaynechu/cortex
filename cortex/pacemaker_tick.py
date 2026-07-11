@@ -71,6 +71,12 @@ def _handle_awake(conn, cfg: dict, st: dict) -> str:
         return f"awake gate: {action} (idle {idle:.0f}min)"
     stale_min = float(cfg["wake"].get("stale", {}).get("threshold_min", 15))
     if idle >= stale_min:
+        # Alive-but-quiet is normal (user reading/typing): transcript mtime is
+        # not a liveness signal. Only reap when the resident window is actually
+        # gone. Live-but-silent windows are handled by the silence tier above.
+        from cortex.wake import _window_alive
+        if _window_alive(cfg):
+            return f"stale hold: window alive (idle {idle:.0f}min)"
         from cortex import lie_down as lie_down_mod
         r = lie_down_mod.lie_down(cfg, force_slept="stale")
         sys.stderr.write(
