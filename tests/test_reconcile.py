@@ -174,6 +174,17 @@ def test_ctl_pause_resume(cfg, monkeypatch, capsys):
     assert wake_state.is_paused(cfg) is False
 
 
+def test_ctl_wake_clears_paused(cfg, monkeypatch):
+    from cortex import ctl, window
+    # Live-window path so cmd_wake returns before any machine-touching wake.
+    monkeypatch.setattr("cortex.wake._window_alive", lambda c: True)
+    monkeypatch.setattr(window, "append_wake_signal", lambda c, now: None)
+    wake_state.set_paused(cfg, True)
+    assert wake_state.is_paused(cfg) is True
+    ctl.cmd_wake(cfg)
+    assert wake_state.is_paused(cfg) is False
+
+
 def test_ctl_sleep_dead_window_sets_ledger(cfg, monkeypatch):
     from cortex import ctl
     monkeypatch.setattr("cortex.wake._window_alive", lambda c: False)

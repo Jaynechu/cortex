@@ -27,6 +27,8 @@ def _now(cfg: dict) -> datetime:
 
 def cmd_wake(cfg: dict) -> str:
     from cortex.wake import _window_alive, run_wake
+    # A human explicitly waking wants activity back — clear DND first.
+    wake_state.set_paused(cfg, False)
     if _window_alive(cfg):
         try:
             window.append_wake_signal(cfg, _now(cfg))
