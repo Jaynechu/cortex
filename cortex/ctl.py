@@ -2,9 +2,10 @@
 ledger paths the pacemaker uses, so a human can drive the resident window by
 hand without racing the tick.
 
-  wake            immediate wake: alive -> inject signal; dead -> rotated?fresh:resume
-  sleep           inject a lie_down instruction into the live window, or (dead
-                  window) just set the ledger
+  wake            immediate wake via the standard run_wake pipeline (alive
+                  resident -> ear signal; dead -> rotated?fresh:resume)
+  sleep           awake resident -> inject a lie_down instruction; else
+                  (dead, or alive-but-dormant) set the ledger directly
   pause           DND: hold tick reconcile / watchdog reaps / injections
   resume          leave DND; overdue ledger alarms fire on the next reconcile
 
@@ -26,25 +27,16 @@ def _now(cfg: dict) -> datetime:
 
 
 def cmd_wake(cfg: dict) -> str:
-    from cortex.wake import _window_alive, assemble_note, run_wake
+    from cortex.wake import run_wake
     # A human explicitly waking wants activity back — clear DND first.
     wake_state.set_paused(cfg, False)
-    if _window_alive(cfg):
-        try:
-            now = _now(cfg)
-            # Render a fresh note before signalling — the marrow hook injects
-            # whatever note.txt holds when it sees the bell marker, so a stale
-            # note from a previous wake must not be left in place.
-            note_conn = db.connect(cfg)
-            try:
-                note_text = assemble_note(note_conn, cfg, now)
-            finally:
-                note_conn.close()
-            window.write_note(cfg, note_text)
-            window.append_wake_signal(cfg, now)
-            return "wake: signal injected into live window"
-        except window.WindowError as e:
-            return f"wake: signal failed ({str(e)[:80]})"
+    # Always drive the standard wake pipeline (run_wake -> _window_wake_plan
+    # + _window_wake), including the alive-resident ear path: it renders a
+    # fresh note, sets the awake marker and starts the watchdog, and falls
+    # back to headless on any AppleScript failure. Do not re-implement any
+    # of that here — a hand-rolled signal-only path would skip set_awake and
+    # the watchdog, letting the next tick double-wake and the eventual
+    # lie_down hit claim_lie_down's "not awake" no-op.
     conn = db.connect(cfg)
     try:
         now = _now(cfg)
@@ -52,9 +44,11 @@ def cmd_wake(cfg: dict) -> str:
                     "explanation": f"{now.strftime('%H:%M')} manual ctl wake"}
         result = run_wake(conn, cfg, decision, now=now)
         if result.get("mode") != "window":
-            integration.lie_down(conn, cfg)
+            next_floor = integration.lie_down(conn, cfg)
+            wake_state.set_next_wake_at(
+                cfg, next_floor.isoformat() if next_floor else None)
         rotated = "fresh" if wake_state.load(cfg).get("rotated") else "resume/spawn"
-        return f"wake: dead window -> {rotated} (mode={result.get('mode')})"
+        return f"wake: {rotated} (mode={result.get('mode')})"
     finally:
         conn.close()
 
@@ -71,9 +65,12 @@ def _resolve_minutes(cfg: dict, until: str | None, minutes: float | None) -> flo
 
 
 def cmd_sleep(cfg: dict, until: str | None, minutes: float | None, rotate: bool) -> str:
-    from cortex.wake import _window_alive
     mins = _resolve_minutes(cfg, until, minutes)
-    if _window_alive(cfg):
+    # Gate on the awake marker, not window liveness: a resident window is
+    # commonly alive-but-dormant (asleep, no wake in progress). Injecting a
+    # lie_down prompt then hits claim_lie_down's "not awake" no-op and the
+    # requested minutes/rotate are silently dropped.
+    if wake_state.load(cfg).get("awake"):
         tmpl = cfg["wake"].get("ctl_sleep_prompt") or (
             "Wrap up this turn: {rotate}lie_down(next_wake_min={mins}{rotate_arg}).")
         rot = "write your handoff then " if rotate else ""
@@ -84,12 +81,13 @@ def cmd_sleep(cfg: dict, until: str | None, minutes: float | None, rotate: bool)
         if window.inject_prompt(cfg, prompt):
             return f"sleep: instruction injected (next_wake_min={int(mins)}, rotate={rotate})"
         return "sleep: no resident window to inject into"
-    # Dead window: set the ledger directly so the next reconcile fires it.
+    # Not awake (dead window, or alive-but-dormant): set the ledger directly
+    # so the next reconcile/tick fires it.
     due = _now(cfg) + timedelta(minutes=mins)
     wake_state.set_next_wake_at(cfg, due.isoformat())
     if rotate:
         wake_state.set_rotated(cfg)
-    return f"sleep: window dead -> ledger set for {due.strftime('%H:%M')} (rotate={rotate})"
+    return f"sleep: ledger set for {due.strftime('%H:%M')} (rotate={rotate})"
 
 
 def cmd_pause(cfg: dict) -> str:

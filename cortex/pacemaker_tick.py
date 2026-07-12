@@ -109,8 +109,22 @@ def _fire_dead_window(conn, cfg: dict, why: str) -> str:
     Every branch here handled the due ledger entry -> it must be consumed
     (cleared or replaced with the freshly redrawn floor), else the stale
     next_wake_at stays due and reconcile re-fires it again next tick (headless
-    wake every ~5 min)."""
+    wake every ~5 min).
+
+    Runs the same night/daily-budget gates run_tick would (state + context ->
+    gates.run_gates), so an alarm due mid-night or after budget exhaustion
+    does not fire anyway. Gated -> HOLD, ledger left UN-consumed (reconcile
+    retries every tick, firing naturally once the gate opens — a night-time
+    accidental close then resumes at gate end, matching the night design)."""
+    from cortex.pacemaker import gates as gates_mod
     now = integration._now(cfg)
+    state = integration.load_state(conn)
+    context = integration.build_context(conn, cfg, now, state)
+    gate_results = gates_mod.run_gates(state, context, cfg, now)
+    gated_by = [g for g in gate_results if not g.allowed]
+    if gated_by:
+        names = ", ".join(g.name for g in gated_by)
+        return f"reconcile ({why}) -> gated ({names}), ledger held for retry"
     if bool(cfg["pacemaker"].get("dry_run", True)):
         next_floor = integration.lie_down(conn, cfg)
         wake_state.set_next_wake_at(cfg, next_floor.isoformat() if next_floor else None)

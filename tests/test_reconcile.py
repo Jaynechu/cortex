@@ -23,6 +23,7 @@ def cfg(tmp_path):
     c["paths"]["marrow_db"] = str(tmp_path / "marrow.db")
     c["paths"]["self_schedule_file"] = str(home / "self_schedule.json")
     c["paths"]["transcript_dir"] = str(tmp_path / "transcript")
+    c["paths"]["ny_db_pages"] = str(tmp_path / "ny")  # isolate symlinks.ensure_all
     c["wake"]["sentinel"] = False  # no detached sentinel in tests
     return c
 
@@ -195,6 +196,7 @@ def test_fire_dead_window_dry_run_consumes_ledger(cfg):
     """P1-2: a due-ledger fire in dry_run must replace next_wake_at with the
     freshly redrawn floor, not leave the stale due timestamp (else every
     subsequent tick re-fires the same reconcile wake)."""
+    cfg["gates"]["night"] = {"start": "23:00", "end": "23:00", "cap": 0}  # disabled
     cfg["pacemaker"]["dry_run"] = True
     now = datetime.now(_tz(cfg))
     stale_due = now - timedelta(minutes=1)
@@ -207,6 +209,52 @@ def test_fire_dead_window_dry_run_consumes_ledger(cfg):
     new_due = wake_state.get_next_wake_at(cfg)
     assert new_due is not None
     assert new_due != stale_due.isoformat()
+
+
+def test_fire_dead_window_night_gated_holds_ledger(cfg):
+    """P1-B: a due-ledger fire that lands inside the night gate must HOLD
+    (gates.run_gates disallows) and leave next_wake_at UN-consumed, so
+    reconcile retries every tick and fires naturally once the gate opens."""
+    cfg["gates"]["night"] = {"start": "00:00", "end": "23:59", "cap": 0}  # always night
+    now = datetime.now(_tz(cfg))
+    stale_due = now - timedelta(minutes=1)
+    wake_state.set_next_wake_at(cfg, stale_due.isoformat())
+    conn = db.connect(cfg)
+    try:
+        msg = pacemaker_tick._fire_dead_window(conn, cfg, "ledger due, window dead")
+    finally:
+        conn.close()
+    assert "gated" in msg.lower()
+    assert wake_state.get_next_wake_at(cfg) == stale_due.isoformat()  # untouched
+
+
+def test_fire_dead_window_daily_budget_gated_holds_ledger(cfg):
+    """P1-B: a due-ledger fire after daily budget exhaustion must also HOLD."""
+    from zoneinfo import ZoneInfo
+    cfg["gates"]["night"] = {"start": "23:00", "end": "23:00", "cap": 0}  # disabled
+    cfg["gates"]["daily_budget"] = {"tokens": 100}
+    # _fire_dead_window reads the REAL wall clock (integration._now) for the
+    # gate check, so the "finished window" row must land in TODAY's local
+    # window (local midnight -> now), matching test_daily_budget_gates_floor.
+    now = pacemaker_tick.integration._now(cfg)
+    midnight = now.replace(hour=0, minute=1, second=0, microsecond=0)
+    day = midnight.astimezone(ZoneInfo("UTC"))
+    stale_due = now - timedelta(minutes=1)
+    wake_state.set_next_wake_at(cfg, stale_due.isoformat())
+    conn = db.connect(cfg)
+    try:
+        # A FINISHED window (peak over cap, then a lower row closes it) puts
+        # Cortex Today over the cap — same pattern as
+        # test_integration.test_daily_budget_gates_floor.
+        conn.executemany(
+            "INSERT INTO ct_wake_log (ts, wake, dry_run, tokens) VALUES (?,1,0,?)",
+            [(day.isoformat(), 200), ((day + timedelta(minutes=5)).isoformat(), 3)])
+        conn.commit()
+        msg = pacemaker_tick._fire_dead_window(conn, cfg, "ledger due, window dead")
+    finally:
+        conn.close()
+    assert "gated" in msg.lower()
+    assert wake_state.get_next_wake_at(cfg) == stale_due.isoformat()  # untouched
 
 
 def test_main_pause_short_circuits_before_night_close(cfg, monkeypatch):
@@ -268,30 +316,70 @@ def test_ctl_pause_resume(cfg, monkeypatch, capsys):
 
 
 def test_ctl_wake_clears_paused(cfg, monkeypatch):
-    from cortex import ctl, window
-    # Live-window path so cmd_wake returns before any machine-touching wake.
-    monkeypatch.setattr("cortex.wake._window_alive", lambda c: True)
-    monkeypatch.setattr(window, "append_wake_signal", lambda c, now: None)
+    """P1-A: cmd_wake always drives the standard run_wake pipeline (never a
+    hand-rolled signal-only path) — stub run_wake itself, the way test_wake.py
+    exercises run_wake's internals directly."""
+    from cortex import ctl
+    monkeypatch.setattr("cortex.wake.run_wake",
+                        lambda conn, c, decision, now=None: {"mode": "window"})
     wake_state.set_paused(cfg, True)
     assert wake_state.is_paused(cfg) is True
     ctl.cmd_wake(cfg)
     assert wake_state.is_paused(cfg) is False
 
 
-def test_ctl_sleep_dead_window_sets_ledger(cfg, monkeypatch):
+def test_ctl_wake_sets_awake_via_standard_pipeline(cfg, monkeypatch):
+    """P1-A: cmd_wake on an alive-but-dormant resident must mark awake + start
+    the watchdog (via the standard run_wake -> _window_wake ear path), not
+    just append a bell signal. Exercise the real internals (no run_wake stub)
+    with only the machine-touching leaves stubbed, mirroring test_wake.py."""
+    from cortex import ctl, wake, watchdog, window
+    from cortex.transcript import transcript_dir
+    cfg["wake"]["ear_timeout_sec"] = 3  # keep the poll loop bounded/fast
+    wake_state.set_session_id(cfg, "SID-1")
+    monkeypatch.setattr(wake, "_window_wake_plan", lambda c: "ear")
+    monkeypatch.setattr(wake, "_window_alive", lambda c: True)
+    monkeypatch.setattr(watchdog, "spawn", lambda c: 12345)  # no real subprocess
+
+    def fake_append_signal(c, now):
+        # simulate the ear landing: transcript grows so _signal_landed sees it
+        p = transcript_dir(c) / "fake.jsonl"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("{}")
+    monkeypatch.setattr(window, "append_wake_signal", fake_append_signal)
+    assert wake_state.is_awake(cfg) is False
+    ctl.cmd_wake(cfg)
+    assert wake_state.is_awake(cfg) is True  # P1-A: standard path marks awake
+
+
+def test_ctl_sleep_dead_window_sets_ledger(cfg):
     from cortex import ctl
-    monkeypatch.setattr("cortex.wake._window_alive", lambda c: False)
     msg = ctl.cmd_sleep(cfg, until=None, minutes=30, rotate=True)
     assert wake_state.get_next_wake_at(cfg) is not None
     assert wake_state.load(cfg).get("rotated") is True
     assert "ledger set" in msg
 
 
+def test_ctl_sleep_gates_on_awake_not_liveness(cfg):
+    """P2-A: a resident window can be alive-but-dormant (asleep). cmd_sleep
+    must gate the live-window injection on the awake marker, not liveness —
+    else the requested minutes/rotate silently drop via claim_lie_down's
+    'not awake' no-op."""
+    from cortex import ctl
+    wake_state.set_session_id(cfg, "SID-1")  # a resident session exists
+    # awake marker NOT set -> even if the window were alive, must fall to the
+    # ledger-direct path, not the injection path.
+    msg = ctl.cmd_sleep(cfg, until=None, minutes=15, rotate=False)
+    assert "ledger set" in msg
+    assert wake_state.get_next_wake_at(cfg) is not None
+
+
 def test_ctl_sleep_live_window_rotate_injects_rotate_arg(cfg, monkeypatch):
-    """P2-1: `sleep --rotate` on a live window must generate a lie_down() call
-    with rotate=true, not just add prose the session can miss."""
+    """P2-1: `sleep --rotate` on a live+awake window must generate a
+    lie_down() call with rotate=true, not just add prose the session can
+    miss."""
     from cortex import ctl, window
-    monkeypatch.setattr("cortex.wake._window_alive", lambda c: True)
+    wake_state.set_awake(cfg, 1, None)
     captured = {}
     monkeypatch.setattr(window, "inject_prompt",
                         lambda c, text: captured.setdefault("text", text) or True)
@@ -302,7 +390,7 @@ def test_ctl_sleep_live_window_rotate_injects_rotate_arg(cfg, monkeypatch):
 
 def test_ctl_sleep_live_window_no_rotate_omits_rotate_arg(cfg, monkeypatch):
     from cortex import ctl, window
-    monkeypatch.setattr("cortex.wake._window_alive", lambda c: True)
+    wake_state.set_awake(cfg, 1, None)
     captured = {}
     monkeypatch.setattr(window, "inject_prompt",
                         lambda c, text: captured.setdefault("text", text) or True)
@@ -313,16 +401,26 @@ def test_ctl_sleep_live_window_no_rotate_omits_rotate_arg(cfg, monkeypatch):
 def test_ctl_wake_live_window_renders_fresh_note(cfg, monkeypatch):
     """P2-2: `wake` on a live window must render+write a fresh note before
     signalling, not append the bell onto a stale note from a previous wake."""
-    from cortex import ctl, window
-    monkeypatch.setattr("cortex.wake._window_alive", lambda c: True)
+    from cortex import ctl, wake, watchdog, window
+    from cortex.transcript import transcript_dir
+    cfg["wake"]["ear_timeout_sec"] = 3  # keep the poll loop bounded/fast
+    wake_state.set_session_id(cfg, "SID-1")
+    monkeypatch.setattr(wake, "_window_wake_plan", lambda c: "ear")
+    monkeypatch.setattr(wake, "_window_alive", lambda c: True)
+    monkeypatch.setattr(watchdog, "spawn", lambda c: 12345)  # no real subprocess
     calls = {"note": None}
 
     def fake_assemble_note(conn, cfg, now, **kw):
         return "FRESH NOTE TEXT"
-    monkeypatch.setattr("cortex.wake.assemble_note", fake_assemble_note)
+    monkeypatch.setattr(wake, "assemble_note", fake_assemble_note)
     monkeypatch.setattr(window, "write_note",
                         lambda c, text: calls.__setitem__("note", text))
-    monkeypatch.setattr(window, "append_wake_signal", lambda c, now: None)
+
+    def fake_append_signal(c, now):
+        p = transcript_dir(c) / "fake.jsonl"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text("{}")
+    monkeypatch.setattr(window, "append_wake_signal", fake_append_signal)
     ctl.cmd_wake(cfg)
     assert calls["note"] == "FRESH NOTE TEXT"
 
