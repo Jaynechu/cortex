@@ -47,6 +47,11 @@ def _night_close(cfg: dict, now, st: dict) -> str | None:
     if st.get("night_rotated_key") == key or not wake_state.get_session_id(cfg):
         return None
     wake_state.set_rotated(cfg)
+    # Durable per-session fact, same as lie_down(rotate=True): st.get("transcript")
+    # is this (idle, about-to-retire) session's transcript, recorded by its last
+    # set_awake — record it now so a stale pointer can never resume it later,
+    # even after the one-shot `rotated` flag gets consumed by an unrelated wake.
+    wake_state.set_retired_sid(cfg, st.get("transcript"))
     wake_state.update(cfg, night_rotated_key=key)
     return "night close: resident session marked non-resumable"
 

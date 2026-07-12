@@ -122,6 +122,11 @@ def lie_down(cfg: dict, force_slept: str | None = None, rotate: bool = False,
         # fresh window (SIGTERM claude + fresh spawn) that reads the handoff.
         if rotate:
             wake_state.set_rotated(cfg)
+            # Durable per-session fact (unlike the one-shot `rotated` flag): this
+            # session just handed off and must never be resumed again, even if
+            # `rotated` gets consumed by an unrelated wake before this session's
+            # stale transcript pointer is overwritten.
+            wake_state.set_retired_sid(cfg, state.get("transcript"))
         # awake marker already cleared atomically by claim_lie_down at entry.
         # _arm_sentinel may night-clamp next_floor; use its EFFECTIVE return so
         # the reported next_wake always matches the ledger + sentinel (never

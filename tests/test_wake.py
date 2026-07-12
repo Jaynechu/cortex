@@ -323,6 +323,70 @@ def test_window_wake_unrotated_no_handoff(monkeypatch, marrow_conn, rot_cfg):
 
 
 # --------------------------------------------------------------------------- #
+# retired_sid: durable per-session rotate guard (belt-and-braces over the
+# one-shot `rotated` flag / stale `transcript` pointer going out of sync).
+# --------------------------------------------------------------------------- #
+
+def test_window_wake_plan_clears_transcript_on_rotate_consume(rot_cfg):
+    """The transcript pointer is cleared at the SAME moment take_rotated
+    consumes the flag, so nothing in between can read it as still live."""
+    from cortex import wake_state
+    wake_state.set_session_id(rot_cfg, "sid-1")
+    wake_state.update(rot_cfg, transcript="/t/retiring.jsonl")
+    wake_state.set_rotated(rot_cfg)
+    assert wake._window_wake_plan(rot_cfg) == "fresh"
+    assert wake_state.load(rot_cfg).get("transcript") is None
+
+
+def test_resume_or_fresh_dead_normal_resume(monkeypatch, marrow_conn, rot_cfg):
+    """Baseline: an un-retired resumable sid resumes normally."""
+    from cortex import transcript, wake_state
+    monkeypatch.setattr(transcript, "newest_window_lineage", lambda cfg, marker: None)
+    wake_state.update(rot_cfg, transcript="/t/alive-sid.jsonl")
+    captured = {}
+    monkeypatch.setattr(wake, "_spawn_wake",
+                        lambda conn, cfg, now, resume=False:
+                        captured.update(resume=resume) or {"mode": "window"})
+    wake._resume_or_fresh_dead(marrow_conn, rot_cfg, DAY1, "test")
+    assert captured["resume"] is True
+
+
+def test_resume_or_fresh_dead_retired_sid_forces_fresh(monkeypatch, marrow_conn, rot_cfg):
+    """Coordinator repro: `rotated` already consumed by an earlier wake, but
+    the stale transcript pointer still resolves to the retired session's sid.
+    retired_sid must block the resume and force a fresh spawn instead — this
+    is the single choke point both ctl.cmd_wake's dead-branch and tick
+    reconcile's resume share (_window_wake -> _resume_or_fresh_dead)."""
+    from cortex import transcript, wake_state
+    monkeypatch.setattr(transcript, "newest_window_lineage", lambda cfg, marker: None)
+    # rotated already consumed elsewhere; stale pointer still names the
+    # retired session (durably recorded via set_retired_sid at rotate time).
+    wake_state.update(rot_cfg, transcript="/t/retired-sid.jsonl")
+    wake_state.set_retired_sid(rot_cfg, "/t/retired-sid.jsonl")
+    assert wake_state.load(rot_cfg).get("rotated") is None  # already consumed
+    captured = {}
+    monkeypatch.setattr(wake, "_spawn_wake",
+                        lambda conn, cfg, now, resume=False:
+                        captured.update(resume=resume) or {"mode": "window"})
+    wake._resume_or_fresh_dead(marrow_conn, rot_cfg, DAY1, "test")
+    assert captured["resume"] is False  # never resumes a retired session
+
+
+def test_night_close_idle_rotate_records_retired_sid(monkeypatch, night_cfg):
+    """_night_close's idle-resident rotate branch also records retired_sid,
+    same as lie_down(rotate=True) — this is the exact path in the coordinator's
+    repro (handoff written 23:01 via night close, not an explicit ctl sleep)."""
+    from cortex import pacemaker_tick, wake_state, window
+    wake_state.set_session_id(night_cfg, "sid-1")
+    wake_state.update(night_cfg, transcript="/t/b1a7aae2.jsonl")
+    monkeypatch.setattr(window, "inject_prompt", lambda cfg, text: True)
+    st = wake_state.load(night_cfg)  # no awake key -> already lying down
+    pacemaker_tick._night_close(night_cfg, NIGHT, st)
+    assert wake_state.load(night_cfg).get("rotated") is True
+    assert wake_state.get_retired_sid(night_cfg) == "b1a7aae2"
+
+
+# --------------------------------------------------------------------------- #
 # Night close (replaces rebirth): the 23:00 gate hands a still-awake resident
 # window a wrap-up instruction, then marks the idle session non-resumable so the
 # first post-night wake is a plain fresh spawn.

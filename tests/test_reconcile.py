@@ -54,6 +54,22 @@ def test_set_awake_clears_ledger(cfg):
     assert wake_state.get_next_wake_at(cfg) is None
 
 
+def test_lie_down_rotate_records_retired_sid(cfg):
+    """lie_down(rotate=True) durably records the retiring session's sid (the
+    transcript jsonl stem) at the same moment it sets the one-shot rotated
+    flag — the belt-and-braces guard that outlives that flag being consumed
+    by an unrelated later wake."""
+    wake_state.set_awake(cfg, 1, "/t/retiring.jsonl")
+    lie_down.lie_down(cfg, rotate=True, next_wake_min=30)
+    assert wake_state.get_retired_sid(cfg) == "retiring"
+
+
+def test_lie_down_no_rotate_leaves_retired_sid_untouched(cfg):
+    wake_state.set_awake(cfg, 1, "/t/still-alive.jsonl")
+    lie_down.lie_down(cfg, rotate=False, next_wake_min=30)
+    assert wake_state.get_retired_sid(cfg) is None
+
+
 # --- night clamp --------------------------------------------------------------
 
 def test_night_clamp_pushes_to_gate_end(cfg):
@@ -155,6 +171,31 @@ def test_reconcile_accidental_close_resumes(cfg, monkeypatch):
     msg = pacemaker_tick._reconcile(None, cfg, st, now)
     assert "accidental close" in calls["why"]
     assert msg.startswith("fired:")
+
+
+def test_fire_dead_window_accidental_close_respects_retired_sid(cfg, monkeypatch):
+    """Reconcile's accidental-close fire shares the exact same choke point as
+    ctl.cmd_wake's dead-branch (_window_wake -> _resume_or_fresh_dead) — a
+    retired_sid match must force fresh spawn there too, never a resume."""
+    from cortex import transcript, wake, window
+    cfg["gates"]["night"] = {"start": "23:00", "end": "23:00", "cap": 0}  # disabled
+    cfg["pacemaker"]["dry_run"] = False
+    cfg["wake"]["mode"] = "window"
+    wake_state.set_session_id(cfg, "SID-1")
+    wake_state.update(cfg, transcript="/t/retired-sid.jsonl")
+    wake_state.set_retired_sid(cfg, "/t/retired-sid.jsonl")
+    monkeypatch.setattr(window, "is_running", lambda: False)  # dead resident
+    monkeypatch.setattr(transcript, "newest_window_lineage", lambda cfg, marker: None)
+    captured = {}
+    monkeypatch.setattr(wake, "_spawn_wake",
+                        lambda conn, c, now, resume=False:
+                        captured.update(resume=resume) or {"mode": "window"})
+    conn = db.connect(cfg)
+    try:
+        pacemaker_tick._fire_dead_window(conn, cfg, "accidental close of awake window")
+    finally:
+        conn.close()
+    assert captured.get("resume") is False  # never resumes the retired sid
 
 
 def test_reconcile_paused_holds_everything(cfg, monkeypatch):

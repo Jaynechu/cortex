@@ -293,6 +293,22 @@ def take_rotated(cfg: dict) -> bool:
         return val
 
 
+def set_retired_sid(cfg: dict, transcript_path: str | None) -> None:
+    """Durably record the claude session UUID (the transcript jsonl stem, same
+    convention as window.claude_session_id) that was just retired by a
+    rotate — a per-session fact, unlike the one-shot `rotated` flag. Every
+    resume path must check its resume target against this before resuming: a
+    rotated session handed off and must NEVER be resumed again, even after
+    `rotated` itself has already been consumed by an unrelated wake and the
+    (also one-shot) `transcript` hint still happens to point at it."""
+    sid = Path(str(transcript_path)).stem if transcript_path else None
+    update(cfg, retired_sid=sid)
+
+
+def get_retired_sid(cfg: dict) -> str | None:
+    return load(cfg).get("retired_sid")
+
+
 def get_sentinel_pid(cfg: dict) -> int | None:
     """Recorded pid of the one-shot exact-time wake sentinel (cortex.sentinel),
     or None. Every new lie_down kills this predecessor before arming a fresh one."""

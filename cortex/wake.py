@@ -184,6 +184,14 @@ def _window_wake_plan(cfg) -> str:
     from cortex import transcript, wake_state, window
 
     if wake_state.take_rotated(cfg):
+        # Clear the stale transcript pointer at the SAME moment the one-shot
+        # rotated flag is consumed: from here on this wake is a fresh spawn
+        # (set_awake will record the NEW session's transcript once it exists),
+        # so nothing in between may read the retiring session's pointer as
+        # live. retired_sid (durable, set at rotate time by lie_down/
+        # _night_close) is untouched here — it is the belt-and-braces guard
+        # every resume path checks even after this one-shot flag is gone.
+        wake_state.update(cfg, transcript=None)
         return "fresh"  # deliberate rotate/rebirth/token-cap -> new brain
     sid = wake_state.get_session_id(cfg)
     if not sid or not window.is_running() or not window._session_alive(sid):
@@ -383,11 +391,22 @@ def _ear_miss_ladder(conn, cfg, now, timeout: float) -> dict | None:
 
 def _resume_or_fresh_dead(conn, cfg, now, why: str) -> dict | None:
     """A dead resident window with NO rotate flag. A resumable claude session
-    UUID -> resume (context back, no catchup). No UUID -> fresh spawn with the
-    died-no-handoff catchup line (only when the window wrote no handoff)."""
-    from cortex import window
+    UUID -> resume (context back, no catchup) UNLESS that UUID was already
+    durably retired by a rotate (wake_state.retired_sid) — the one-shot
+    `rotated` flag can be consumed by an unrelated wake while a stale
+    `transcript` pointer still resolves claude_session_id() to the retired
+    session; retired_sid is the belt-and-braces guard that survives that.
+    No UUID (or a retired one) -> fresh spawn with the died-no-handoff
+    catchup line (only when the window wrote no handoff)."""
+    from cortex import wake_state, window
 
-    if window.claude_session_id(cfg):
+    sid = window.claude_session_id(cfg)
+    if sid and sid == wake_state.get_retired_sid(cfg):
+        _audit_wake(conn, wake_id_of(now),
+                    f"{why}, sid {sid[:8]} already retired -> fresh, not resume")
+        sid = None
+
+    if sid:
         _audit_wake(conn, wake_id_of(now), f"{why} -> resume")
         return _spawn_wake(conn, cfg, now, resume=True)
 
