@@ -1,8 +1,7 @@
-"""One-time idempotent symlinks: daybrief.md + wishlist.md into NY db-pages.
-Fixed source paths keep the links zero-maintenance. daybrief.md is owned by
-marrow (rendered by marrow.daybrief); cortex only links it in, so the link
-may dangle until marrow's first render — that self-heals. Never touches any
-other NY file.
+"""One-time idempotent symlinks: wishlist.md into NY db-pages.
+Fixed source path keeps the link zero-maintenance. daybrief.md is now a real
+marrow-owned file inside NY (no cortex symlink). Never touches any other NY
+file.
 """
 from __future__ import annotations
 
@@ -26,7 +25,9 @@ def _ensure_symlink(source: Path, target: Path) -> None:
             return
         raise FileExistsError(f"{target} is a symlink to something else: {target.resolve()}")
     if target.exists():
-        raise FileExistsError(f"{target} exists and is not a symlink — refusing to clobber")
+        # Real file (e.g. marrow-owned daybrief.md landed here during the
+        # migration window) — leave it alone, never clobber.
+        return
     target.parent.mkdir(parents=True, exist_ok=True)
     target.symlink_to(source)
 
@@ -34,9 +35,7 @@ def _ensure_symlink(source: Path, target: Path) -> None:
 def ensure_all(cfg: dict) -> None:
     """Idempotent: safe to call on every wake."""
     ny_dir = config.ny_db_pages_dir(cfg)
-    daybrief_source = config.daybrief_path(cfg)
     wishlist_source = config.wishlist_path(cfg)
 
     ensure_wishlist(wishlist_source, config.wishlist_header(cfg))
-    _ensure_symlink(daybrief_source, ny_dir / "daybrief.md")
     _ensure_symlink(wishlist_source, ny_dir / "wishlist.md")

@@ -11,7 +11,6 @@ from cortex import symlinks
 def scfg(tmp_path):
     return {
         "paths": {
-            "daybrief": str(tmp_path / "daybrief.md"),
             "wishlist_file": str(tmp_path / "cortex_home" / "wishlist.md"),
             "ny_db_pages": str(tmp_path / "ny"),
             "cortex_home": str(tmp_path / "cortex_home"),
@@ -33,32 +32,30 @@ def test_ensure_wishlist_never_overwrites_existing(tmp_path):
     assert path.read_text() == "existing content\n"
 
 
-def test_ensure_all_creates_both_symlinks(scfg, tmp_path):
-    (tmp_path / "daybrief.md").write_text("2026-07-03\n")
+def test_ensure_all_creates_wishlist_symlink(scfg, tmp_path):
     symlinks.ensure_all(scfg)
 
     ny = Path(scfg["paths"]["ny_db_pages"])
-    assert (ny / "daybrief.md").is_symlink()
-    assert (ny / "daybrief.md").resolve() == (tmp_path / "daybrief.md").resolve()
     assert (ny / "wishlist.md").is_symlink()
     assert Path(scfg["paths"]["wishlist_file"]).exists()
 
 
 def test_ensure_all_idempotent(scfg, tmp_path):
-    (tmp_path / "daybrief.md").write_text("2026-07-03\n")
     symlinks.ensure_all(scfg)
     symlinks.ensure_all(scfg)  # second call: no error, no-op
 
     ny = Path(scfg["paths"]["ny_db_pages"])
-    assert (ny / "daybrief.md").is_symlink()
+    assert (ny / "wishlist.md").is_symlink()
 
 
-def test_ensure_all_refuses_to_clobber_foreign_file(scfg, tmp_path):
+def test_ensure_all_leaves_foreign_real_file_untouched(scfg, tmp_path):
     ny = Path(scfg["paths"]["ny_db_pages"])
     ny.mkdir(parents=True)
-    (ny / "daybrief.md").write_text("her own unrelated file\n")
+    # A real file at the wishlist target (e.g. marrow-owned during migration):
+    # no-op, never clobbered, never raised.
+    (ny / "wishlist.md").write_text("her own unrelated file\n")
 
-    with pytest.raises(FileExistsError):
-        symlinks.ensure_all(scfg)
+    symlinks.ensure_all(scfg)
 
-    assert (ny / "daybrief.md").read_text() == "her own unrelated file\n"
+    assert not (ny / "wishlist.md").is_symlink()
+    assert (ny / "wishlist.md").read_text() == "her own unrelated file\n"

@@ -36,7 +36,6 @@ def wcfg(base_cfg, tmp_path):
     cfg = dict(base_cfg)
     cfg["paths"] = {
         **base_cfg["paths"],
-        "daybrief": str(tmp_path / "daybrief.md"),
         "cortex_home": str(tmp_path / "cortex_home"),
         "wishlist_file": str(tmp_path / "cortex_home" / "wishlist.md"),
         "ny_db_pages": str(tmp_path / "ny"),
@@ -110,7 +109,6 @@ def test_run_wake_creates_ny_symlinks(marrow_conn, wcfg):
 
     from pathlib import Path
     ny = Path(wcfg["paths"]["ny_db_pages"])
-    assert (ny / "daybrief.md").is_symlink()
     assert (ny / "wishlist.md").is_symlink()
     assert (ny / "wishlist.md").resolve() == Path(wcfg["paths"]["wishlist_file"]).resolve()
 

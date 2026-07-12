@@ -12,7 +12,7 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
                              ct_pacemaker_state       │
                              ct_wake_log        note → iTerm window (resident claude) | marrow subprocess fallback
                                                       │
-                                                daybrief.md (marrow render, symlinked → NY) · watchdog (per-wake)
+                                                daybrief.md (marrow render, real file in NY) · watchdog (per-wake)
 ```
 
 - Own repo/venv `~/CC-Lab/cortex/`; ct_ tables on shared marrow DB `~/.config/marrow/marrow.db`.
@@ -106,9 +106,9 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
 - window_tokens = LAST usage line input+cache_read+cache_creation+output → occupancy; drives watchdog fuse only; 0 on read error (transcript.py:42-64, watchdog.py:153). mtime() drives rotation + ear polling.
 - net_tokens helper retired; Cortex Today sums per-window final occupancy not per-turn spend.
 ## 8. daybrief.md (retired day_log)
-- marrow-owned (marrow/daybrief.py) reusing SessionStart render fns; Cortex triggers render via marrow venv `-m marrow.daybrief` at collect_tick._render_daybrief + wake._render_daybrief; symlinks into NY.
+- marrow-owned (marrow/daybrief.py), real file in NY db-pages via marrow paths.daybrief (no cortex symlink); Cortex triggers render via marrow venv `-m marrow.daybrief` at collect_tick._render_daybrief + wake._render_daybrief.
 ## 9. Symlinks, install, deploy
-- symlinks.py: daybrief.md (may dangle until first marrow render) + wishlist.md → NY db-pages; refuses non-symlink clobber; ensure_all safe per-wake (symlinks.py:11-42).
+- symlinks.py: wishlist.md → NY db-pages; existing real file at target = no-op (never clobbers, guards daybrief migration); ensure_all safe per-wake (symlinks.py:11-39).
 - install.py: `python -m cortex.install [remove]` — writes 2 plists with 6 __TOKEN__ replacements, launchctl bootout+bootstrap gui/<uid>; no rollback (self-heals on re-run); zero test coverage (install.py:16-97).
 - pyproject.toml (setuptools, no third-party deps); plists set WorkingDirectory=repo root so `-m` resolves cortex/ without install/PYTHONPATH.
 - Plists: RunAtLoad + StartInterval, no KeepAlive/backoff — crashing tick re-fires next interval.
@@ -116,7 +116,7 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
 ## 10. Tests
 - Per-module test files under tests/; pure cores (pacemaker, note, geofence cursor) well covered. Gaps: install.py (untested), geofence same-minute-same-text dup.
 ## 11. Status
-- Live: collectors (knowledgec) · pacemaker (dry_run=false) · wake window + watchdog + fuse + sentinel · note · daybrief render · MCP lie_down/wait/say · symlinks.
+- Live: collectors (knowledgec) · pacemaker (dry_run=false) · wake window + watchdog + fuse + sentinel · note · daybrief render (real file in NY) · MCP lie_down/wait/say · wishlist symlink.
 - Unwired: event triggers · cal_busy/at_home real data · health/geofence collectors (flagged off, no producer).
 ## 12. Marrow-side organs
 > Marrow's half of the bridge — ONE module marrow/cortex_bridge.py, behind [cortex].enabled. Details marrow/MAP.md §6; index only.

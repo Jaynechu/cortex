@@ -16,7 +16,6 @@ DEFAULT_MARROW_DB = Path.home() / ".config" / "marrow" / "marrow.db"
 DEFAULT_KNOWLEDGEC_DB = (
     Path.home() / "Library" / "Application Support" / "Knowledge" / "knowledgeC.db"
 )
-DEFAULT_DAYBRIEF = Path.home() / ".config" / "marrow" / "daybrief.md"
 DEFAULT_AFFECT_FLAG = Path.home() / ".config" / "marrow" / "cortex" / "affect_flag.json"
 DEFAULT_SELF_SCHEDULE = Path.home() / ".config" / "marrow" / "cortex" / "self_schedule.json"
 DEFAULT_HANDOFF = Path.home() / ".config" / "marrow" / "cortex" / "handoff.md"
@@ -32,7 +31,6 @@ _DEFAULTS: dict[str, Any] = {
         "knowledgec_db": "",
         "geofence_file": "",
         "health_export": "",
-        "daybrief": "",
         "affect_flag_file": "",
         "self_schedule_file": "",
         "handoff_file": "",
@@ -239,13 +237,6 @@ def geofence_file_path(cfg: dict) -> Path | None:
 def health_export_path(cfg: dict) -> Path | None:
     raw = cfg["paths"].get("health_export") or ""
     return Path(raw).expanduser() if raw else None
-
-
-def daybrief_path(cfg: dict) -> Path:
-    """marrow-owned daybrief.md (rendered by marrow.daybrief). Cortex only
-    symlinks it into NY db-pages; it never writes this file."""
-    raw = cfg["paths"].get("daybrief") or ""
-    return Path(raw).expanduser() if raw else DEFAULT_DAYBRIEF
 
 
 def affect_flag_path(cfg: dict) -> Path:
