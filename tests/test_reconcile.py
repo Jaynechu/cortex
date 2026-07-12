@@ -221,6 +221,22 @@ def test_main_pause_short_circuits_before_night_close(cfg, monkeypatch):
     assert pacemaker_tick.main() == 0
 
 
+def test_main_normal_tick_dry_run_wake_sets_ledger(cfg, monkeypatch):
+    """Follow-up to P1-2: main()'s normal-tick dry-run wake path must also
+    write the redrawn floor into next_wake_at, not just log-only advance the
+    in-memory floor — else the ledger goes stale here too."""
+    monkeypatch.setattr("cortex.wake._window_alive", lambda c: False)
+    monkeypatch.setattr(pacemaker_tick.config, "load", lambda: cfg)
+    cfg["pacemaker"]["dry_run"] = True
+    now = datetime.now(_tz(cfg))
+    decision = {"wake": True, "reasons": [], "gated_by": [], "explanation": "test"}
+    monkeypatch.setattr(pacemaker_tick.integration, "run_tick",
+                        lambda conn, c, now=None: decision)
+    assert wake_state.get_next_wake_at(cfg) is None
+    assert pacemaker_tick.main() == 0
+    assert wake_state.get_next_wake_at(cfg) is not None
+
+
 # --- per-session _window_alive ------------------------------------------------
 
 def test_window_alive_is_per_session(cfg, monkeypatch):

@@ -190,13 +190,19 @@ def main() -> int:
 
         if decision["wake"]:
             if dry_run:
-                integration.lie_down(conn, cfg)  # log-only: still advance floor
+                # log-only: still advance floor; ledger must mirror it (P1-2
+                # rationale) so reconcile doesn't re-fire on a stale due time.
+                next_floor = integration.lie_down(conn, cfg)
+                wake_state.set_next_wake_at(
+                    cfg, next_floor.isoformat() if next_floor else None)
             else:
                 result = run_wake(conn, cfg, decision,
                                   tick_started=t_tick, gate_done=t_gate)
                 if result.get("mode") != "window":
                     # headless path finished -> wake over, redraw floor now.
-                    integration.lie_down(conn, cfg)
+                    next_floor = integration.lie_down(conn, cfg)
+                    wake_state.set_next_wake_at(
+                        cfg, next_floor.isoformat() if next_floor else None)
                 # window path: marker set, watchdog owns lie_down.
     finally:
         conn.close()
