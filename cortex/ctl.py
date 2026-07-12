@@ -26,12 +26,22 @@ def _now(cfg: dict) -> datetime:
 
 
 def cmd_wake(cfg: dict) -> str:
-    from cortex.wake import _window_alive, run_wake
+    from cortex.wake import _window_alive, assemble_note, run_wake
     # A human explicitly waking wants activity back — clear DND first.
     wake_state.set_paused(cfg, False)
     if _window_alive(cfg):
         try:
-            window.append_wake_signal(cfg, _now(cfg))
+            now = _now(cfg)
+            # Render a fresh note before signalling — the marrow hook injects
+            # whatever note.txt holds when it sees the bell marker, so a stale
+            # note from a previous wake must not be left in place.
+            note_conn = db.connect(cfg)
+            try:
+                note_text = assemble_note(note_conn, cfg, now)
+            finally:
+                note_conn.close()
+            window.write_note(cfg, note_text)
+            window.append_wake_signal(cfg, now)
             return "wake: signal injected into live window"
         except window.WindowError as e:
             return f"wake: signal failed ({str(e)[:80]})"
@@ -65,9 +75,12 @@ def cmd_sleep(cfg: dict, until: str | None, minutes: float | None, rotate: bool)
     mins = _resolve_minutes(cfg, until, minutes)
     if _window_alive(cfg):
         tmpl = cfg["wake"].get("ctl_sleep_prompt") or (
-            "Wrap up this turn: {rotate}lie_down(next_wake_min={mins}).")
+            "Wrap up this turn: {rotate}lie_down(next_wake_min={mins}{rotate_arg}).")
         rot = "write your handoff then " if rotate else ""
-        prompt = tmpl.replace("{mins}", str(int(mins))).replace("{rotate}", rot)
+        rotate_arg = ", rotate=true" if rotate else ""
+        prompt = (tmpl.replace("{mins}", str(int(mins)))
+                  .replace("{rotate_arg}", rotate_arg)
+                  .replace("{rotate}", rot))
         if window.inject_prompt(cfg, prompt):
             return f"sleep: instruction injected (next_wake_min={int(mins)}, rotate={rotate})"
         return "sleep: no resident window to inject into"

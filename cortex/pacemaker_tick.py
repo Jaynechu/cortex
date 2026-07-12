@@ -104,16 +104,23 @@ def _fire_dead_window(conn, cfg: dict, why: str) -> str:
     """A dead resident window whose ledger is due (or an accidental close) needs
     firing NOW. Reuse the tested wake path: run_wake's _window_wake_plan reads the
     rotate flag itself — rotated -> fresh spawn (handoff), else -> resume the
-    recorded session. dry_run short-circuits to a log-only floor redraw."""
+    recorded session. dry_run short-circuits to a log-only floor redraw.
+
+    Every branch here handled the due ledger entry -> it must be consumed
+    (cleared or replaced with the freshly redrawn floor), else the stale
+    next_wake_at stays due and reconcile re-fires it again next tick (headless
+    wake every ~5 min)."""
     now = integration._now(cfg)
     if bool(cfg["pacemaker"].get("dry_run", True)):
-        integration.lie_down(conn, cfg)
+        next_floor = integration.lie_down(conn, cfg)
+        wake_state.set_next_wake_at(cfg, next_floor.isoformat() if next_floor else None)
         return f"reconcile ({why}) -> dry_run, floor redrawn only"
     decision = {"wake": True, "reasons": [], "gated_by": [],
                 "explanation": f"{now.strftime('%H:%M')} reconcile: {why}"}
     result = run_wake(conn, cfg, decision, now=now)
     if result.get("mode") != "window":
-        integration.lie_down(conn, cfg)
+        next_floor = integration.lie_down(conn, cfg)
+        wake_state.set_next_wake_at(cfg, next_floor.isoformat() if next_floor else None)
     return f"reconcile ({why}) -> wake fired (mode={result.get('mode')})"
 
 
@@ -128,7 +135,10 @@ def _reconcile(conn, cfg: dict, st: dict, now) -> str | None:
       - window dead + awake + no next_wake_at    -> accidental close -> resume now.
       - window dead + next_wake_at in the future -> hold (this tick / the 5-min
         cadence catches it at due time; no sentinel re-arm — the ledger is the
-        source of truth, a re-arm would only duplicate the same fire)."""
+        source of truth, a re-arm would only duplicate the same fire). This
+        hold is authoritative: it short-circuits main() so no other wake path
+        (e.g. an overdue floor) can fire early while a future ledger alarm
+        exists (e.g. right after `ctl sleep --min 30`)."""
     from cortex.wake import _window_alive
 
     if wake_state.is_paused(cfg):
@@ -142,6 +152,10 @@ def _reconcile(conn, cfg: dict, st: dict, now) -> str | None:
         # An awake session whose window was closed with no scheduled wake: resume
         # immediately (1h prompt-cache tier — resume within ~5 min keeps it hot).
         return _fire_dead_window(conn, cfg, "accidental close of awake window")
+    if due is not None:
+        # Dead window, ledger not yet due -> hold; ledger is authoritative, no
+        # other wake path (e.g. floor/run_tick) may fire early.
+        return f"ledger hold: next wake {due.strftime('%H:%M')}, window dead"
     return None
 
 
@@ -150,6 +164,12 @@ def main() -> int:
     conn = db.connect(cfg)
     try:
         st = wake_state.load(cfg)
+        if wake_state.is_paused(cfg):
+            # DND holds everything, including night-close's wrap-up injection —
+            # must be checked before _night_close, not just inside _reconcile.
+            print(f"{db.utcnow_iso()} "
+                  "paused (DND): reconcile + reaps + injections held", flush=True)
+            return 0
         nc = _night_close(cfg, integration._now(cfg), st)
         if nc:
             print(f"{db.utcnow_iso()} {nc}", flush=True)

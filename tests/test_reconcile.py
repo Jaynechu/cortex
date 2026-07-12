@@ -71,6 +71,33 @@ def test_night_clamp_leaves_daytime_untouched(cfg):
     assert lie_down._clamp_to_night_end(cfg, noon) == noon
 
 
+def test_arm_sentinel_returns_effective_clamped_time(cfg):
+    """P2-3: _arm_sentinel must return the EFFECTIVE (post-night-clamp) time —
+    the ledger, sentinel and lie_down()'s reported next_wake must all agree
+    (never report the pre-clamp time, e.g. 02:00, when 08:00 was armed)."""
+    tz = _tz(cfg)
+    cfg["gates"]["night"] = {"start": "23:00", "end": "08:00", "cap": 0}
+    cfg["wake"]["sentinel"] = False  # no detached process in tests
+    mid_night = datetime(2026, 7, 13, 2, 0, tzinfo=tz)  # inside the gate
+    effective = lie_down._arm_sentinel(cfg, mid_night)
+    assert effective.hour == 8 and effective.minute == 0
+    ledger = wake_state.get_next_wake_at(cfg)
+    assert ledger is not None
+    assert "08:00" in ledger  # ledger agrees with the returned effective time
+
+
+def test_lie_down_reports_clamped_next_wake(cfg):
+    """lie_down()'s reported next_wake must be the post-clamp HH:MM, matching
+    what _arm_sentinel actually wrote to the ledger — regardless of whether the
+    pre-clamp floor lands inside or outside the night gate."""
+    cfg["gates"]["night"] = {"start": "23:00", "end": "08:00", "cap": 0}
+    wake_state.set_awake(cfg, 1, None)
+    r = lie_down.lie_down(cfg, next_wake_min=20)
+    ledger = wake_state.get_next_wake_at(cfg)
+    assert ledger is not None and r["next_wake"] is not None
+    assert r["next_wake"] in ledger  # HH:MM substring of the ISO ledger
+
+
 # --- reconcile decision matrix ------------------------------------------------
 
 def _fire_spy(monkeypatch):
@@ -105,11 +132,15 @@ def test_reconcile_due_ledger_dead_window_fires(cfg, monkeypatch):
 
 
 def test_reconcile_future_ledger_holds(cfg, monkeypatch):
+    """A future ledger alarm is authoritative: _reconcile must return a hold
+    (not None) so main() short-circuits and no other wake path (e.g. an
+    overdue floor) can fire early, e.g. right after `ctl sleep --min 30`."""
     monkeypatch.setattr("cortex.wake._window_alive", lambda c: False)
     calls = _fire_spy(monkeypatch)
     now = datetime.now(_tz(cfg))
     wake_state.set_next_wake_at(cfg, (now + timedelta(minutes=20)).isoformat())
-    assert pacemaker_tick._reconcile(None, cfg, {}, now) is None
+    msg = pacemaker_tick._reconcile(None, cfg, {}, now)
+    assert msg is not None and "hold" in msg.lower()
     assert "why" not in calls  # future alarm -> caught at due time, no re-arm
 
 
@@ -142,6 +173,52 @@ def test_pause_flag_roundtrip(cfg):
     assert wake_state.is_paused(cfg) is True
     wake_state.set_paused(cfg, False)
     assert wake_state.is_paused(cfg) is False
+
+
+# --- ledger authoritative-hold + consumption (codex review P1-1/P1-2/P1-3) ----
+
+def test_reconcile_future_hold_short_circuits_main(cfg, monkeypatch):
+    """P1-1: a dead window + future ledger alarm must short-circuit main() so
+    no other wake path (e.g. an overdue floor via run_tick) fires early."""
+    monkeypatch.setattr("cortex.wake._window_alive", lambda c: False)
+    monkeypatch.setattr(pacemaker_tick.config, "load", lambda: cfg)
+    now = datetime.now(_tz(cfg))
+    wake_state.set_next_wake_at(cfg, (now + timedelta(minutes=20)).isoformat())
+
+    def _boom(*a, **k):
+        raise AssertionError("run_tick must not run while a future ledger holds")
+    monkeypatch.setattr(pacemaker_tick.integration, "run_tick", _boom)
+    assert pacemaker_tick.main() == 0
+
+
+def test_fire_dead_window_dry_run_consumes_ledger(cfg):
+    """P1-2: a due-ledger fire in dry_run must replace next_wake_at with the
+    freshly redrawn floor, not leave the stale due timestamp (else every
+    subsequent tick re-fires the same reconcile wake)."""
+    cfg["pacemaker"]["dry_run"] = True
+    now = datetime.now(_tz(cfg))
+    stale_due = now - timedelta(minutes=1)
+    wake_state.set_next_wake_at(cfg, stale_due.isoformat())
+    conn = db.connect(cfg)
+    try:
+        pacemaker_tick._fire_dead_window(conn, cfg, "ledger due, window dead")
+    finally:
+        conn.close()
+    new_due = wake_state.get_next_wake_at(cfg)
+    assert new_due is not None
+    assert new_due != stale_due.isoformat()
+
+
+def test_main_pause_short_circuits_before_night_close(cfg, monkeypatch):
+    """P1-3: paused (DND) must hold night-close's wrap-up injection too — the
+    pause check must run before _night_close, not just inside _reconcile."""
+    monkeypatch.setattr(pacemaker_tick.config, "load", lambda: cfg)
+    wake_state.set_paused(cfg, True)
+
+    def _boom(*a, **k):
+        raise AssertionError("_night_close must not run while paused")
+    monkeypatch.setattr(pacemaker_tick, "_night_close", _boom)
+    assert pacemaker_tick.main() == 0
 
 
 # --- per-session _window_alive ------------------------------------------------
@@ -192,6 +269,46 @@ def test_ctl_sleep_dead_window_sets_ledger(cfg, monkeypatch):
     assert wake_state.get_next_wake_at(cfg) is not None
     assert wake_state.load(cfg).get("rotated") is True
     assert "ledger set" in msg
+
+
+def test_ctl_sleep_live_window_rotate_injects_rotate_arg(cfg, monkeypatch):
+    """P2-1: `sleep --rotate` on a live window must generate a lie_down() call
+    with rotate=true, not just add prose the session can miss."""
+    from cortex import ctl, window
+    monkeypatch.setattr("cortex.wake._window_alive", lambda c: True)
+    captured = {}
+    monkeypatch.setattr(window, "inject_prompt",
+                        lambda c, text: captured.setdefault("text", text) or True)
+    ctl.cmd_sleep(cfg, until=None, minutes=30, rotate=True)
+    assert "rotate=true" in captured["text"]
+    assert "lie_down(" in captured["text"]
+
+
+def test_ctl_sleep_live_window_no_rotate_omits_rotate_arg(cfg, monkeypatch):
+    from cortex import ctl, window
+    monkeypatch.setattr("cortex.wake._window_alive", lambda c: True)
+    captured = {}
+    monkeypatch.setattr(window, "inject_prompt",
+                        lambda c, text: captured.setdefault("text", text) or True)
+    ctl.cmd_sleep(cfg, until=None, minutes=30, rotate=False)
+    assert "rotate=true" not in captured["text"]
+
+
+def test_ctl_wake_live_window_renders_fresh_note(cfg, monkeypatch):
+    """P2-2: `wake` on a live window must render+write a fresh note before
+    signalling, not append the bell onto a stale note from a previous wake."""
+    from cortex import ctl, window
+    monkeypatch.setattr("cortex.wake._window_alive", lambda c: True)
+    calls = {"note": None}
+
+    def fake_assemble_note(conn, cfg, now, **kw):
+        return "FRESH NOTE TEXT"
+    monkeypatch.setattr("cortex.wake.assemble_note", fake_assemble_note)
+    monkeypatch.setattr(window, "write_note",
+                        lambda c, text: calls.__setitem__("note", text))
+    monkeypatch.setattr(window, "append_wake_signal", lambda c, now: None)
+    ctl.cmd_wake(cfg)
+    assert calls["note"] == "FRESH NOTE TEXT"
 
 
 # --- ImportError guard --------------------------------------------------------

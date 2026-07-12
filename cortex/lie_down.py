@@ -123,7 +123,10 @@ def lie_down(cfg: dict, force_slept: str | None = None, rotate: bool = False,
         if rotate:
             wake_state.set_rotated(cfg)
         # awake marker already cleared atomically by claim_lie_down at entry.
-        _arm_sentinel(cfg, next_floor)
+        # _arm_sentinel may night-clamp next_floor; use its EFFECTIVE return so
+        # the reported next_wake always matches the ledger + sentinel (never
+        # reports the pre-clamp time, e.g. 02:00 when 08:00 was actually armed).
+        next_floor = _arm_sentinel(cfg, next_floor)
         next_wake = _local_hm(next_floor, cfg)
         return {"tokens": tokens, "cleared_due": cleared,
                 "force_slept": force_slept, "rotated": rotate,
@@ -153,13 +156,15 @@ def _clamp_to_night_end(cfg: dict, next_floor: datetime) -> datetime:
         return next_floor
 
 
-def _arm_sentinel(cfg: dict, next_floor: datetime) -> None:
+def _arm_sentinel(cfg: dict, next_floor: datetime) -> datetime | None:
     """Persist the durable next-wake ledger and arm the one-shot exact-time wake
     sentinel for `next_floor`. Ledger first (survives a compact/kill that loses
     the sentinel args); night-clamp the time so no alarm lands inside the gate.
     Kills the recorded predecessor sentinel (never orphaned), then spawns a fresh
     one and records its pid. Gated by [wake].sentinel; false = tick-only (the
-    launchd 5-min tick + reconcile is the sole waker)."""
+    launchd 5-min tick + reconcile is the sole waker). Returns the EFFECTIVE
+    (post-clamp) next_floor so the caller's reported next_wake always agrees
+    with the ledger and sentinel."""
     _kill_sentinel(cfg)
     if next_floor is not None:
         next_floor = _clamp_to_night_end(cfg, next_floor)
@@ -167,9 +172,9 @@ def _arm_sentinel(cfg: dict, next_floor: datetime) -> None:
     else:
         wake_state.set_next_wake_at(cfg, None)
     if not cfg["wake"].get("sentinel", True):
-        return
+        return next_floor
     if next_floor is None:
-        return
+        return next_floor
     seconds = (next_floor - _now_utc()).total_seconds()
     if seconds < 0:
         seconds = 0.0
@@ -179,6 +184,7 @@ def _arm_sentinel(cfg: dict, next_floor: datetime) -> None:
         wake_state.set_sentinel_pid(cfg, pid)
     except Exception:  # spawning the sentinel must never wedge the lie_down
         pass
+    return next_floor
 
 
 def _kill_sentinel(cfg: dict) -> None:

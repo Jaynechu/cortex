@@ -83,9 +83,9 @@ _DEFAULTS: dict[str, Any] = {
         "wait_expiry_note": True,
         # Manual `cortex.ctl sleep` instruction injected into a live window.
         # {mins} = next_wake_min; {rotate} = "write your handoff then " when
-        # --rotate, else "".
+        # --rotate, else ""; {rotate_arg} = ", rotate=true" when --rotate, else "".
         "ctl_sleep_prompt":
-            "Wrap up this turn: {rotate}lie_down(next_wake_min={mins}).",
+            "Wrap up this turn: {rotate}lie_down(next_wake_min={mins}{rotate_arg}).",
     },
     # marrow repo invocation for the wake call (separate venv/deps, C3).
     "marrow": {

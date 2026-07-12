@@ -786,6 +786,7 @@ def test_lie_down_returns_next_wake_hm(cfg):
     from datetime import datetime as _dt
     from zoneinfo import ZoneInfo
 
+    cfg["gates"]["night"] = {"start": "23:00", "end": "23:00", "cap": 0}  # disabled
     conn = db.connect(cfg)
     conn.execute(
         "INSERT INTO ct_wake_log (ts, wake, dry_run, explanation) VALUES (?,1,0,?)",
@@ -811,6 +812,7 @@ def test_lie_down_clamps_next_wake_min_to_240(cfg):
     from datetime import datetime as _dt
     from zoneinfo import ZoneInfo
 
+    cfg["gates"]["night"] = {"start": "23:00", "end": "23:00", "cap": 0}  # disabled
     conn = db.connect(cfg)
     conn.execute(
         "INSERT INTO ct_wake_log (ts, wake, dry_run, explanation) VALUES (?,1,0,?)",
@@ -832,6 +834,7 @@ def test_lie_down_clamps_next_wake_min_to_1(cfg):
     from datetime import datetime as _dt
     from zoneinfo import ZoneInfo
 
+    cfg["gates"]["night"] = {"start": "23:00", "end": "23:00", "cap": 0}  # disabled
     conn = db.connect(cfg)
     conn.execute(
         "INSERT INTO ct_wake_log (ts, wake, dry_run, explanation) VALUES (?,1,0,?)",
