@@ -132,12 +132,40 @@ def lie_down(cfg: dict, force_slept: str | None = None, rotate: bool = False,
         conn.close()
 
 
+def _clamp_to_night_end(cfg: dict, next_floor: datetime) -> datetime:
+    """If next_floor falls inside the night gate, push it to the gate END — no
+    pointless mid-night alarm the gate would block anyway; the morning gate-open
+    fires it once. Outside the gate (or gate disabled) -> unchanged."""
+    from cortex.pacemaker import gates
+    if gates.night_key(cfg, next_floor) is None:
+        return next_floor
+    ncfg = cfg.get("gates", {}).get("night", {}) or {}
+    try:
+        hh, mm = (ncfg.get("end", "06:00")).split(":")
+        tz = ZoneInfo(cfg["core"]["timezone"])
+        local = next_floor.astimezone(tz)
+        end = local.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
+        if end <= local:  # gate end is tomorrow morning
+            from datetime import timedelta
+            end = end + timedelta(days=1)
+        return end
+    except (ValueError, KeyError):
+        return next_floor
+
+
 def _arm_sentinel(cfg: dict, next_floor: datetime) -> None:
-    """Arm the one-shot exact-time wake sentinel for `next_floor`. Kills the
-    recorded predecessor first (never orphaned — single detached process), then
-    spawns a fresh one and records its pid. Gated by [wake].sentinel; false =
-    tick-only (the launchd 5-min tick is the sole waker)."""
+    """Persist the durable next-wake ledger and arm the one-shot exact-time wake
+    sentinel for `next_floor`. Ledger first (survives a compact/kill that loses
+    the sentinel args); night-clamp the time so no alarm lands inside the gate.
+    Kills the recorded predecessor sentinel (never orphaned), then spawns a fresh
+    one and records its pid. Gated by [wake].sentinel; false = tick-only (the
+    launchd 5-min tick + reconcile is the sole waker)."""
     _kill_sentinel(cfg)
+    if next_floor is not None:
+        next_floor = _clamp_to_night_end(cfg, next_floor)
+        wake_state.set_next_wake_at(cfg, _local_iso(next_floor, cfg))
+    else:
+        wake_state.set_next_wake_at(cfg, None)
     if not cfg["wake"].get("sentinel", True):
         return
     if next_floor is None:
@@ -170,6 +198,13 @@ def _local_hm(dt: datetime | None, cfg: dict) -> str | None:
     if dt is None:
         return None
     return dt.astimezone(ZoneInfo(cfg["core"]["timezone"])).strftime("%H:%M")
+
+
+def _local_iso(dt: datetime | None, cfg: dict) -> str | None:
+    """Next-floor datetime -> local ISO (config tz) for the durable ledger."""
+    if dt is None:
+        return None
+    return dt.astimezone(ZoneInfo(cfg["core"]["timezone"])).isoformat()
 
 
 def main(argv: list[str] | None = None) -> int:

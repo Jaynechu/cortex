@@ -244,6 +244,8 @@ def run(cfg: dict) -> int:
         st = wake_state.load(cfg)
         if not st.get("awake"):
             return 0  # cortex lay down on its own -> watchdog retires
+        if wake_state.is_paused(cfg):
+            continue  # DND: no reaps / tuck-ins / fuse while paused
 
         mt = transcript.mtime(cfg)
         silent_min = (time.time() - mt) / 60.0 if mt else 0.0

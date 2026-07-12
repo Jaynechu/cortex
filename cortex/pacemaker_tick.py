@@ -87,6 +87,64 @@ def _handle_awake(conn, cfg: dict, st: dict) -> str:
     return f"wake in progress (idle {idle:.0f}min) -> tick skipped"
 
 
+def _parse_local(iso: str | None, cfg: dict):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    if not iso:
+        return None
+    try:
+        dt = datetime.fromisoformat(iso)
+    except ValueError:
+        return None
+    tz = ZoneInfo(cfg["core"]["timezone"])
+    return dt.replace(tzinfo=tz) if dt.tzinfo is None else dt
+
+
+def _fire_dead_window(conn, cfg: dict, why: str) -> str:
+    """A dead resident window whose ledger is due (or an accidental close) needs
+    firing NOW. Reuse the tested wake path: run_wake's _window_wake_plan reads the
+    rotate flag itself — rotated -> fresh spawn (handoff), else -> resume the
+    recorded session. dry_run short-circuits to a log-only floor redraw."""
+    now = integration._now(cfg)
+    if bool(cfg["pacemaker"].get("dry_run", True)):
+        integration.lie_down(conn, cfg)
+        return f"reconcile ({why}) -> dry_run, floor redrawn only"
+    decision = {"wake": True, "reasons": [], "gated_by": [],
+                "explanation": f"{now.strftime('%H:%M')} reconcile: {why}"}
+    result = run_wake(conn, cfg, decision, now=now)
+    if result.get("mode") != "window":
+        integration.lie_down(conn, cfg)
+    return f"reconcile ({why}) -> wake fired (mode={result.get('mode')})"
+
+
+def _reconcile(conn, cfg: dict, st: dict, now) -> str | None:
+    """Ledger reconcile (runs every tick, after night close). Returns a log line
+    when it acts / short-circuits the rest of the tick, else None (let the normal
+    flow proceed). HARD RULE: an ALIVE recorded session is never touched here.
+
+      - paused                                   -> hold everything (DND).
+      - window ALIVE                             -> None (normal flow / awake gate).
+      - window dead + next_wake_at in the past   -> fire now (rotated?fresh:resume).
+      - window dead + awake + no next_wake_at    -> accidental close -> resume now.
+      - window dead + next_wake_at in the future -> hold (this tick / the 5-min
+        cadence catches it at due time; no sentinel re-arm — the ledger is the
+        source of truth, a re-arm would only duplicate the same fire)."""
+    from cortex.wake import _window_alive
+
+    if wake_state.is_paused(cfg):
+        return "paused (DND): reconcile + reaps + injections held"
+    if _window_alive(cfg):
+        return None  # alive -> never touch; normal flow handles it
+    due = _parse_local(wake_state.get_next_wake_at(cfg), cfg)
+    if due is not None and now >= due:
+        return _fire_dead_window(conn, cfg, "ledger due, window dead")
+    if st.get("awake") and due is None and wake_state.get_session_id(cfg):
+        # An awake session whose window was closed with no scheduled wake: resume
+        # immediately (1h prompt-cache tier — resume within ~5 min keeps it hot).
+        return _fire_dead_window(conn, cfg, "accidental close of awake window")
+    return None
+
+
 def main() -> int:
     cfg = config.load()
     conn = db.connect(cfg)
@@ -95,6 +153,10 @@ def main() -> int:
         nc = _night_close(cfg, integration._now(cfg), st)
         if nc:
             print(f"{db.utcnow_iso()} {nc}", flush=True)
+        rc = _reconcile(conn, cfg, st, integration._now(cfg))
+        if rc is not None:
+            print(f"{db.utcnow_iso()} {rc}", flush=True)
+            return 0
         if st.get("awake"):
             msg = _handle_awake(conn, cfg, st)
             print(f"{db.utcnow_iso()} {msg}", flush=True)

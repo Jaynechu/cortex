@@ -423,13 +423,21 @@ def _handoff_written_this_window(cfg) -> bool:
 
 
 def _window_alive(cfg) -> bool:
-    """The resident window exists, iTerm is up, and its `claude` is running."""
+    """The RECORDED cortex session is alive: iTerm up, the recorded session UUID
+    still exists, AND a `claude` process runs on THAT session's own tty.
+
+    Per-session by construction: liveness is proven only via the recorded
+    session's tty (window._claude_on_session_tty), never the cwd-fallback in
+    find_claude_pid — otherwise any other claude window opened in cortex_home
+    (or a marrow headless `claude -p` run against the same cwd) would falsely
+    mark this dead/closed session "alive" and block the tick reconcile from
+    resuming it."""
     from cortex import wake_state, window
 
     sid = wake_state.get_session_id(cfg)
     if not sid or not window.is_running() or not window._session_alive(sid):
         return False
-    return window.find_claude_pid(cfg) is not None
+    return window._claude_on_session_tty(cfg, sid)
 
 
 def run_wake(

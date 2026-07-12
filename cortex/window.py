@@ -506,6 +506,17 @@ def find_claude_pid(cfg: dict) -> int | None:
     return None
 
 
+def _claude_on_session_tty(cfg: dict, sid: str) -> bool:
+    """True iff a `claude` process runs on the RECORDED iTerm session's own tty.
+    Per-session liveness — the cwd fallback in find_claude_pid is deliberately
+    NOT used, so another claude window in cortex_home can't fake this session
+    alive. No tty (session gone) -> False."""
+    tty = _session_tty(sid)
+    if not tty:
+        return False
+    return bool(_ps_tty_claude_pids(tty.removeprefix("/dev/")))
+
+
 def hard_interrupt(cfg: dict) -> int | None:
     """Guaranteed esc-equivalent: SIGINT the resident window's claude process.
     Never SIGKILL. Returns the signaled pid, or None if discovery was

@@ -81,6 +81,11 @@ _DEFAULTS: dict[str, Any] = {
         # When a declared wait(N) expires, append a freshly rendered wakeup note
         # to the TUCK-IN marker (note content only, no behavioural nudge).
         "wait_expiry_note": True,
+        # Manual `cortex.ctl sleep` instruction injected into a live window.
+        # {mins} = next_wake_min; {rotate} = "write your handoff then " when
+        # --rotate, else "".
+        "ctl_sleep_prompt":
+            "Wrap up this turn: {rotate}lie_down(next_wake_min={mins}).",
     },
     # marrow repo invocation for the wake call (separate venv/deps, C3).
     "marrow": {
@@ -115,8 +120,8 @@ _DEFAULTS: dict[str, Any] = {
         # resident window when the night window opens (write handoff + lie_down).
         "night": {
             "start": "23:00", "end": "06:00", "cap": 0,
-            "close_prompt": "Night window is open. Write your handoff entry now, "
-                            "then call lie_down to end this wake.",
+            "close_prompt": "⏳ [NIGHT] Night window is open — one full sleep now. "
+                            "Write your handoff entry, then lie_down to end this wake.",
         },
         # Daily wake-token budget: once Cortex Today (sum of today's finished-
         # window final context occupancies + the current live window occupancy)

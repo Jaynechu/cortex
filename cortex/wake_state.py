@@ -140,7 +140,10 @@ def is_awake(cfg: dict) -> bool:
 
 
 def set_awake(cfg: dict, wake_log_id: int | None, transcript: str | None) -> None:
-    update(cfg, awake=True,
+    # next_wake_at is the durable ledger: a successful wake means it fired, so
+    # clear it here (re-armed by the next lie_down). Kept in the same atomic
+    # update so an awake window never carries a stale scheduled time.
+    update(cfg, awake=True, next_wake_at=None,
            awake_since=datetime.now(timezone.utc).isoformat(),
            wake_log_id=wake_log_id, transcript=transcript, wait_count=0,
            user_replied_this_wake=False, tuck_pending=None)
@@ -229,6 +232,47 @@ def bump_wait_count(cfg: dict) -> int:
         d["wait_count"] = count
         _save(cfg, d)
         return count
+
+
+def set_next_wake_at(cfg: dict, iso_local: str | None) -> None:
+    """Persist the scheduled next-wake instant (local ISO) as the durable ledger.
+    The scheduled time must never live only in the sentinel process args: a
+    compact/kill loses those, but this survives so the tick reconcile can fire an
+    overdue wake. None clears it (e.g. paused, or no schedule)."""
+    if iso_local is None:
+        with _flock(cfg):
+            d = load(cfg)
+            if d.pop("next_wake_at", None) is not None:
+                _save(cfg, d)
+        return
+    update(cfg, next_wake_at=iso_local)
+
+
+def get_next_wake_at(cfg: dict) -> str | None:
+    """The recorded next-wake instant (local ISO) or None."""
+    v = load(cfg).get("next_wake_at")
+    return str(v) if v else None
+
+
+def clear_next_wake_at(cfg: dict) -> None:
+    set_next_wake_at(cfg, None)
+
+
+def set_paused(cfg: dict, paused: bool) -> None:
+    """DND flag: tick reconcile, watchdog, sentinel-fire and injections all
+    respect it (no reaps, no wakes, no injections while paused). On unpause,
+    overdue ledger alarms fire via the next reconcile."""
+    if paused:
+        update(cfg, paused=True)
+    else:
+        with _flock(cfg):
+            d = load(cfg)
+            if d.pop("paused", None) is not None:
+                _save(cfg, d)
+
+
+def is_paused(cfg: dict) -> bool:
+    return bool(load(cfg).get("paused"))
 
 
 def set_rotated(cfg: dict) -> None:
