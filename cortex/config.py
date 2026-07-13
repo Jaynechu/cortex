@@ -38,6 +38,7 @@ _DEFAULTS: dict[str, Any] = {
         "wishlist_file": "",
         "ny_db_pages": "",
         "wake_timing_log": "",
+        "wake_audit_log": "",
     },
     # Per-wake safety valve: cap tokens spent in one wake; breach or the marrow
     # wall-clock timeout (marrow.call_timeout_s) forces a fresh session next wake.
@@ -295,3 +296,11 @@ def wake_signal_log_path(cfg: dict) -> Path:
     Default: <cortex_home>/wake_signal.log."""
     raw = cfg["wake"].get("signal_log") or ""
     return Path(raw).expanduser() if raw else cortex_home(cfg) / "wake_signal.log"
+
+
+def wake_audit_log_path(cfg: dict) -> Path:
+    """Wake-state audit trail (alarm epoch/generation events). Byte-shared with
+    marrow's [cortex].wake_audit_log_file so both sides append to one file.
+    Default: <cortex_home>/wake_audit.log. Override via [paths].wake_audit_log."""
+    raw = cfg["paths"].get("wake_audit_log") or ""
+    return Path(raw).expanduser() if raw else cortex_home(cfg) / "wake_audit.log"

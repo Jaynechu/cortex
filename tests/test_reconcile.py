@@ -382,7 +382,7 @@ def test_ctl_wake_sets_awake_via_standard_pipeline(cfg, monkeypatch):
     monkeypatch.setattr(wake, "_window_alive", lambda c: True)
     monkeypatch.setattr(watchdog, "spawn", lambda c: 12345)  # no real subprocess
 
-    def fake_append_signal(c, now):
+    def fake_append_signal(c, now, token=None):
         # simulate the ear landing: transcript grows so _signal_landed sees it
         p = transcript_dir(c) / "fake.jsonl"
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -457,7 +457,7 @@ def test_ctl_wake_live_window_renders_fresh_note(cfg, monkeypatch):
     monkeypatch.setattr(window, "write_note",
                         lambda c, text: calls.__setitem__("note", text))
 
-    def fake_append_signal(c, now):
+    def fake_append_signal(c, now, token=None):
         p = transcript_dir(c) / "fake.jsonl"
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text("{}")

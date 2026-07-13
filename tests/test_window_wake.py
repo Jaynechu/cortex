@@ -140,7 +140,7 @@ def test_window_wake_alive_uses_ear(cfg, monkeypatch):
                         lambda c, initial_prompt=None, resume_sid=None: calls.setdefault("respawn", True))
     monkeypatch.setattr(
         window, "append_wake_signal",
-        lambda c, now: calls.setdefault("signal", True))
+        lambda c, now, token=None: calls.setdefault("signal", True))
     monkeypatch.setattr(wake, "_signal_landed", lambda c, before, t: True)
     monkeypatch.setattr(watchdog, "spawn", lambda c: calls.setdefault("watchdog", True))
 
@@ -177,7 +177,7 @@ def test_window_wake_respawn_delivers_note_as_prompt(cfg, monkeypatch):
                         lambda c, initial_prompt=None, resume_sid=None: calls.setdefault("prompt", initial_prompt))
     assert not hasattr(window, "spawn_greeting")  # greeting mechanism removed
     monkeypatch.setattr(window, "append_wake_signal",
-                        lambda c, now: calls.setdefault("signal", True))
+                        lambda c, now, token=None: calls.setdefault("signal", True))
     # New session jsonl appears promptly (skip the real 8s poll).
     monkeypatch.setattr(transcript, "newest",
                         lambda c: __import__("pathlib").Path("/t/new.jsonl"))
@@ -215,7 +215,7 @@ def test_window_wake_ear_miss_alive_types_rearm_not_respawn(cfg, monkeypatch):
         window, "respawn",
         lambda c, initial_prompt=None, resume_sid=None: calls.__setitem__("respawn", calls["respawn"] + 1))
     monkeypatch.setattr(window, "append_wake_signal",
-                        lambda c, now: calls.__setitem__("signal", calls["signal"] + 1))
+                        lambda c, now, token=None: calls.__setitem__("signal", calls["signal"] + 1))
     monkeypatch.setattr(window, "type_wake_signal",
                         lambda c, now: calls.__setitem__("rearm", calls["rearm"] + 1) or True)
     # first poll (original signal) misses, second poll (after rearm) lands
@@ -252,7 +252,7 @@ def test_window_wake_ear_miss_dead_respawns_with_catchup(cfg, monkeypatch):
         window, "respawn",
         lambda c, initial_prompt=None, resume_sid=None: calls.__setitem__("respawn", calls["respawn"] + 1))
     monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, prev, ts: "/t/new.jsonl")
-    monkeypatch.setattr(window, "append_wake_signal", lambda c, now: None)
+    monkeypatch.setattr(window, "append_wake_signal", lambda c, now, token=None: None)
     monkeypatch.setattr(window, "type_wake_signal",
                         lambda c, now: calls.__setitem__("rearm", calls["rearm"] + 1))
     monkeypatch.setattr(wake, "_signal_landed", lambda c, before, t: False)  # never lands

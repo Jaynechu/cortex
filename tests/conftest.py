@@ -61,7 +61,8 @@ def _no_real_sentinel(monkeypatch):
     behaviour override this with their own Popen stub."""
     try:
         import cortex.sentinel as _s
-        monkeypatch.setattr(_s, "spawn", lambda cfg, seconds: 424242)
+        monkeypatch.setattr(_s, "spawn",
+                            lambda cfg, seconds, *a, **k: 424242)
     except ImportError:
         pass
 

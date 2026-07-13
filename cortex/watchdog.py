@@ -160,19 +160,28 @@ def _wait_expiry_note(cfg: dict) -> str:
         return ""
 
 
-def _append_tuck_in(cfg: dict) -> None:
-    """Chat-tier tuck-in: append the config marker line to wake_signal.log (the
-    ear Monitor delivers it as a session turn). {n}/{cap} = live wait count. On a
-    wait(N)-expiry, a freshly rendered wakeup note is appended below the marker."""
+def _build_tuck_in_line(cfg: dict) -> str:
+    """Render the chat-tier tuck-in line OUTSIDE any lock (BUG B: the slow
+    wait-expiry note render + template fill must not run inside the strict
+    section). {n}/{cap} = live wait count. On a wait(N)-expiry a freshly rendered
+    wakeup note is appended below the marker. "" when disabled."""
     tmpl = str(cfg["wake"].get("tuck_in_text") or "").strip()
     if not tmpl:
-        return
+        return ""
     cap = int(cfg["wake"].get("wait_max_per_wake", 2) or 0)
     n = wake_state.get_wait_count(cfg)
     line = tmpl.replace("{n}", str(n)).replace("{cap}", str(cap))
     fresh = _wait_expiry_note(cfg)
     if fresh:
         line = line + "\n" + fresh
+    return line
+
+
+def _write_tuck_in_line(cfg: dict, line: str) -> None:
+    """Append a prebuilt tuck-in line to wake_signal.log (the ear Monitor
+    delivers it as a session turn). Byte-identical output to the old path."""
+    if not line:
+        return
     try:
         p = config.wake_signal_log_path(cfg)
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -180,6 +189,32 @@ def _append_tuck_in(cfg: dict) -> None:
             f.write(line + "\n")
     except OSError:
         pass
+
+
+def _stamp_tuck_pending():
+    """Mutator (run under conditional_mutate): stamp tuck_pending ONLY if the
+    session is still awake, has no live wait window, and no tuck_pending yet.
+    Returns True when it stamped (caller then appends the line), False otherwise
+    (nothing appended). The epoch check is done by conditional_mutate's token
+    guard; these are the in-lock content invariants."""
+    def _m(d: dict) -> bool:
+        if not d.get("awake"):
+            return False
+        if d.get("tuck_pending") is not None:
+            return False
+        raw = d.get("silence_wait_until")
+        if raw is not None:
+            try:
+                dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                if dt > datetime.now(timezone.utc):
+                    return False  # live wait -> hold, no tuck-in
+            except ValueError:
+                pass
+        d["tuck_pending"] = datetime.now(timezone.utc).isoformat()
+        return True
+    return _m
 
 
 def silence_action(cfg: dict, silent_min: float, *, allow_tuck: bool = True) -> str | None:
@@ -196,6 +231,14 @@ def silence_action(cfg: dict, silent_min: float, *, allow_tuck: bool = True) -> 
     from cortex import lie_down as lie_down_mod
 
     wcfg = cfg["wake"].get("watchdog", {})
+    # Capture the epoch at the START of the silence decision (BUG B): if a
+    # lie_down / user reset bumps gen between here and the tuck-in commit, the
+    # commit is dropped so no tuck-in is appended after the session already slept.
+    try:
+        gen0, sid0 = wake_state.current_epoch(cfg)
+        token0 = (gen0, sid0)
+    except wake_state.StateValidationError:
+        return None
     if _wait_until_live(cfg):
         return None
 
@@ -214,9 +257,20 @@ def silence_action(cfg: dict, silent_min: float, *, allow_tuck: bool = True) -> 
     st = wake_state.load(cfg)
     tuck_at = st.get("tuck_pending")
     if tuck_at is None:
+        # Build the (slow) tuck-in text OUTSIDE the lock, then commit atomically:
+        # re-check awake + epoch + no-live-wait + tuck_pending-still-absent under
+        # the strict lock and stamp tuck_pending in the same section (fixes the
+        # TOCTOU at the old :214-219). Only a committed stamp appends the line.
+        line = _build_tuck_in_line(cfg) if allow_tuck else ""
+        try:
+            committed = wake_state.conditional_mutate(
+                cfg, token0, _stamp_tuck_pending())
+        except wake_state.StateValidationError:
+            return None  # slept / re-armed under us -> no tuck-in
+        if not committed:
+            return None  # awake cleared / wait live / already stamped
         if allow_tuck:
-            _append_tuck_in(cfg)
-        wake_state.update(cfg, tuck_pending=datetime.now(timezone.utc).isoformat())
+            _write_tuck_in_line(cfg, line)
         return "tuck-in appended"
     # Marker already sent; wait out the grace window (measured from the marker).
     try:

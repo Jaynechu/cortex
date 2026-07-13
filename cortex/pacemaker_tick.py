@@ -56,15 +56,22 @@ def _night_close(cfg: dict, now, st: dict) -> str | None:
     return "night close: resident session marked non-resumable"
 
 
-def _handle_awake(conn, cfg: dict, st: dict) -> str:
+def _handle_awake(conn, cfg: dict, st: dict, snap_gen: int | None = None) -> str:
     """A wake is in progress -> the awake gate: NEVER emit a wake signal while
     awake (the alarm stops once up). Instead run the two-tier silence checks as
     a watchdog backup, so a dead/rebooted watchdog is not a blind spot. The tick
     fires every ~5 min, so the chat-tier grace is approximated to a whole-tick
     granularity (the marker is stamped one tick, the auto sleep fires the next
     tick once grace has elapsed). Falls back to the stale reap only when the
-    silence tier held (e.g. a live wait_until) yet the transcript is long idle."""
+    silence tier held (e.g. a live wait_until) yet the transcript is long idle.
+
+    `snap_gen` = the gen captured in the tick's opening snapshot. Before any
+    consequential reap, re-validate it against the live epoch: a lie_down / user
+    reset since the snapshot means the awake this tick saw is stale (BUG B at the
+    tick level) — hold rather than act on a superseded snapshot."""
     from cortex.watchdog import silence_action
+    if not _snapshot_awake_current(cfg, snap_gen):
+        return "awake gate: snapshot superseded (gen moved) -> hold"
     mt = transcript.mtime(cfg)
     # No transcript mtime = no data. silence_action must see 0.0 (hold, don't
     # insta-sleep on a missing transcript — matches watchdog.run's fallback so
@@ -82,6 +89,10 @@ def _handle_awake(conn, cfg: dict, st: dict) -> str:
         from cortex.wake import _window_alive
         if _window_alive(cfg):
             return f"stale hold: window alive (idle {idle:.0f}min)"
+        # Re-validate the snapshot epoch right before the reap: a user reset /
+        # lie_down since the snapshot must cancel this stale-reap (fail closed).
+        if not _snapshot_awake_current(cfg, snap_gen):
+            return "stale hold: snapshot superseded (gen moved)"
         from cortex import lie_down as lie_down_mod
         r = lie_down_mod.lie_down(cfg, force_slept="stale")
         sys.stderr.write(
@@ -90,6 +101,20 @@ def _handle_awake(conn, cfg: dict, st: dict) -> str:
     if action:
         return f"awake gate: {action} (idle {idle:.0f}min)"
     return f"wake in progress (idle {idle:.0f}min) -> tick skipped"
+
+
+def _snapshot_awake_current(cfg: dict, snap_gen: int | None) -> bool:
+    """True if the tick's opening snapshot is still authoritative: the live epoch
+    gen has not moved since the snapshot. snap_gen=None (legacy state with no
+    gen) -> True (no epoch to compare, behave as before). Fail closed: a
+    lock/parse failure reads as NOT current, so a doubtful reap is held."""
+    if snap_gen is None:
+        return True
+    try:
+        gen, _sid = wake_state.current_epoch(cfg)
+    except wake_state.StateValidationError:
+        return False
+    return gen == snap_gen
 
 
 def _parse_local(iso: str | None, cfg: dict):
@@ -183,6 +208,9 @@ def main() -> int:
     conn = db.connect(cfg)
     try:
         st = wake_state.load(cfg)
+        # Snapshot gen: threaded into the awake branch so its consequential reaps
+        # re-validate against the live epoch before firing (stale-snapshot guard).
+        snap_gen = st.get("gen") if isinstance(st.get("gen"), int) else None
         if wake_state.is_paused(cfg):
             # DND holds everything, including night-close's wrap-up injection —
             # must be checked before _night_close, not just inside _reconcile.
@@ -197,7 +225,7 @@ def main() -> int:
             print(f"{db.utcnow_iso()} {rc}", flush=True)
             return 0
         if st.get("awake"):
-            msg = _handle_awake(conn, cfg, st)
+            msg = _handle_awake(conn, cfg, st, snap_gen=snap_gen)
             print(f"{db.utcnow_iso()} {msg}", flush=True)
             return 0
 

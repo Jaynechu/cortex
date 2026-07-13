@@ -10,6 +10,7 @@ import contextlib
 import fcntl
 import json
 import os
+import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -20,6 +21,14 @@ _AWAKE_KEYS = ("awake", "awake_since", "wake_log_id", "transcript",
                "tuck_pending")
 
 _LOCK_TIMEOUT_SEC = 5.0
+
+
+class StateValidationError(Exception):
+    """Fail-closed sentinel: a strict-lock section could not acquire the lock,
+    the state file was unreadable/malformed, or a captured (gen, state_id) token
+    no longer matches the live state. Every deferred actor treats it as "abort
+    the pending side effect silently" — correctness never depends on the lock
+    succeeding, only that a doubtful mutation is dropped."""
 
 
 def wake_state_path(cfg: dict) -> Path:
@@ -81,6 +90,40 @@ def _flock(cfg: dict):
             os.close(fd)
 
 
+@contextlib.contextmanager
+def _strict_flock(cfg: dict):
+    """Fail-closed exclusive flock: unlike _flock (advisory, proceeds unlocked on
+    timeout), this RAISES StateValidationError if the lock cannot be created or
+    acquired within the timeout. Used for every consequential cancellation-epoch
+    check + mutation, so a lock hiccup drops the doubtful side effect instead of
+    racing an unlocked write."""
+    lp = lock_path(cfg)
+    try:
+        lp.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(lp), os.O_CREAT | os.O_RDWR, 0o644)
+    except OSError as e:
+        raise StateValidationError(f"lock open failed: {e}") from e
+    deadline = _mono() + _LOCK_TIMEOUT_SEC
+    got = False
+    try:
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                got = True
+                break
+            except OSError:
+                if _mono() >= deadline:
+                    raise StateValidationError("lock acquire timeout")
+                _sleep(0.02)
+        yield
+    finally:
+        if got:
+            with contextlib.suppress(OSError):
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        with contextlib.suppress(OSError):
+            os.close(fd)
+
+
 def _mono() -> float:
     import time
     return time.monotonic()
@@ -89,6 +132,111 @@ def _mono() -> float:
 def _sleep(sec: float) -> None:
     import time
     time.sleep(sec)
+
+
+def _load_strict(cfg: dict) -> dict:
+    """Read the state file, RAISING StateValidationError on any read/parse
+    failure (unlike load() which returns {}). Caller must hold _strict_flock."""
+    p = wake_state_path(cfg)
+    try:
+        if not p.exists():
+            return {}
+        return json.loads(p.read_text())
+    except (OSError, ValueError) as e:
+        raise StateValidationError(f"state unreadable/malformed: {e}") from e
+
+
+def _ensure_epoch(d: dict) -> bool:
+    """Initialise gen (0) + a random state_id on first touch. Returns True when a
+    field was added (caller must persist). state_id defends the delete/recreate
+    ABA: a fresh file re-seeds a different id, so a token captured against the
+    old file never validates against the new one."""
+    changed = False
+    if not isinstance(d.get("gen"), int):
+        d["gen"] = 0
+        changed = True
+    if not d.get("state_id"):
+        d["state_id"] = secrets.token_hex(8)
+        changed = True
+    return changed
+
+
+def current_epoch(cfg: dict) -> tuple[int, str]:
+    """Capture the live (gen, state_id) token under the STRICT lock — a deferred
+    actor's birth token. Raises StateValidationError on lock/parse failure so a
+    doubtful capture never yields a token that would spuriously validate later."""
+    with _strict_flock(cfg):
+        d = _load_strict(cfg)
+        if _ensure_epoch(d):
+            _save(cfg, d)
+        return int(d["gen"]), str(d["state_id"])
+
+
+def _token_current(d: dict, token: tuple[int, str] | None) -> bool:
+    """True when a captured (gen, state_id) still matches the loaded state. A
+    None token = legacy/no-token = always current (backward tolerance)."""
+    if token is None:
+        return True
+    gen, state_id = token
+    return isinstance(d.get("gen"), int) and d.get("gen") == gen \
+        and str(d.get("state_id") or "") == str(state_id)
+
+
+def token_current(cfg: dict, token: tuple[int, str] | None) -> bool:
+    """Read-only epoch check under the STRICT lock: True if `token` still matches
+    the live (gen, state_id). Raises StateValidationError on lock/parse failure
+    (fail closed) so a deferred actor drops the side effect rather than proceed on
+    a doubtful read. token=None -> True (legacy/no token)."""
+    with _strict_flock(cfg):
+        d = _load_strict(cfg)
+        _ensure_epoch(d)
+        return _token_current(d, token)
+
+
+def conditional_mutate(cfg: dict, token: tuple[int, str] | None, mutate):
+    """Run `mutate(d)` and persist ONLY if `token` still matches the live epoch,
+    all under the STRICT lock. `mutate` edits the dict in place; its return value
+    is passed back to the caller. Raises StateValidationError on lock/parse
+    failure OR token mismatch (fail closed) so the deferred side effect is
+    dropped. token=None skips the check (unconditional, still strict-locked)."""
+    with _strict_flock(cfg):
+        d = _load_strict(cfg)
+        _ensure_epoch(d)
+        if not _token_current(d, token):
+            raise StateValidationError("epoch token stale")
+        result = mutate(d)
+        _save(cfg, d)
+        return result
+
+
+def bump_gen(cfg: dict) -> tuple[int, str]:
+    """Increment gen under the strict lock and return the NEW (gen, state_id).
+    The one primitive behind every cancellation epoch: a bump invalidates every
+    token captured against the old gen. Callers that also mutate state should use
+    the higher-level helpers (claim_lie_down, set_awake, wait, ...) which bump +
+    mutate atomically in one locked section."""
+    with _strict_flock(cfg):
+        d = _load_strict(cfg)
+        _ensure_epoch(d)
+        d["gen"] = int(d["gen"]) + 1
+        _save(cfg, d)
+        return int(d["gen"]), str(d["state_id"])
+
+
+def wake_audit(cfg: dict, action: str, reason: str = "", detail: str = "") -> None:
+    """Append one tab-separated audit line (ISO-ts, action, reason, detail) to
+    the config-routed wake-audit log. Byte-shared with marrow's _wake_audit.
+    Best-effort — never raises."""
+    try:
+        path = config.wake_audit_log_path(cfg)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        ts = datetime.now(timezone.utc).isoformat()
+        line = "\t".join((ts, action, str(reason).replace("\t", " "),
+                          str(detail).replace("\t", " ")))
+        with open(path, "a") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
 
 
 def load(cfg: dict) -> dict:
@@ -139,46 +287,117 @@ def is_awake(cfg: dict) -> bool:
     return bool(load(cfg).get("awake"))
 
 
-def set_awake(cfg: dict, wake_log_id: int | None, transcript: str | None) -> None:
-    # next_wake_at is the durable ledger: a successful wake means it fired, so
-    # clear it here (re-armed by the next lie_down). Kept in the same atomic
-    # update so an awake window never carries a stale scheduled time.
-    update(cfg, awake=True, next_wake_at=None,
-           awake_since=datetime.now(timezone.utc).isoformat(),
-           wake_log_id=wake_log_id, transcript=transcript, wait_count=0,
-           user_replied_this_wake=False, tuck_pending=None)
+def set_awake(cfg: dict, wake_log_id: int | None, transcript: str | None,
+              expected_gen: int | None = None) -> tuple[int, str] | None:
+    """Activate a wake (asleep -> awake). BUMPS gen (a fresh wake is a new epoch
+    that invalidates the sleeping window's alarm token). When `expected_gen` is
+    given the flip is CONDITIONAL: if the live gen has moved on (a newer lie_down
+    / user reset re-armed since the wake decision), abort and return None. Returns
+    the new (gen, state_id) on success, None if the conditional flip lost.
+
+    next_wake_at is the durable ledger: a successful wake means it fired, so it is
+    cleared here (re-armed by the next lie_down) in the same atomic section so an
+    awake window never carries a stale scheduled time."""
+    try:
+        with _strict_flock(cfg):
+            d = _load_strict(cfg)
+            _ensure_epoch(d)
+            if expected_gen is not None and int(d["gen"]) != int(expected_gen):
+                return None
+            d["gen"] = int(d["gen"]) + 1
+            d.update(awake=True, next_wake_at=None,
+                     awake_since=datetime.now(timezone.utc).isoformat(),
+                     wake_log_id=wake_log_id, transcript=transcript, wait_count=0,
+                     user_replied_this_wake=False, tuck_pending=None)
+            _save(cfg, d)
+            return int(d["gen"]), str(d["state_id"])
+    except StateValidationError:
+        return None
 
 
 def clear_awake(cfg: dict) -> None:
-    with _flock(cfg):
-        d = load(cfg)
-        for k in _AWAKE_KEYS:
-            d.pop(k, None)
-        _save(cfg, d)
+    """Clear the awake marker AND bump gen (a successful sleep is a new epoch —
+    any alarm token from the just-ended wake is invalidated). Strict-locked."""
+    try:
+        with _strict_flock(cfg):
+            d = _load_strict(cfg)
+            _ensure_epoch(d)
+            d["gen"] = int(d["gen"]) + 1
+            for k in _AWAKE_KEYS:
+                d.pop(k, None)
+            _save(cfg, d)
+    except StateValidationError:
+        pass
 
 
-def claim_lie_down(cfg: dict) -> dict | None:
-    """Atomic read-and-clear of the awake marker under the wake_state flock, so
-    exactly one lie_down proceeds when the watchdog (60s poll) and the tick
-    awake-branch both fire silence_action in the same window. Returns the
-    pre-clear state snapshot (incl. wake_log_id) to the single winner (was awake,
-    now cleared -> do the full lie_down); None to any later caller (already
-    cleared -> no-op). Same lock/keys as clear_awake."""
-    with _flock(cfg):
-        d = load(cfg)
-        if not d.get("awake"):
-            return None
-        snapshot = dict(d)
-        for k in _AWAKE_KEYS:
-            d.pop(k, None)
-        _save(cfg, d)
-        return snapshot
+def claim_lie_down(cfg: dict, force_slept: str | None = None) -> dict | None:
+    """Atomic read-and-clear of the awake marker under the STRICT wake_state lock,
+    so exactly one lie_down proceeds when the watchdog (60s poll) and the tick
+    awake-branch both fire silence_action in the same window. On the winning claim
+    (was awake -> now cleared) BUMPS gen — every deferred alarm from the ending
+    wake is now stale, and the returned token is the NEW epoch the lie_down body
+    carries through its late side effects. Returns the pre-clear snapshot PLUS a
+    `claim_token` (gen, state_id) to the single winner; None to any later caller
+    (already cleared / lock lost -> no-op, no bump). Writes a `lie_down_claim`
+    audit line (old->new gen)."""
+    try:
+        with _strict_flock(cfg):
+            d = _load_strict(cfg)
+            _ensure_epoch(d)
+            if not d.get("awake"):
+                return None
+            snapshot = dict(d)
+            old_gen = int(d["gen"])
+            d["gen"] = old_gen + 1
+            new_gen = d["gen"]
+            for k in _AWAKE_KEYS:
+                d.pop(k, None)
+            _save(cfg, d)
+            snapshot["claim_token"] = (new_gen, str(d["state_id"]))
+    except StateValidationError:
+        return None
+    wake_audit(cfg, "lie_down_claim", f"gen {old_gen}->{new_gen}",
+               f"force_slept={force_slept}")
+    return snapshot
 
 
 def user_replied_this_wake(cfg: dict) -> bool:
     """True once a real user message landed in the current wake (set by the
     marrow UserPromptSubmit hook). Drives the chat vs no-user silence tier."""
     return bool(load(cfg).get("user_replied_this_wake"))
+
+
+def commit_wait(cfg: dict, until_iso: str, cap: int) -> dict:
+    """Accept one wait() as a single atomic strict-locked mutation: verify the
+    session is still awake and under cap, BUMP gen (an accepted wait is a new
+    epoch — it re-arms the silence window, invalidating the prior alarm token),
+    set silence_wait_until, increment wait_count, clear tuck_pending. Returns
+    {"ok": bool, ...}. Never raises: a lock/parse failure returns ok=False,
+    refused=True (fail closed — no half-applied wait)."""
+    try:
+        with _strict_flock(cfg):
+            d = _load_strict(cfg)
+            _ensure_epoch(d)
+            if not d.get("awake"):
+                return {"ok": False, "refused": True, "reason": "not awake",
+                        "wait_count": int(d.get("wait_count") or 0), "cap": cap}
+            try:
+                used = int(d.get("wait_count", 0) or 0)
+            except (TypeError, ValueError):
+                used = 0
+            if cap > 0 and used >= cap:
+                return {"ok": False, "refused": True, "wait_count": used,
+                        "cap": cap}
+            d["gen"] = int(d["gen"]) + 1
+            d["silence_wait_until"] = until_iso
+            count = used + 1
+            d["wait_count"] = count
+            d.pop("tuck_pending", None)
+            _save(cfg, d)
+            return {"ok": True, "wait_count": count, "cap": cap}
+    except StateValidationError:
+        return {"ok": False, "refused": True, "reason": "state locked",
+                "wait_count": 0, "cap": cap}
 
 
 def set_wait_until(cfg: dict, until_iso: str) -> None:

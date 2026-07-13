@@ -345,11 +345,19 @@ def _window_wake(conn, cfg, note_text, now, respawn: bool = False) -> dict | Non
     if not _window_alive(cfg):
         return _resume_or_fresh_dead(conn, cfg, now, "dead resident")
 
-    # Alive resident: the signal-file ear path.
+    # Alive resident: the signal-file ear path. Capture the SLEEPING epoch first
+    # so the wake line carries it and set_awake is conditional on it: if a user
+    # message flips awake + bumps gen between here and set_awake, the conditional
+    # flip loses (the user reset already woke the window) — no double activation.
     timeout = float(cfg["wake"].get("ear_timeout_sec", 90))
     try:
+        sleep_gen, sleep_sid = wake_state.current_epoch(cfg)
+    except wake_state.StateValidationError:
+        return None
+    token = (sleep_gen, sleep_sid)
+    try:
         before = transcript.mtime(cfg)
-        window.append_wake_signal(cfg, now)
+        window.append_wake_signal(cfg, now, token=token)
         if not _signal_landed(cfg, before, timeout):
             landed = _ear_miss_ladder(conn, cfg, now, timeout)
             if landed is not None:
@@ -358,7 +366,7 @@ def _window_wake(conn, cfg, note_text, now, respawn: bool = False) -> dict | Non
         return None
     tpath = transcript.newest(cfg)
     wake_state.set_awake(cfg, _latest_wake_log_id(conn),
-                         str(tpath) if tpath else None)
+                         str(tpath) if tpath else None, expected_gen=sleep_gen)
     watchdog.spawn(cfg)
     return {"mode": "window", "session_id": None, "text": None}
 

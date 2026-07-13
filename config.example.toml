@@ -31,6 +31,9 @@ ny_db_pages = ""
 # Wake-latency probe log (cortex stage marks + marrow stream-event marks).
 # Default: ~/.config/marrow/logs/wake_timing.log
 wake_timing_log = ""
+# Wake-state audit trail (alarm epoch/generation events). Byte-shared with
+# marrow's [cortex].wake_audit_log_file. Default: <cortex_home>/wake_audit.log
+wake_audit_log = ""
 # Interactive-window (B3v) runtime files. Empty = defaults under cortex_home.
 wake_state_file = ""     # awake marker + resident iTerm session id. Default: <home>/wake_state.json
 wakeup_note_file = ""    # note text the window is told to Read. Default: <home>/wakeup_note.md

@@ -117,15 +117,32 @@ def wake_prompt(cfg: dict) -> str:
     return cfg["wake"].get("wake_prompt", "☀️")
 
 
-def wake_signal_line(cfg: dict, now, rearm: bool = False) -> str:
-    """The bell line: '<marker> HH:MM' (local time). The marrow UserPromptSubmit
-    hook detects the marker and injects the full wakeup note — this line is a
-    BELL ONLY, no note body, no read errand. `rearm` appends the ear-died suffix
-    for the typed re-arm of an alive window whose ear missed."""
+def _gen_token_suffix(token) -> str:
+    """Wire form of the cancellation-epoch token appended to a wake signal line:
+    ' {g<gen>:<state_id>}'. token=None -> "" (legacy token-less line, still
+    processed by the consumer). Kept minimal + trailing so the marker substring
+    match is unaffected."""
+    if not token:
+        return ""
+    gen, state_id = token
+    if gen is None:
+        return ""
+    return f" {{g{gen}:{state_id}}}"
+
+
+def wake_signal_line(cfg: dict, now, rearm: bool = False, token=None) -> str:
+    """The bell line: '<marker> HH:MM' (local time), optionally carrying the
+    cancellation-epoch token as a trailing ' {g<gen>:<sid>}' tag. The marrow
+    UserPromptSubmit hook detects the marker and injects the full wakeup note —
+    this line is a BELL ONLY, no note body, no read errand. It validates the
+    token against the live epoch at consumption (stale -> suppress). `rearm`
+    appends the ear-died suffix for the typed re-arm of an alive window whose ear
+    missed. The token tag goes AFTER the rearm suffix (trailing)."""
     marker = cfg["wake"].get("wake_signal_marker", "[CORTEX-WAKE]")
     line = f"{marker} {now.strftime('%H:%M')}"
     if rearm:
         line += cfg["wake"].get("rearm_suffix", " (ear died — rearm)")
+    line += _gen_token_suffix(token)
     return line
 
 
@@ -182,12 +199,14 @@ def _append_signal_line(cfg: dict, line: str) -> None:
         pass
 
 
-def append_wake_signal(cfg: dict, now) -> None:
-    """Append one bell line the armed Monitor ear picks up: '<marker> HH:MM'.
-    The marker (not this file) is what the marrow UserPromptSubmit hook detects
-    to inject the full wakeup note — a BELL ONLY, no note body, no read errand.
+def append_wake_signal(cfg: dict, now, token=None) -> None:
+    """Append one bell line the armed Monitor ear picks up: '<marker> HH:MM'
+    (plus the cancellation-epoch token tag when `token` is given). The marker
+    (not this file) is what the marrow UserPromptSubmit hook detects to inject
+    the full wakeup note — a BELL ONLY, no note body, no read errand. The token
+    lets the consumer suppress a wake line that a newer epoch already superseded.
     Best-effort: a write failure never crashes the pacemaker."""
-    _append_signal_line(cfg, wake_signal_line(cfg, now))
+    _append_signal_line(cfg, wake_signal_line(cfg, now, token=token))
 
 
 _launch_command = launch_command  # back-compat alias
