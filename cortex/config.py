@@ -63,24 +63,36 @@ _DEFAULTS: dict[str, Any] = {
         "rearm_suffix": " (ear died — rearm)",
         "say_sound": "Glass",
         # Max wait() calls allowed per wake (reset on wake start / lie_down).
-        # A call past this returns a refusal result (not an exception).
-        "wait_max_per_wake": 2,
+        # 0 = uncapped (permanent residency; night gate / 150k fuse / grace
+        # auto-lie / user return are the backstops).
+        "wait_max_per_wake": 0,
         # wait() clamp bounds (minutes). Own bounds, decoupled from the floor
-        # draw window (triggers.floor_*): wait guards the hot cache TTL.
-        "wait_min": 1,
+        # draw window (triggers.floor_*): wait guards the hot cache TTL. Floor 16 >
+        # silence gate (15) keeps wait strictly "post-gate renewal".
+        "wait_min": 16,
         "wait_max": 55,
-        # lie_down(next_wake_min=N) clamp: 1..next_wake_max minutes.
-        "next_wake_max": 240,
+        # lie_down(next_wake_min=N) clamp (minutes): [next_wake_min, next_wake_max]
+        # normally; a rotate short-sleep lowers the floor to next_wake_rotate_min.
+        "next_wake_min": 90,
+        "next_wake_rotate_min": 16,
+        "next_wake_max": 360,
         # Exact-time wake: arm cortex.sentinel (one-shot detached sleep-then-tick)
         # at every lie_down. false = tick-only (launchd 5-min fallback).
         "sentinel": True,
-        # Chat-tier tuck-in marker appended to wake_signal.log at silent_max_min
-        # when the user replied this wake. {n}/{cap} = live wait count.
+        # Free-round marker appended to wake_signal.log at the silence gate or a
+        # wait(N)-expiry. {mins} = real minutes since the user's last message;
+        # {user} = marrow user_name (fallback "the user").
         "tuck_in_text":
-            "⏳ [TUCK-IN] It's been 20 mins - Call wait(N) if you don't want to "
-            "sleep; Otherwise lie_down(next_wake_min=N). (Wait cap {n}/{cap})",
+            "⏳ [NEW ROUND] {mins} min since {user}'s last message. Choose again: "
+            "1) play around (playbook); 2) wait(N) (16-55min); "
+            "3) lie_down(next_wake_min=N) (90-360min). Feel free to do anything. "
+            "No need to wait for reply - {user} will wake you the moment she's back.",
+        # Line-start markers that identify a NON-user turn (wake bell / free-round
+        # / night line) arriving down the ear channel, so they never reset the
+        # silence timer. wake_signal_marker is added automatically.
+        "machine_line_markers": ["[TUCK-IN]", "[NEW ROUND]", "[NIGHT]"],
         # When a declared wait(N) expires, append a freshly rendered wakeup note
-        # to the TUCK-IN marker (note content only, no behavioural nudge).
+        # to the free-round marker (note content only, no behavioural nudge).
         "wait_expiry_note": True,
         # Manual `cortex.ctl sleep` instruction injected into a live window.
         # {mins} = next_wake_min; {rotate} = "write your handoff then " when
@@ -167,7 +179,8 @@ _DEFAULTS: dict[str, Any] = {
         # note. "" omits it.
         "turn_end_text":
             "NOTE: Call MCP tool to wait or lie_down at the end of each turn. "
-            "Wait=wait(N) [N=1-55]; sleep=lie_down(next_wake_min=N) [1-240]. "
+            "Wait=wait(N) [N=16-55]; sleep=lie_down(next_wake_min=N) "
+            "[90-360; rotate=True unlocks ≥16]. "
             "Skip call = sleep in 5 mins. Auto timer is on during active chat "
             "- no call needed.",
         # Header written into a freshly-created wishlist.md (append-only file,
@@ -228,6 +241,24 @@ def load(path: Path | None = None) -> dict[str, Any]:
 def marrow_db_path(cfg: dict) -> Path:
     raw = cfg["paths"].get("marrow_db") or ""
     return Path(raw).expanduser() if raw else DEFAULT_MARROW_DB
+
+
+def user_name(cfg: dict, default: str = "the user") -> str:
+    """The user's name, read from marrow's config.toml (sibling of cortex.toml in
+    the shared config dir) — cortex inherits it, never carries its own copy (OSS:
+    no hardcoded persona in code). `default` when marrow config is absent/blank."""
+    db = marrow_db_path(cfg)
+    marrow_cfg = db.parent / "config.toml"
+    try:
+        if marrow_cfg.exists():
+            with marrow_cfg.open("rb") as f:
+                data = tomllib.load(f)
+            name = str(data.get("user_name") or "").strip()
+            if name:
+                return name
+    except (OSError, ValueError):
+        pass
+    return default
 
 
 def knowledgec_db_path(cfg: dict) -> Path:

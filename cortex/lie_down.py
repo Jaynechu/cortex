@@ -87,14 +87,14 @@ def _record_tokens(conn, cfg: dict, state: dict, force_slept: str | None) -> int
 def lie_down(cfg: dict, force_slept: str | None = None, rotate: bool = False,
              next_wake_min: float | None = None) -> dict:
     """End the current wake. `next_wake_min` picks the next internal wake:
-    an explicit minutes-from-now (clamped to [1, wake.next_wake_max]), or None =
-    a uniform "dice" draw within the floor window (proxy paths: watchdog auto,
-    stale reap, fuse — session-facing dice retired, N required at the MCP/CLI
-    layer)."""
+    an explicit minutes-from-now (clamped to [next_wake_min, next_wake_max]; a
+    rotate short-sleep lowers the floor to next_wake_rotate_min), or None = a
+    uniform "dice" draw within the floor window (proxy paths: watchdog auto, stale
+    reap, fuse — session-facing dice retired, N required at the MCP/CLI layer)."""
     from cortex.pacemaker.triggers import clamp_next_wake_minutes
 
     if next_wake_min is not None:
-        next_wake_min = clamp_next_wake_minutes(next_wake_min, cfg)
+        next_wake_min = clamp_next_wake_minutes(next_wake_min, cfg, rotate=rotate)
     # Atomic awake claim: the watchdog (60s poll) and the tick awake-branch can
     # both run silence_action in the same window; only the caller that clears the
     # awake marker here proceeds, so the ct_wake_log update + floor redraw fire
@@ -304,8 +304,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--rotate", action="store_true",
                         help="respawn a fresh window on the next wake")
     parser.add_argument("--next-wake-min", type=float, required=True,
-                        help="minutes until the next internal wake "
-                             "(required, clamped to [1, wake.next_wake_max])")
+                        help="minutes until the next internal wake (required, "
+                             "clamped to [next_wake_min, next_wake_max]; "
+                             "--rotate lowers the floor to next_wake_rotate_min)")
     args = parser.parse_args(argv)
     cfg = config.load()
     result = lie_down(cfg, force_slept=args.force_slept, rotate=args.rotate,

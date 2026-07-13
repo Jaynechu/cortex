@@ -15,9 +15,11 @@ def base_config():
             "floor_max_min": 55,
         },
         "wake": {
-            "wait_min": 1,
+            "wait_min": 16,
             "wait_max": 55,
-            "next_wake_max": 240,
+            "next_wake_min": 90,
+            "next_wake_rotate_min": 16,
+            "next_wake_max": 360,
         },
     }
 
@@ -134,13 +136,21 @@ def test_clamp_window_minutes_uses_wait_bounds():
     # the floor draw window.
     config = base_config()
     assert clamp_window_minutes(30, config) == 30
-    assert clamp_window_minutes(0, config) == 1
+    assert clamp_window_minutes(0, config) == 16   # below wait_min -> 16
     assert clamp_window_minutes(90, config) == 55
 
 
 def test_clamp_next_wake_minutes_bounds():
-    # lie_down(next_wake_min=N) clamp = [1, wake.next_wake_max].
+    # Normal clamp = [next_wake_min (90), next_wake_max (360)].
     config = base_config()
     assert clamp_next_wake_minutes(120, config) == 120
-    assert clamp_next_wake_minutes(0, config) == 1
-    assert clamp_next_wake_minutes(999, config) == 240
+    assert clamp_next_wake_minutes(20, config) == 90        # below floor -> 90
+    assert clamp_next_wake_minutes(999, config) == 360      # above ceiling -> 360
+
+
+def test_clamp_next_wake_minutes_rotate_lowers_floor():
+    # rotate=True short-sleep floor = next_wake_rotate_min (16); ceiling unchanged.
+    config = base_config()
+    assert clamp_next_wake_minutes(20, config, rotate=True) == 20    # >=16 kept
+    assert clamp_next_wake_minutes(5, config, rotate=True) == 16     # below floor
+    assert clamp_next_wake_minutes(999, config, rotate=True) == 360

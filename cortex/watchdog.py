@@ -160,17 +160,17 @@ def _wait_expiry_note(cfg: dict) -> str:
         return ""
 
 
-def _build_tuck_in_line(cfg: dict) -> str:
-    """Render the chat-tier tuck-in line OUTSIDE any lock (BUG B: the slow
-    wait-expiry note render + template fill must not run inside the strict
-    section). {n}/{cap} = live wait count. On a wait(N)-expiry a freshly rendered
-    wakeup note is appended below the marker. "" when disabled."""
+def _build_tuck_in_line(cfg: dict, mins: float) -> str:
+    """Render the free-round line OUTSIDE any lock (BUG B: the slow wait-expiry
+    note render + template fill must not run inside the strict section). {mins} =
+    real minutes since the user's last message, {user} = marrow user_name. On a
+    wait(N)-expiry a freshly rendered wakeup note is appended below the marker.
+    "" when disabled."""
     tmpl = str(cfg["wake"].get("tuck_in_text") or "").strip()
     if not tmpl:
         return ""
-    cap = int(cfg["wake"].get("wait_max_per_wake", 2) or 0)
-    n = wake_state.get_wait_count(cfg)
-    line = tmpl.replace("{n}", str(n)).replace("{cap}", str(cap))
+    line = tmpl.replace("{mins}", str(int(round(mins)))) \
+               .replace("{user}", config.user_name(cfg))
     fresh = _wait_expiry_note(cfg)
     if fresh:
         line = line + "\n" + fresh
@@ -189,6 +189,32 @@ def _write_tuck_in_line(cfg: dict, line: str) -> None:
             f.write(line + "\n")
     except OSError:
         pass
+
+
+def _wait_expired(cfg: dict) -> bool:
+    """True when a wait(N) window was declared and its deadline is now in the PAST
+    (exists but no longer live). Distinct from _wait_until_live: a future deadline
+    holds silence; a past one triggers the free-round injection."""
+    wu = wake_state.get_wait_until(cfg)
+    return wu is not None and datetime.now(timezone.utc) >= wu
+
+
+def _clear_wait_and_stamp():
+    """Mutator (run under conditional_mutate): on a wait-expiry, atomically drop
+    silence_wait_until AND stamp tuck_pending so the 5-min grace auto-lie arms.
+    Stamps only when still awake + no tuck_pending yet. Returns True on a fresh
+    stamp (caller appends the free-round line), False otherwise. The epoch check
+    is conditional_mutate's token guard — a user message between expiry and poll
+    (stale token) drops this whole branch (wait already cleared by the reset)."""
+    def _m(d: dict) -> bool:
+        if not d.get("awake"):
+            return False
+        d.pop("silence_wait_until", None)  # clear regardless (fires once)
+        if d.get("tuck_pending") is not None:
+            return False
+        d["tuck_pending"] = datetime.now(timezone.utc).isoformat()
+        return True
+    return _m
 
 
 def _stamp_tuck_pending():
@@ -242,6 +268,25 @@ def silence_action(cfg: dict, silent_min: float, *, allow_tuck: bool = True) -> 
     if _wait_until_live(cfg):
         return None
 
+    # Wait-expiry free-round (D1): a wait(N) window that has now elapsed injects
+    # the free-round line IMMEDIATELY, bypassing the silent_min gate. Epoch-guarded
+    # (BUG A): a user message between expiry and this poll bumps gen -> the token
+    # is stale -> conditional_mutate raises and nothing is injected (the reset
+    # already cleared the wait). On a fresh epoch: clear the wait + stamp
+    # tuck_pending (grace arms) + append the free-round line.
+    if _wait_expired(cfg):
+        line = _build_tuck_in_line(cfg, silent_min) if allow_tuck else ""
+        try:
+            committed = wake_state.conditional_mutate(
+                cfg, token0, _clear_wait_and_stamp())
+        except wake_state.StateValidationError:
+            return None  # stale epoch (user returned) / lock lost -> inject nothing
+        if not committed:
+            return None  # not awake / already stamped -> no double injection
+        if allow_tuck:
+            _write_tuck_in_line(cfg, line)
+        return "wait-expiry free-round appended"
+
     if not wake_state.user_replied_this_wake(cfg):
         gate = float(wcfg.get("no_user_gate_min", 5))
         if silent_min >= gate:
@@ -250,7 +295,7 @@ def silence_action(cfg: dict, silent_min: float, *, allow_tuck: bool = True) -> 
         return None
 
     # Chat tier.
-    silent_max = float(wcfg.get("silent_max_min", 20))
+    silent_max = float(wcfg.get("silent_max_min", 15))
     grace = float(wcfg.get("tuck_grace_min", 5))
     if silent_min < silent_max:
         return None
@@ -261,7 +306,7 @@ def silence_action(cfg: dict, silent_min: float, *, allow_tuck: bool = True) -> 
         # re-check awake + epoch + no-live-wait + tuck_pending-still-absent under
         # the strict lock and stamp tuck_pending in the same section (fixes the
         # TOCTOU at the old :214-219). Only a committed stamp appends the line.
-        line = _build_tuck_in_line(cfg) if allow_tuck else ""
+        line = _build_tuck_in_line(cfg, silent_min) if allow_tuck else ""
         try:
             committed = wake_state.conditional_mutate(
                 cfg, token0, _stamp_tuck_pending())
@@ -301,8 +346,10 @@ def run(cfg: dict) -> int:
         if wake_state.is_paused(cfg):
             continue  # DND: no reaps / tuck-ins / fuse while paused
 
-        mt = transcript.mtime(cfg)
-        silent_min = (time.time() - mt) / 60.0 if mt else 0.0
+        # Silence source = minutes since the last REAL user message (assistant
+        # turns / system writes / ear injections do NOT reset it). None (no user
+        # message found in tail) -> 0.0 = hold, same as an unreadable transcript.
+        silent_min = transcript.user_silent_min(cfg) or 0.0
         tokens = transcript.window_tokens(cfg)
 
         # Publish the live window occupancy (statusline total) for the next

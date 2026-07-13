@@ -197,10 +197,10 @@ def test_bug_b_tuck_in_suppressed_after_claim(cfg, monkeypatch):
 
     real_build = watchdog._build_tuck_in_line
 
-    def paused_build(cfg_):
+    def paused_build(cfg_, mins):
         reached.set()
         released.wait(2.0)
-        return real_build(cfg_)
+        return real_build(cfg_, mins)
 
     monkeypatch.setattr(watchdog, "_build_tuck_in_line", paused_build)
 
@@ -226,7 +226,7 @@ def test_bug_b_tuck_in_suppressed_after_claim(cfg, monkeypatch):
     # No tuck-in line appended to the signal log.
     sig = config.wake_signal_log_path(cfg)
     body = sig.read_text() if sig.exists() else ""
-    assert "[TUCK-IN]" not in body
+    assert "[NEW ROUND]" not in body
 
 
 def test_silence_action_tuck_in_happy_path(cfg):
@@ -239,7 +239,7 @@ def test_silence_action_tuck_in_happy_path(cfg):
     st = wake_state.load(cfg)
     assert st.get("tuck_pending") is not None
     sig = config.wake_signal_log_path(cfg)
-    assert sig.read_text().count("[TUCK-IN]") == 1
+    assert sig.read_text().count("[NEW ROUND]") == 1
 
 
 # ── tick: stale-snapshot side effects suppressed ──────────────────────────────

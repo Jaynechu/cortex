@@ -796,19 +796,20 @@ def test_lie_down_returns_next_wake_hm(cfg):
     conn.close()
     wake_state.set_awake(cfg, wid, None)
 
-    r = lie_down.lie_down(cfg, next_wake_min=20)
+    # 120 is within [next_wake_min=90, next_wake_max=360] -> used verbatim.
+    r = lie_down.lie_down(cfg, next_wake_min=120)
     assert "next_wake" in r
     tz = ZoneInfo(cfg["core"]["timezone"])
-    expected = (_dt.now(tz) + timedelta(minutes=20)).strftime("%H:%M")
+    expected = (_dt.now(tz) + timedelta(minutes=120)).strftime("%H:%M")
     # allow a 1-min clock-tick skew
     assert r["next_wake"] in (
         expected,
-        (_dt.now(tz) + timedelta(minutes=21)).strftime("%H:%M"))
+        (_dt.now(tz) + timedelta(minutes=121)).strftime("%H:%M"))
 
 
-def test_lie_down_clamps_next_wake_min_to_240(cfg):
-    """lie_down(next_wake_min=N) clamps to [1, next_wake_max=240] — the wider
-    session-facing window, not the 10-55 floor draw. 999 -> 240."""
+def test_lie_down_clamps_next_wake_min_to_360(cfg):
+    """lie_down(next_wake_min=N) clamps to [next_wake_min=90, next_wake_max=360] —
+    the wider session-facing window, not the floor draw. 999 -> 360."""
     from datetime import datetime as _dt
     from zoneinfo import ZoneInfo
 
@@ -824,13 +825,13 @@ def test_lie_down_clamps_next_wake_min_to_240(cfg):
 
     r = lie_down.lie_down(cfg, next_wake_min=999)
     tz = ZoneInfo(cfg["core"]["timezone"])
-    expected = (_dt.now(tz) + timedelta(minutes=240)).strftime("%H:%M")
+    expected = (_dt.now(tz) + timedelta(minutes=360)).strftime("%H:%M")
     assert r["next_wake"] in (
-        expected, (_dt.now(tz) + timedelta(minutes=241)).strftime("%H:%M"))
+        expected, (_dt.now(tz) + timedelta(minutes=361)).strftime("%H:%M"))
 
 
-def test_lie_down_clamps_next_wake_min_to_1(cfg):
-    """A tiny value clamps up to the 1-min floor (anti-thrash)."""
+def test_lie_down_clamps_next_wake_min_to_floor(cfg):
+    """A sub-floor value clamps up to next_wake_min=90 (anti-thrash)."""
     from datetime import datetime as _dt
     from zoneinfo import ZoneInfo
 
@@ -846,9 +847,9 @@ def test_lie_down_clamps_next_wake_min_to_1(cfg):
 
     r = lie_down.lie_down(cfg, next_wake_min=0)
     tz = ZoneInfo(cfg["core"]["timezone"])
-    expected = (_dt.now(tz) + timedelta(minutes=1)).strftime("%H:%M")
+    expected = (_dt.now(tz) + timedelta(minutes=90)).strftime("%H:%M")
     assert r["next_wake"] in (
-        expected, (_dt.now(tz) + timedelta(minutes=2)).strftime("%H:%M"))
+        expected, (_dt.now(tz) + timedelta(minutes=91)).strftime("%H:%M"))
 
 
 # --- resume vs fresh (item 6) -------------------------------------------------

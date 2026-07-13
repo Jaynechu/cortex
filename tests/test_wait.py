@@ -22,16 +22,14 @@ def test_wait_within_cap_returns_ok(cfg):
     assert r2["wait_count"] == 2
 
 
-def test_wait_third_call_refused(cfg):
+def test_wait_uncapped_never_refused(cfg):
+    # wait_max_per_wake = 0 (D5, uncapped): permanent residency loops wait forever.
     wake_state.set_awake(cfg, wake_log_id=1, transcript="t")
-    wait.wait(cfg, 30)
-    wait.wait(cfg, 30)
-    r3 = wait.wait(cfg, 30)
-    assert r3["ok"] is False
-    assert r3["refused"] is True
-    assert r3["cap"] == 2
-    # A refused call does not extend the silence window or bump the counter.
-    assert wake_state.get_wait_count(cfg) == 2
+    for _ in range(5):
+        r = wait.wait(cfg, 30)
+        assert r["ok"] is True
+    assert r["cap"] == 0
+    assert wake_state.get_wait_count(cfg) == 5
 
 
 def test_wait_count_resets_on_new_wake(cfg):

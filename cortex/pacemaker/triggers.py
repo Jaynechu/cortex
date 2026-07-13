@@ -105,12 +105,16 @@ def clamp_window_minutes(minutes: float, config: dict) -> float:
     return max(lo, min(hi, minutes))
 
 
-def clamp_next_wake_minutes(minutes: float, config: dict) -> float:
-    """Clamp a lie_down(next_wake_min=N) choice to [1, wake.next_wake_max]. The
-    session-facing wake window is wider than the floor draw (dice retired for
-    the session; proxy paths still draw within the floor window)."""
-    hi = config.get("wake", {}).get("next_wake_max", 240)
-    return max(1, min(hi, minutes))
+def clamp_next_wake_minutes(minutes: float, config: dict, rotate: bool = False) -> float:
+    """Clamp a lie_down(next_wake_min=N) choice to [next_wake_min, next_wake_max].
+    Normal floor = wake.next_wake_min; a rotate short-sleep ("context full, back in
+    N min") lowers the floor to wake.next_wake_rotate_min. The session-facing wake
+    window is wider than the floor draw (dice retired for the session; proxy paths
+    pass None and skip this clamp)."""
+    wcfg = config.get("wake", {})
+    hi = wcfg.get("next_wake_max", 360)
+    lo = wcfg.get("next_wake_rotate_min", 16) if rotate else wcfg.get("next_wake_min", 90)
+    return max(lo, min(hi, minutes))
 
 
 def reschedule_floor(now: datetime, config: dict, rng: random.Random,

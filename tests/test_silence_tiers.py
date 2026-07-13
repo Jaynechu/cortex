@@ -75,8 +75,8 @@ def test_chat_tuck_in_then_grace(awake_no_sentinel):
     assert a1 == "tuck-in appended"
     assert wake_state.is_awake(cfg) is True
     lines = _signal_lines(cfg)
-    assert len(lines) == 1 and "[TUCK-IN]" in lines[0]
-    assert "0/2" in lines[0]  # live wait count substituted
+    assert len(lines) == 1 and "[NEW ROUND]" in lines[0]
+    assert "21 min" in lines[0]  # real minutes since user's last message
     # Marker stamped -> not re-appended on the next poll.
     a2 = watchdog.silence_action(cfg, silent_min=22.0)
     assert a2 is None
@@ -120,6 +120,88 @@ def test_wait_cancels_pending_auto_sleep(awake_no_sentinel):
     assert wake_state.is_awake(cfg) is True
 
 
+# --- wait-expiry free-round branch (D1) ---------------------------------------
+
+def test_wait_expiry_fresh_epoch_injects_immediately(awake_no_sentinel):
+    """A declared wait(N) whose deadline is PAST injects the free-round line on
+    the next poll, bypassing silent_min (even silent_min=0). The wait is cleared
+    and tuck_pending stamped so the grace auto-lie arms."""
+    cfg = awake_no_sentinel
+    wake_state.update(cfg, user_replied_this_wake=True)
+    wake_state.bump_wait_count(cfg)  # a wait() was declared this wake
+    past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    wake_state.set_wait_until(cfg, past)
+    action = watchdog.silence_action(cfg, silent_min=0.0)  # gate bypassed
+    assert action == "wait-expiry free-round appended"
+    text = "\n".join(_signal_lines(cfg))
+    assert "[NEW ROUND]" in text
+    # wait cleared + grace armed.
+    st = wake_state.load(cfg)
+    assert st.get("silence_wait_until") is None
+    assert st.get("tuck_pending") is not None
+    assert wake_state.is_awake(cfg) is True
+
+
+def test_wait_expiry_stale_epoch_injects_nothing(awake_no_sentinel):
+    """A user message between expiry and the poll bumps gen -> the captured token
+    is stale -> conditional_mutate raises -> nothing injected, no stamp."""
+    cfg = awake_no_sentinel
+    wake_state.update(cfg, user_replied_this_wake=True)
+    wake_state.bump_wait_count(cfg)
+    past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    wake_state.set_wait_until(cfg, past)
+
+    # Force a gen bump AFTER the branch captures its token (simulate a user reset
+    # landing mid-decision) by monkeypatching conditional_mutate to raise stale.
+    import cortex.wake_state as ws
+
+    def _stale(*a, **k):
+        raise ws.StateValidationError("epoch token stale")
+    orig = ws.conditional_mutate
+    watchdog.wake_state.conditional_mutate = _stale
+    try:
+        action = watchdog.silence_action(cfg, silent_min=0.0)
+    finally:
+        watchdog.wake_state.conditional_mutate = orig
+    assert action is None
+    assert _signal_lines(cfg) == []
+
+
+def test_wait_expiry_fires_once_then_falls_through(awake_no_sentinel):
+    """After the free-round injection clears the wait, a second poll no longer
+    sees a wait-expiry (the wait is gone) — it re-enters the normal chat tier."""
+    cfg = awake_no_sentinel
+    wake_state.update(cfg, user_replied_this_wake=True)
+    wake_state.bump_wait_count(cfg)
+    past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    wake_state.set_wait_until(cfg, past)
+    assert watchdog.silence_action(cfg, silent_min=0.0) == \
+        "wait-expiry free-round appended"
+    # Second poll: wait cleared, tuck_pending stamped -> grace path (still awake).
+    a2 = watchdog.silence_action(cfg, silent_min=1.0)
+    assert a2 is None
+    assert wake_state.is_awake(cfg) is True
+
+
+# --- template render ----------------------------------------------------------
+
+def test_free_round_template_substitutes_mins_and_user(cfg):
+    """{mins} = real minutes since the user's last message; {user} = marrow
+    user_name (fallback "the user" when marrow config absent). No {n}/{cap}."""
+    line = watchdog._build_tuck_in_line(cfg, mins=17.0)
+    assert "17 min" in line
+    assert "the user" in line  # no marrow config -> fallback
+    assert "{n}" not in line and "{cap}" not in line and "{mins}" not in line
+
+
+def test_free_round_template_reads_marrow_user_name(cfg, tmp_path):
+    """{user} resolves from marrow's config.toml (sibling of the db path)."""
+    (tmp_path / "config.toml").write_text('user_name = "Nim"\n')
+    cfg["paths"]["marrow_db"] = str(tmp_path / "marrow.db")
+    line = watchdog._build_tuck_in_line(cfg, mins=17.0)
+    assert "Nim" in line and "the user" not in line
+
+
 # --- wait-expiry note ---------------------------------------------------------
 
 def test_wait_expiry_tuck_in_carries_fresh_note(awake_no_sentinel):
@@ -131,7 +213,7 @@ def test_wait_expiry_tuck_in_carries_fresh_note(awake_no_sentinel):
     a1 = watchdog.silence_action(cfg, silent_min=21.0)
     assert a1 == "tuck-in appended"
     text = "\n".join(_signal_lines(cfg))
-    assert "[TUCK-IN]" in text
+    assert "[NEW ROUND]" in text
     assert "Now:" in text  # fresh note appended
 
 
@@ -141,7 +223,7 @@ def test_plain_tuck_in_no_note(awake_no_sentinel):
     wake_state.update(cfg, user_replied_this_wake=True)  # wait_count stays 0
     watchdog.silence_action(cfg, silent_min=21.0)
     text = "\n".join(_signal_lines(cfg))
-    assert "[TUCK-IN]" in text
+    assert "[NEW ROUND]" in text
     assert "Now:" not in text
 
 
@@ -153,7 +235,7 @@ def test_wait_expiry_note_toggle_off(awake_no_sentinel):
     wake_state.bump_wait_count(cfg)
     watchdog.silence_action(cfg, silent_min=21.0)
     text = "\n".join(_signal_lines(cfg))
-    assert "[TUCK-IN]" in text
+    assert "[NEW ROUND]" in text
     assert "Now:" not in text
 
 
@@ -168,7 +250,7 @@ def test_wait_expiry_render_failure_falls_back(awake_no_sentinel, monkeypatch):
     a1 = watchdog.silence_action(cfg, silent_min=21.0)
     assert a1 == "tuck-in appended"
     text = "\n".join(_signal_lines(cfg))
-    assert "[TUCK-IN]" in text
+    assert "[NEW ROUND]" in text
     assert "Now:" not in text  # note omitted, marker survived
 
 

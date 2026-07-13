@@ -109,6 +109,105 @@ def mtime(cfg: dict) -> float | None:
     return p.stat().st_mtime if p else None
 
 
+# Bytes read from the tail on each silence poll — a handful of turns is plenty to
+# find the last real user message; capped so a multi-MB transcript never loads
+# whole (benchmark: 8 KiB tail read is sub-millisecond regardless of file size).
+_TAIL_BYTES = 65536
+
+
+def _line_markers(cfg: dict) -> list[str]:
+    """Machine-line markers that identify a NON-user turn arriving down the ear
+    channel (wake bell, tuck-in / free-round injection). A transcript entry whose
+    user-role text contains any of these is a system write, NOT a real user
+    message, so it must not reset the silence timer. Aligned with marrow's
+    is_machine_line (cortex_bridge.py): wake marker + tuck-in marker family."""
+    wcfg = cfg.get("wake", {})
+    out = []
+    m = str(wcfg.get("wake_signal_marker") or "").strip()
+    if m:
+        out.append(m)
+    for m in wcfg.get("machine_line_markers") or ["[TUCK-IN]", "[NEW ROUND]", "[NIGHT]"]:
+        m = str(m).strip()
+        if m and m not in out:
+            out.append(m)
+    return out
+
+
+def _user_text(msg: dict) -> str | None:
+    """String form of a user-role message's content, or None when it is not a
+    user turn / has no text (tool_result blocks yield "")."""
+    if not isinstance(msg, dict) or msg.get("role") != "user":
+        return None
+    content = msg.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = [b.get("text", "") for b in content
+                 if isinstance(b, dict) and b.get("type") == "text"]
+        return "".join(parts)
+    return ""
+
+
+def _entry_ts(o: dict) -> float | None:
+    """Epoch seconds of a transcript entry's ISO `timestamp`, or None."""
+    from datetime import datetime
+    raw = o.get("timestamp")
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return dt.timestamp()
+
+
+def last_user_message_mtime(cfg: dict) -> float | None:
+    """Epoch-seconds timestamp of the LAST real user message in the current
+    transcript, tail-read (never loads the whole file). Assistant turns, system
+    writes and the ear-delivered injections (wake bell / tuck-in / free-round /
+    night lines — `_line_markers`) do NOT count: those are machine writes that
+    must not reset the silence timer (the "永远睡不到alarm" bug family). Returns
+    None when no qualifying user message is found in the tail or the transcript is
+    missing/unreadable — callers fall back to hold behaviour."""
+    p = newest(cfg)
+    if not p:
+        return None
+    markers = _line_markers(cfg)
+    try:
+        size = p.stat().st_size
+        with p.open("rb") as f:
+            if size > _TAIL_BYTES:
+                f.seek(size - _TAIL_BYTES)
+                f.readline()  # drop the partial first line
+            chunk = f.read()
+    except OSError:
+        return None
+    latest: float | None = None
+    for raw in chunk.splitlines():
+        try:
+            o = json.loads(raw)
+        except ValueError:
+            continue
+        text = _user_text(o.get("message"))
+        if text is None:
+            continue  # not a user turn
+        if any(mk in text for mk in markers):
+            continue  # machine line down the ear channel, not a real user turn
+        ts = _entry_ts(o)
+        if ts is not None and (latest is None or ts > latest):
+            latest = ts
+    return latest
+
+
+def user_silent_min(cfg: dict) -> float | None:
+    """Minutes since the last real user message (`last_user_message_mtime`), or
+    None when it cannot be determined. The single silence source shared by the
+    watchdog poll and the tick awake gate."""
+    import time
+    ts = last_user_message_mtime(cfg)
+    return (time.time() - ts) / 60.0 if ts is not None else None
+
+
 def window_tokens(cfg: dict) -> int:
     """Context-window occupancy = the last assistant message's usage totals
     (input + cache read + cache creation + output). Grows with the conversation;

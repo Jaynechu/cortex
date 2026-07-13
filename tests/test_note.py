@@ -79,7 +79,8 @@ def test_render_turn_end_line_appears_every_render(cfg):
     text = note.render(cfg, NOW, {})
     assert text.rstrip().endswith(
         "NOTE: Call MCP tool to wait or lie_down at the end of each turn. "
-        "Wait=wait(N) [N=1-55]; sleep=lie_down(next_wake_min=N) [1-240]. "
+        "Wait=wait(N) [N=16-55]; sleep=lie_down(next_wake_min=N) "
+        "[90-360; rotate=True unlocks ≥16]. "
         "Skip call = sleep in 5 mins. Auto timer is on during active chat "
         "- no call needed.")
 
