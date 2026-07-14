@@ -279,7 +279,7 @@ def test_window_wake_rotate_respawns(monkeypatch, marrow_conn, rot_cfg):
     The handoff now injects at SessionStart (marrow), not in the note."""
     monkeypatch.setattr(wake, "_window_wake_plan", lambda cfg: "fresh")
     captured = {}
-    def fake_window_wake(conn, cfg, note_text, now, respawn=False):
+    def fake_window_wake(conn, cfg, note_text, now, respawn=False, **kw):
         captured["text"] = note_text
         captured["respawn"] = respawn
         return {"mode": "window", "session_id": None, "text": None}
@@ -300,7 +300,7 @@ def test_rotate_flag_makes_next_wake_fresh(monkeypatch, marrow_conn, rot_cfg):
     wake_state.set_rotated(rot_cfg)
     captured = {}
     monkeypatch.setattr(wake, "_window_wake",
-                        lambda conn, cfg, t, now, respawn=False:
+                        lambda conn, cfg, t, now, respawn=False, **kw:
                         captured.update(text=t, respawn=respawn) or
                         {"mode": "window", "session_id": None, "text": None})
     wake.run_wake(marrow_conn, rot_cfg, DECISION, now=DAY1)
@@ -312,7 +312,7 @@ def test_window_wake_unrotated_no_handoff(monkeypatch, marrow_conn, rot_cfg):
     monkeypatch.setattr(wake, "_window_wake_plan", lambda cfg: "ear")
     captured = {}
     monkeypatch.setattr(wake, "_window_wake",
-                        lambda conn, cfg, t, now, respawn=False:
+                        lambda conn, cfg, t, now, respawn=False, **kw:
                         captured.update(text=t, respawn=respawn) or
                         {"mode": "window", "session_id": None, "text": None})
     wake.run_wake(marrow_conn, rot_cfg, DECISION, now=DAY1)
@@ -345,7 +345,7 @@ def test_resume_or_fresh_dead_normal_resume(monkeypatch, marrow_conn, rot_cfg):
     wake_state.update(rot_cfg, transcript="/t/alive-sid.jsonl")
     captured = {}
     monkeypatch.setattr(wake, "_spawn_wake",
-                        lambda conn, cfg, now, resume=False:
+                        lambda conn, cfg, now, resume=False, **kw:
                         captured.update(resume=resume) or {"mode": "window"})
     wake._resume_or_fresh_dead(marrow_conn, rot_cfg, DAY1, "test")
     assert captured["resume"] is True
@@ -366,7 +366,7 @@ def test_resume_or_fresh_dead_retired_sid_forces_fresh(monkeypatch, marrow_conn,
     assert wake_state.load(rot_cfg).get("rotated") is None  # already consumed
     captured = {}
     monkeypatch.setattr(wake, "_spawn_wake",
-                        lambda conn, cfg, now, resume=False:
+                        lambda conn, cfg, now, resume=False, **kw:
                         captured.update(resume=resume) or {"mode": "window"})
     wake._resume_or_fresh_dead(marrow_conn, rot_cfg, DAY1, "test")
     assert captured["resume"] is False  # never resumes a retired session
@@ -400,7 +400,7 @@ def test_resume_or_fresh_dead_seeds_from_delivered_catchup_cutoff(
     monkeypatch.setattr(wake, "_handoff_written_this_window", lambda cfg: False)
     monkeypatch.setattr(window, "write_note", lambda cfg, text: None)
     monkeypatch.setattr(wake, "_spawn_wake",
-                        lambda conn, cfg, now, resume=False: {"mode": "window"})
+                        lambda conn, cfg, now, resume=False, **kw: {"mode": "window"})
     monkeypatch.setattr(wake.note, "_frontmost_app", lambda: None)
 
     # Event that races in AFTER the first note but is present when the catch-up
@@ -433,7 +433,7 @@ def test_resume_or_fresh_dead_no_note_replacement_keeps_first_cutoff(
     monkeypatch.setattr(wake, "_handoff_written_this_window", lambda cfg: True)
     captured = {}
     monkeypatch.setattr(wake, "_spawn_wake",
-                        lambda conn, cfg, now, resume=False:
+                        lambda conn, cfg, now, resume=False, **kw:
                         captured.update(spawned=True) or {"mode": "window"})
     result = wake._resume_or_fresh_dead(marrow_conn, rot_cfg, DAY1, "test")
     assert captured.get("spawned") is True
@@ -539,6 +539,64 @@ def test_night_close_no_session_no_rotate(night_cfg):
     st = wake_state.load(night_cfg)  # not awake, no session id
     assert pacemaker_tick._night_close(night_cfg, NIGHT, st) is None
     assert wake_state.load(night_cfg).get("rotated") is None
+
+
+# --------------------------------------------------------------------------- #
+# BUG A: every set_awake path binds a wake=1 row so "Last wake" counts it
+# --------------------------------------------------------------------------- #
+
+def _wake_rows(conn):
+    return conn.execute(
+        "SELECT id, reasons, force_slept FROM ct_wake_log WHERE wake=1 "
+        "ORDER BY id").fetchall()
+
+
+def test_log_activation_wake_row_writes_tagged_row(marrow_conn):
+    """A non-tick wake logs its OWN wake=1 row, tagged, force_slept NULL (so
+    force_slept-based auto-rate stats stay unaffected)."""
+    from cortex.pacemaker import integration
+    wid = integration.log_activation_wake_row(marrow_conn, DAY1, "user")
+    assert isinstance(wid, int)
+    rows = _wake_rows(marrow_conn)
+    assert len(rows) == 1
+    assert rows[0]["id"] == wid
+    assert rows[0]["reasons"] == "user"
+    assert rows[0]["force_slept"] is None
+
+
+def test_wake_log_id_writes_fresh_row_for_non_tick_wake(marrow_conn):
+    """Chokepoint: a tagged (user/ctl/reconcile/rotate) wake gets a FRESH row
+    even when an older scheduled row exists — so 'Last wake' never reuses a
+    stale noon row (the BUG A symptom)."""
+    from cortex.pacemaker import integration
+    # A stale scheduled row hours ago (the noon row in the incident).
+    old_ts = (DAY1 - timedelta(minutes=280)).astimezone(timezone.utc).isoformat()
+    marrow_conn.execute(
+        "INSERT INTO ct_wake_log (ts, wake, dry_run, reasons) VALUES (?, 1, 0, 'floor')",
+        (old_ts,))
+    marrow_conn.commit()
+    old_id = _wake_rows(marrow_conn)[0]["id"]
+
+    wid = wake._wake_log_id(marrow_conn, DAY1, "user")
+    assert wid != old_id  # a new row, not the stale one
+    rows = _wake_rows(marrow_conn)
+    assert len(rows) == 2
+    assert rows[-1]["reasons"] == "user"
+
+
+def test_wake_log_id_reuses_latest_for_scheduled(marrow_conn):
+    """Scheduled wake (wake_reasons=None): reuse the decision row run_tick already
+    wrote — no duplicate activation row."""
+    ts = DAY1.astimezone(timezone.utc).isoformat()
+    marrow_conn.execute(
+        "INSERT INTO ct_wake_log (ts, wake, dry_run, reasons) VALUES (?, 1, 0, 'floor')",
+        (ts,))
+    marrow_conn.commit()
+    scheduled_id = _wake_rows(marrow_conn)[0]["id"]
+
+    wid = wake._wake_log_id(marrow_conn, DAY1, None)
+    assert wid == scheduled_id  # reused, not a new row
+    assert len(_wake_rows(marrow_conn)) == 1
 
 
 def test_main_print_note_no_marrow_call(monkeypatch, marrow_conn, wcfg, capsys):

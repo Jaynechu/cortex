@@ -190,7 +190,7 @@ def test_fire_dead_window_accidental_close_respects_retired_sid(cfg, monkeypatch
     monkeypatch.setattr(transcript, "newest_window_lineage", lambda cfg, marker: None)
     captured = {}
     monkeypatch.setattr(wake, "_spawn_wake",
-                        lambda conn, c, now, resume=False:
+                        lambda conn, c, now, resume=False, **kw:
                         captured.update(resume=resume) or {"mode": "window"})
     conn = db.connect(cfg)
     try:

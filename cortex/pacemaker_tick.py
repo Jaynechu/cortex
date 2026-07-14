@@ -196,6 +196,7 @@ def _fire_dead_window(conn, cfg: dict, why: str) -> str:
         wake_state.set_next_wake_at(cfg, next_floor.isoformat() if next_floor else None)
         return f"reconcile ({why}) -> dry_run, floor redrawn only"
     decision = {"wake": True, "reasons": [], "gated_by": [],
+                "wake_reasons": "reconcile",
                 "explanation": f"{now.strftime('%H:%M')} reconcile: {why}"}
     result = run_wake(conn, cfg, decision, now=now)
     if result.get("mode") != "window":

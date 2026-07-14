@@ -48,6 +48,7 @@ def cmd_wake(cfg: dict) -> str:
     try:
         now = _now(cfg)
         decision = {"wake": True, "reasons": [], "gated_by": [],
+                    "wake_reasons": "ctl",
                     "explanation": f"{now.strftime('%H:%M')} manual ctl wake"}
         result = run_wake(conn, cfg, decision, now=now)
         if result.get("mode") != "window":

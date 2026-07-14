@@ -468,7 +468,7 @@ def _resume_or_fresh_dead(conn, cfg, now, why: str,
         catchup_note, delivered_cutoff = assemble_note(
             conn, cfg, now, died_no_handoff=True, return_cutoff=True)
         window.write_note(cfg, catchup_note)
-    result = _spawn_wake(conn, cfg, now, resume=False)
+    result = _spawn_wake(conn, cfg, now, resume=False, wake_reasons=wake_reasons)
     if result is not None and delivered_cutoff is not _OMITTED_CUTOFF:
         result["note_cutoff"] = delivered_cutoff
     return result
@@ -572,7 +572,14 @@ def run_wake(
                 conn, cfg, now, decision=decision, fresh=True,
                 wake_kind="rotate", return_cutoff=True)
             timer.mark("rotate_note")
-        win = _window_wake(conn, cfg, window_text, now, respawn=(plan == "fresh"))
+        # Wake-row reasons: a pacemaker-decided wake (scheduled) already has its
+        # decision row from run_tick -> reuse it (None). A non-tick wake (ctl /
+        # reconcile / user) carries an explicit tag in decision["wake_reasons"]
+        # so the chokepoint logs a fresh activation row (BUG A: those wakes wrote
+        # no wake=1 row, so "Last wake" skipped every real wake since noon).
+        wake_reasons = decision.get("wake_reasons")
+        win = _window_wake(conn, cfg, window_text, now, respawn=(plan == "fresh"),
+                           wake_reasons=wake_reasons)
         if win is not None:
             # D6 seed: set_awake (inside _window_wake) just reset last_note_ts to
             # None. Anchor the diff-mode baseline to the cutoff captured when the
