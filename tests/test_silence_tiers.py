@@ -130,7 +130,7 @@ def test_wait_expiry_fresh_epoch_injects_immediately(awake_no_sentinel):
     and tuck_pending stamped so the grace auto-lie arms."""
     cfg = awake_no_sentinel
     wake_state.update(cfg, user_replied_this_wake=True)
-    wake_state.bump_wait_count(cfg)  # a wait() was declared this wake
+    wake_state.update(cfg, wait_count=1)  # a wait() was declared this wake
     past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
     wake_state.set_wait_until(cfg, past)
     action = watchdog.silence_action(cfg, silent_min=0.0)  # gate bypassed
@@ -149,7 +149,7 @@ def test_wait_expiry_stale_epoch_injects_nothing(awake_no_sentinel):
     is stale -> conditional_mutate raises -> nothing injected, no stamp."""
     cfg = awake_no_sentinel
     wake_state.update(cfg, user_replied_this_wake=True)
-    wake_state.bump_wait_count(cfg)
+    wake_state.update(cfg, wait_count=1)
     past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
     wake_state.set_wait_until(cfg, past)
 
@@ -174,7 +174,7 @@ def test_wait_expiry_fires_once_then_falls_through(awake_no_sentinel):
     sees a wait-expiry (the wait is gone) — it re-enters the normal chat tier."""
     cfg = awake_no_sentinel
     wake_state.update(cfg, user_replied_this_wake=True)
-    wake_state.bump_wait_count(cfg)
+    wake_state.update(cfg, wait_count=1)
     past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
     wake_state.set_wait_until(cfg, past)
     assert watchdog.silence_action(cfg, silent_min=0.0) == \
@@ -211,7 +211,7 @@ def test_wait_expiry_tuck_in_carries_fresh_note(awake_no_sentinel):
     followed by a freshly rendered note (a `Now:` line)."""
     cfg = awake_no_sentinel
     wake_state.update(cfg, user_replied_this_wake=True)
-    wake_state.bump_wait_count(cfg)  # a wait() was declared -> expiry, not plain
+    wake_state.update(cfg, wait_count=1)  # a wait() was declared -> expiry, not plain
     a1 = watchdog.silence_action(cfg, silent_min=21.0)
     assert a1 == "tuck-in appended"
     text = "\n".join(_signal_lines(cfg))
@@ -272,7 +272,7 @@ def test_two_consecutive_injections_second_diffs_against_first(awake_no_sentinel
     conn.close()
 
     # Round 1: wait-expiry free-round injection (fresh baseline note).
-    wake_state.bump_wait_count(cfg)
+    wake_state.update(cfg, wait_count=1)
     past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
     wake_state.set_wait_until(cfg, past)
     a1 = watchdog.silence_action(cfg, silent_min=0.0)

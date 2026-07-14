@@ -27,7 +27,7 @@ def wait(cfg: dict, minutes: float) -> dict:
     # One atomic strict-locked mutation: verify awake + under cap, bump gen (an
     # accepted wait re-arms the silence window = a new cancellation epoch), set
     # silence_wait_until, increment wait_count, clear tuck_pending — no separate
-    # set_wait_until / bump_wait_count writes that a concurrent actor could tear.
+    # set_wait_until / wait_count writes that a concurrent actor could tear.
     res = wake_state.commit_wait(cfg, until.isoformat(), cap)
     if not res.get("ok"):
         used = res.get("wait_count", 0)

@@ -460,20 +460,6 @@ def get_wait_count(cfg: dict) -> int:
         return 0
 
 
-def bump_wait_count(cfg: dict) -> int:
-    """Increment and persist the per-wake wait() counter; returns the new count."""
-    with _flock(cfg):
-        try:
-            cur = int(load(cfg).get("wait_count", 0) or 0)
-        except (TypeError, ValueError):
-            cur = 0
-        count = cur + 1
-        d = load(cfg)
-        d["wait_count"] = count
-        _save(cfg, d)
-        return count
-
-
 def set_next_wake_at(cfg: dict, iso_local: str | None) -> None:
     """Persist the scheduled next-wake instant (local ISO) as the durable ledger.
     The scheduled time must never live only in the sentinel process args: a

@@ -24,6 +24,12 @@ DEFAULT_NY_DB_PAGES = Path.home() / "Desktop" / "NY" / "db-pages"
 DEFAULT_MARROW_REPO = Path.home() / "CC-Lab" / "marrow"
 DEFAULT_WAKE_TIMING_LOG = Path.home() / ".config" / "marrow" / "logs" / "wake_timing.log"
 
+# Single source of truth for the machine-line marker family (wake bell / free-
+# round / night / fuse / ctl / slash-command). Referenced by _DEFAULTS below AND
+# by transcript._line_markers' fallback so the two can never drift.
+DEFAULT_MACHINE_LINE_MARKERS = ["[TUCK-IN]", "[NEW ROUND]", "[NIGHT]",
+                                "[FUSE]", "[CTL]", "[CMD"]
+
 _DEFAULTS: dict[str, Any] = {
     "core": {"timezone": "Australia/Melbourne"},
     "paths": {
@@ -91,8 +97,7 @@ _DEFAULTS: dict[str, Any] = {
         # fuse / ctl / slash-command line), so they never reset the silence timer
         # and downstream memory drops them. wake_signal_marker is added
         # automatically. Substring match, so "[CMD" catches every ⚙️ [CMD ct-*].
-        "machine_line_markers": ["[TUCK-IN]", "[NEW ROUND]", "[NIGHT]",
-                                 "[FUSE]", "[CTL]", "[CMD"],
+        "machine_line_markers": list(DEFAULT_MACHINE_LINE_MARKERS),
         # When a declared wait(N) expires, append a freshly rendered wakeup note
         # to the free-round marker (note content only, no behavioural nudge).
         "wait_expiry_note": True,

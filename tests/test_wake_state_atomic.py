@@ -1,9 +1,6 @@
-"""wake_state atomicity + lock tests: _save is atomic (temp + os.replace), the
-sibling .lock exists, and concurrent bump_wait_count under the flock never loses
-an update (serialised RMW). Also lie_down --next-wake-min is required at the CLI."""
+"""wake_state atomicity + lock tests: _save is atomic (temp + os.replace) and the
+sibling .lock exists. Also lie_down --next-wake-min is required at the CLI."""
 from __future__ import annotations
-
-import threading
 
 import pytest
 
@@ -32,23 +29,6 @@ def test_save_is_atomic_no_tmp_left(cfg):
 def test_lock_file_path_is_sibling(cfg):
     lp = wake_state.lock_path(cfg)
     assert lp == wake_state.wake_state_path(cfg).with_suffix(".lock")
-
-
-def test_concurrent_bump_no_lost_update(cfg):
-    wake_state.set_awake(cfg, 1, None)  # wait_count = 0
-    N = 50
-
-    def worker():
-        for _ in range(N):
-            wake_state.bump_wait_count(cfg)
-
-    threads = [threading.Thread(target=worker) for _ in range(4)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join()
-    # Every bump under the flock is serialised -> no lost updates.
-    assert wake_state.get_wait_count(cfg) == 4 * N
 
 
 def test_commit_wait_writes_audit_line(cfg):

@@ -126,7 +126,7 @@ def _line_markers(cfg: dict) -> list[str]:
     m = str(wcfg.get("wake_signal_marker") or "").strip()
     if m:
         out.append(m)
-    for m in wcfg.get("machine_line_markers") or ["[TUCK-IN]", "[NEW ROUND]", "[NIGHT]"]:
+    for m in wcfg.get("machine_line_markers") or config.DEFAULT_MACHINE_LINE_MARKERS:
         m = str(m).strip()
         if m and m not in out:
             out.append(m)
