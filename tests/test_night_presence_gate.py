@@ -64,6 +64,30 @@ def test_night_fires_when_user_quiet(cfg, monkeypatch):
     assert again is None
 
 
+def test_night_holds_when_epoch_moves(cfg, monkeypatch):
+    """FIX 2 (D9/trap 3): a user reset / lie_down landing between the epoch
+    snapshot and the inject must cancel the NIGHT nudge -> hold, key un-consumed,
+    no injection."""
+    wake_state.set_awake(cfg, 1, None)
+    calls = _spy_inject(monkeypatch)
+    monkeypatch.setattr(transcript, "user_silent_min", lambda c: 20.0)  # quiet
+
+    # Snapshot the real token, then bump gen to simulate a superseding event that
+    # lands after the presence check but before the inject.
+    real_current_epoch = wake_state.current_epoch
+
+    def capture_then_bump(c):
+        tok = real_current_epoch(c)
+        wake_state.bump_gen(c)  # a user message / lie_down after the snapshot
+        return tok
+
+    monkeypatch.setattr(wake_state, "current_epoch", capture_then_bump)
+    msg = pacemaker_tick._night_close(cfg, _night_now(cfg), wake_state.load(cfg))
+    assert msg == "night close: epoch moved -> hold"
+    assert calls == []  # nothing injected
+    assert wake_state.load(cfg).get("night_wrap_key") is None  # key un-consumed
+
+
 def test_night_fires_when_silence_unknown(cfg, monkeypatch):
     """None silence signal (no user turn in tail / no transcript) must NOT block
     the wrap-up — a missing signal is not presence."""

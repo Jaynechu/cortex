@@ -37,6 +37,14 @@ def _night_close(cfg: dict, now, st: dict) -> str | None:
         # current turn). Marking non-resumable waits until it actually lies down.
         if st.get("night_wrap_key") == key:
             return None
+        # Epoch snapshot (D9/trap 3): capture the live token at the check so a
+        # user message / lie_down landing before the inject cancels this NIGHT
+        # nudge. A stale epoch => hold without consuming night_wrap_key and
+        # without bumping gen (observe-only path).
+        try:
+            token = wake_state.current_epoch(cfg)
+        except wake_state.StateValidationError:
+            return "night close: epoch capture failed -> hold"
         # Presence gate (D9): NIGHT is non-urgent. If the user messaged within the
         # last silent_max_min, hold WITHOUT consuming night_wrap_key so a later
         # tick still delivers it once the conversation goes quiet (a few minutes
@@ -47,6 +55,14 @@ def _night_close(cfg: dict, now, st: dict) -> str | None:
         silent_min = transcript.user_silent_min(cfg)
         if silent_min is not None and silent_min < silent_max:
             return f"night close: user present ({silent_min:.0f}min) -> hold"
+        # Re-validate the epoch immediately before injecting: a user message /
+        # lie_down between capture and here means the awake we saw is superseded
+        # -> hold, key un-consumed, no gen bump.
+        try:
+            if not wake_state.token_current(cfg, token):
+                return "night close: epoch moved -> hold"
+        except wake_state.StateValidationError:
+            return "night close: epoch re-check failed -> hold"
         prompt = ncfg.get("close_prompt") or ""
         wake_state.update(cfg, night_wrap_key=key)
         if prompt and window.inject_prompt(cfg, prompt):
