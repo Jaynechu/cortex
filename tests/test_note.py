@@ -703,6 +703,31 @@ def test_last_wake_after_short_rotate_cycle_reports_minutes(marrow_conn):
     assert lw["minutes_ago"] == 16  # the rotate cycle wake, not noon
 
 
+def test_gather_stale_boundary_uses_exact_ts_not_floored_minutes(
+        marrow_conn, cfg, tmp_path, monkeypatch):
+    """Codex P2: the staleness comparison must use last_wake['ts'] directly, not
+    now - timedelta(minutes=minutes_ago) (floored, can land up to 59s AFTER the
+    real wake). Prior wake at 04:14:31Z (929s ago -> floored to 15 whole
+    minutes). A genuinely NEW event at 04:14:50Z (19s after the real wake) must
+    render as fresh — the floored reconstruction (04:15:00Z) would wrongly
+    place the boundary after this event and stale it."""
+    cfg["paths"]["wake_state_file"] = str(tmp_path / "wake_state.json")
+    cfg["paths"]["handoff_file"] = str(tmp_path / "handoff.md")
+    make_events_table(marrow_conn)
+    monkeypatch.setattr(note, "_frontmost_app", lambda: None)
+    marrow_conn.execute(
+        "INSERT INTO ct_wake_log (ts, wake, dry_run) VALUES (?, 1, 0)",
+        ("2026-07-08T04:14:31+00:00",))
+    marrow_conn.execute(
+        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
+        ("s", "2026-07-08T04:14:50+00:00", "user", "just after the real wake", "wx"))
+    marrow_conn.commit()
+
+    data = note.gather(marrow_conn, cfg, NOW)  # initial wake
+    assert data["replay_stale"] is False
+    assert [e["content"] for e in data["replay"]] == ["just after the real wake"]
+
+
 def test_gather_returns_replay_cutoff_of_rendered_events(marrow_conn, cfg, tmp_path, monkeypatch):
     """gather() exposes replay_cutoff_ts = the newest ts it actually rendered.
     When nothing is newer than the baseline it diffed from, the cutoff is that

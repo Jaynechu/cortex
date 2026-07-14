@@ -197,6 +197,49 @@ def test_window_wake_respawn_delivers_note_as_prompt(cfg, monkeypatch):
     assert d["awake"] is True and d["wake_log_id"] == wid
 
 
+def test_window_wake_ear_epoch_reject_writes_no_phantom_row(cfg, monkeypatch):
+    """Codex P2: when set_awake's expected_gen check loses the race (a user
+    message flipped awake + bumped gen between the ear signal and here), the
+    ear branch must NOT have already committed a tagged activation row — that
+    row would be a phantom (belongs to a wake that never happened) while the
+    user's own wake gets its own row. Fix: the row is only bound AFTER
+    set_awake succeeds, via a conditional_mutate keyed to its returned token."""
+    from cortex import wake, wake_state, watchdog, window
+
+    conn = db.connect(cfg)
+    monkeypatch.setattr(wake, "_window_alive", lambda c: True)
+    monkeypatch.setattr(
+        window, "append_wake_signal", lambda c, now, token=None: None)
+    monkeypatch.setattr(wake, "_signal_landed", lambda c, before, t: True)
+    monkeypatch.setattr(watchdog, "spawn", lambda c: None)
+
+    # Simulate a user message racing in: bump gen right after current_epoch()
+    # is captured inside _window_wake, before set_awake's conditional check.
+    real_current_epoch = wake_state.current_epoch
+    bumped = {"done": False}
+
+    def racing_current_epoch(c):
+        gen, sid = real_current_epoch(c)
+        if not bumped["done"]:
+            bumped["done"] = True
+            wake_state.bump_gen(c)  # the "user message" racing in
+        return gen, sid
+
+    monkeypatch.setattr(wake_state, "current_epoch", racing_current_epoch)
+
+    from datetime import datetime as _dt
+    wake._window_wake(conn, cfg, "N", _dt.now(timezone.utc), wake_reasons="user")
+    conn.close()
+    # set_awake's expected_gen check silently lost the race (pre-existing
+    # contract: the caller does not treat this as a hard failure — someone
+    # else already owns the wake). The regression this guards: no phantom
+    # ct_wake_log row for the wake that never actually won.
+    conn = db.connect(cfg)
+    n = conn.execute("SELECT COUNT(*) AS n FROM ct_wake_log WHERE wake=1").fetchone()["n"]
+    conn.close()
+    assert n == 0  # no phantom activation row written for the losing wake
+
+
 def test_window_wake_ear_miss_alive_types_rearm_not_respawn(cfg, monkeypatch):
     """Ladder 2a: ear miss on an ALIVE window -> type the rearm bell line (no
     respawn), poll again; land -> ear wake. No fresh window is spawned."""

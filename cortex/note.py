@@ -441,9 +441,14 @@ def gather(
     )
     replay_stale = False
     if last_wake:
+        # Use the exact prior-wake ts (last_wake["ts"]), never the floored
+        # minutes_ago reconstruction: int(seconds // 60) truncates, so
+        # now - timedelta(minutes=minutes_ago) can land up to 59s AFTER the
+        # real wake, moving the stale boundary forward and wrongly staling an
+        # event that arrived just after the real wake.
         try:
-            last_wake_dt = now - timedelta(minutes=last_wake["minutes_ago"])
-        except (TypeError, ValueError):
+            last_wake_dt = _parse_utc(last_wake["ts"])
+        except (TypeError, ValueError, KeyError):
             last_wake_dt = None
         if last_wake_dt is not None:
             if not replay:

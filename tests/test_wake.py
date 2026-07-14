@@ -608,3 +608,46 @@ def test_main_print_note_no_marrow_call(monkeypatch, marrow_conn, wcfg, capsys):
     assert rc == 0
     out = capsys.readouterr().out
     assert "Now:" in out
+
+
+def test_main_force_wake_tags_ctl_reasons(monkeypatch, marrow_conn, wcfg):
+    """Codex P2: `python -m cortex.wake --force` must carry a non-tick
+    wake_reasons tag (like ctl/reconcile), or a manual force-wake reuses the
+    latest old scheduled row exactly like the BUG A symptom this patch fixed."""
+    monkeypatch.setattr(wake.config, "load", lambda: wcfg)
+    monkeypatch.setattr(wake.db, "connect", lambda cfg: marrow_conn)
+    captured = {}
+    monkeypatch.setattr(
+        wake, "run_wake",
+        lambda conn, cfg, decision, now=None: captured.update(decision=decision))
+
+    rc = wake.main(["--force"])
+
+    assert rc == 0
+    assert captured["decision"]["wake_reasons"] == "ctl"
+
+
+def test_headless_wake_with_reasons_logs_activation_row(marrow_conn, wcfg):
+    """Codex P2: a non-tick decision (wake_reasons set) that completes via the
+    headless/marrow-subprocess path (true headless mode, or window-path-failed
+    fallback) must still log its own tagged activation row — this path bypasses
+    wake_state.set_awake entirely, so the ear/spawn chokepoint never runs."""
+    caller = FakeCaller()
+    tagged = {**DECISION, "wake_reasons": "ctl"}
+    wake.run_wake(marrow_conn, wcfg, tagged, now=DAY1, caller=caller)
+
+    rows = marrow_conn.execute(
+        "SELECT reasons FROM ct_wake_log WHERE wake=1").fetchall()
+    assert [r["reasons"] for r in rows] == ["ctl"]
+
+
+def test_headless_wake_scheduled_no_reasons_writes_no_row(marrow_conn, wcfg):
+    """Counterpart: a pacemaker-decided wake (wake_reasons absent/None) reuses
+    run_tick's own decision row -> the headless path must not write a second
+    one (no duplicate wake=1 rows for a scheduled wake)."""
+    caller = FakeCaller()
+    wake.run_wake(marrow_conn, wcfg, DECISION, now=DAY1, caller=caller)
+
+    n = marrow_conn.execute(
+        "SELECT COUNT(*) AS n FROM ct_wake_log WHERE wake=1").fetchone()["n"]
+    assert n == 0

@@ -196,6 +196,28 @@ def _wake_log_id(conn: sqlite3.Connection, now: datetime,
     return _latest_wake_log_id(conn)
 
 
+def _bind_wake_log_id(conn: sqlite3.Connection, cfg: dict, now: datetime,
+                      wake_reasons: str | None, token: tuple[int, str]) -> None:
+    """Commit/reuse this wake's ct_wake_log row and patch it into wake_state
+    ONLY if `token` (the (gen, state_id) set_awake just returned) still matches
+    the live epoch. Used by the one set_awake call with a real conditional
+    reject (expected_gen, the ear path): the row must never be written before
+    the transition is known to have won, or a losing race leaves a phantom
+    activation row while the actual (e.g. user) wake gets its own. A stale
+    token here means a newer transition already superseded this wake -> the
+    row this call would bind is simply dropped (best-effort, no correctness
+    impact beyond that wake's tokens going unbound, same as any wake_log_id
+    miss)."""
+    from cortex import wake_state
+    wid = _wake_log_id(conn, now, wake_reasons)
+    if wid is None:
+        return
+    try:
+        wake_state.conditional_mutate(cfg, token, lambda d: d.update(wake_log_id=wid))
+    except wake_state.StateValidationError:
+        pass
+
+
 def wake_id_of(now: datetime) -> str:
     return f"{now.strftime('%Y%m%dT%H%M%S')}-{os.getpid()}"
 
@@ -401,8 +423,16 @@ def _window_wake(conn, cfg, note_text, now, respawn: bool = False,
     except window.WindowError:
         return None
     tpath = transcript.newest(cfg)
-    wake_state.set_awake(cfg, _wake_log_id(conn, now, wake_reasons),
-                         str(tpath) if tpath else None, expected_gen=sleep_gen)
+    # Wake-row commit AFTER the conditional set_awake succeeds (P2 fix): this is
+    # the one set_awake call with a real reject path (expected_gen — a user
+    # message flipping awake first between the ear signal and here). Writing
+    # the activation row BEFORE the transition is known to succeed would leave
+    # a phantom row (the row belongs to a wake that never actually happened,
+    # while the user's own wake gets its own row) when set_awake loses the race.
+    new_epoch = wake_state.set_awake(cfg, None, str(tpath) if tpath else None,
+                                     expected_gen=sleep_gen)
+    if new_epoch is not None:
+        _bind_wake_log_id(conn, cfg, now, wake_reasons, new_epoch)
     watchdog.spawn(cfg)
     return {"mode": "window", "session_id": None, "text": None}
 
@@ -610,6 +640,14 @@ def run_wake(
         raise
     timer.mark("marrow_returned")
 
+    # Headless wakes (true headless mode, or the window path failing over to
+    # it) never touch wake_state.set_awake -> the ctl/reconcile/--force chain
+    # that tags decision["wake_reasons"] wrote no row here, so "Last wake"
+    # skipped every one of them too. A pacemaker-decided wake (wake_reasons
+    # None) already has run_tick's decision row -> no second write.
+    if decision.get("wake_reasons"):
+        _wake_log_id(conn, now, decision["wake_reasons"])
+
     if result.get("capped"):
         _force_fresh_next(conn, state, today)
         _audit_wake(conn, wake_id,
@@ -650,6 +688,7 @@ def main(argv: list[str] | None = None) -> int:
             return 0
         if args.force:
             decision = {"wake": True, "reasons": [], "gated_by": [],
+                        "wake_reasons": "ctl",
                         "explanation": f"{now.strftime('%H:%M')} manual --force wake"}
             run_wake(conn, cfg, decision, now=now)
             return 0
