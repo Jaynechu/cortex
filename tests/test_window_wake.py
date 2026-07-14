@@ -301,19 +301,34 @@ def test_bind_wake_log_id_racing_scheduled_wake_cannot_adopt(cfg, monkeypatch):
 
 
 def test_bind_wake_log_id_fails_fast_under_db_write_contention(cfg, monkeypatch):
-    """4th round (codex gate): the shared connection's busy_timeout is 30s
+    """4th/5th round (codex gate): the shared connection's busy_timeout is 30s
     (db.connect_path). A DB INSERT/SELECT held under write contention while
     inside the locked closure could hold _strict_flock for up to 30s, starving
     competing set_awake/claim_lie_down (their own 5s deadline). Simulate real
     contention with a SECOND connection holding an uncommitted write txn on
     the same db file: the activation must still complete within ~1s, write no
     row, and leave wake_log_id None -- accounting is best-effort, the state
-    machine never waits on the ledger."""
+    machine never waits on the ledger.
+
+    codex gate P1: a PRE-EXISTING pacemaker decision row (explanation set)
+    must be seeded here -- the prior version of this test missed the bug
+    because with no decision row present, the fallback SELECT had nothing to
+    adopt. With one present, a failed activation insert must NOT fall through
+    to it (that reuse is scheduled-wake-only): wake_log_id stays None (never
+    the old row's id), the old row is untouched, and `conn` is left with no
+    open transaction (the failed insert's implicit txn is rolled back)."""
     import sqlite3
     import time
     from cortex import wake, wake_state
 
     conn = db.connect(cfg)
+    # A genuine pacemaker decision row a SCHEDULED wake would be allowed to
+    # reuse -- this activation-tagged wake must never adopt it.
+    decision_id = conn.execute(
+        "INSERT INTO ct_wake_log (ts, wake, dry_run, explanation) VALUES (?,1,0,?)",
+        (db.utcnow_iso(), "14:00 floor check due")).lastrowid
+    conn.commit()
+
     token = wake_state.current_epoch(cfg)  # still current -> the bind proceeds
 
     # A second connection holds an uncommitted write transaction on the SAME
@@ -332,17 +347,27 @@ def test_bind_wake_log_id_fails_fast_under_db_write_contention(cfg, monkeypatch)
         blocker.close()
 
     assert elapsed < 2.0  # fails fast, nowhere near the connection's real 30s
-    assert wake_state.load(cfg).get("wake_log_id") is None  # skipped, not bound
+    # Never adopted the pre-existing decision row, and never bound at all.
+    bound = wake_state.load(cfg).get("wake_log_id")
+    assert bound is None
+    assert bound != decision_id
 
-    # The blocker's own uncommitted insert was rolled back -> confirm no row
-    # from OUR side landed either, on a fresh read after the contention clears.
-    n = conn.execute("SELECT COUNT(*) AS n FROM ct_wake_log WHERE wake=1").fetchone()["n"]
+    # `conn` has no open transaction left -- the failed insert's implicit txn
+    # was rolled back, so a fresh write can start immediately.
+    assert conn.in_transaction is False
+    conn.execute("BEGIN IMMEDIATE")
+    conn.rollback()
+
+    # The old decision row is untouched, and no new row was written by us.
+    rows = conn.execute(
+        "SELECT id, explanation FROM ct_wake_log WHERE wake=1").fetchall()
     # `conn`'s OWN busy_timeout was restored to its normal (pre-override) value
     # -- the short window never leaks into any other caller sharing this
     # connection.
     restored = conn.execute("PRAGMA busy_timeout").fetchone()[0]
     conn.close()
-    assert n == 0
+    assert [r["id"] for r in rows] == [decision_id]
+    assert rows[0]["explanation"] == "14:00 floor check due"
     assert restored != wake._BIND_INSERT_BUSY_TIMEOUT_MS
 
 
