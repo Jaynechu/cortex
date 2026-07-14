@@ -129,3 +129,78 @@ def test_tail_read_ignores_head_on_large_file(cfg):
     s = transcript.user_silent_min(cfg)
     assert (time.perf_counter() - t) < 0.1  # sub-100ms even on a big file
     assert 2.5 < s < 3.5
+
+
+# --- FIX 4: role=user tool_result envelopes must NOT reset the clock ----------
+
+def _tool_result(ago_min):
+    """A role=user envelope carrying only a tool_result block — Claude Code wraps
+    every MCP/tool return this way. No text block -> not real user speech."""
+    return {"type": "user", "timestamp": _iso(ago_min),
+            "message": {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "tu_1",
+                 "content": [{"type": "text", "text": "tool output"}]}]}}
+
+
+def test_tool_result_envelope_does_not_reset(cfg):
+    """FIX 4: cortex's own MCP tool call produces a role=user tool-result
+    envelope; counting it as user presence caused tonight's '16 min since user'
+    read while the user hadn't spoken. It must be ignored -> silence stays high."""
+    _write(cfg, [_user("q", 16), _tool_result(1), _assistant(1)])
+    assert 15.0 < transcript.user_silent_min(cfg) < 17.0
+
+
+def test_tool_result_only_transcript_returns_none(cfg):
+    """A transcript with only tool-result envelopes (no real user turn) -> None,
+    same as an assistant-only transcript (never a spurious 0)."""
+    _write(cfg, [_tool_result(2), _assistant(1), _tool_result(1)])
+    assert transcript.last_user_message_mtime(cfg) is None
+    assert transcript.user_silent_min(cfg) is None
+
+
+# --- FIX 5: a giant final row must not bury the last user turn ----------------
+
+def test_huge_final_row_does_not_hide_user_turn(cfg):
+    """FIX 5: one multi-hundred-KB tool_result as the LAST row can fill the whole
+    fixed 64KiB tail; the old readline()-drop discarded the real user turn ahead
+    of it -> None -> treated as 0 (safety net misfires). The growing-chunk scan
+    doubles the window until the user turn is found."""
+    d = transcript.transcript_dir(cfg)
+    d.mkdir(parents=True, exist_ok=True)
+    giant = "x" * 300_000  # bigger than the initial 64KiB tail window
+    rows = [
+        _user("real user turn", 12),
+        _assistant(11),
+        {"type": "user", "timestamp": _iso(1),
+         "message": {"role": "user", "content": [
+             {"type": "tool_result", "tool_use_id": "t", "content": giant}]}},
+    ]
+    (d / "s.jsonl").write_text("\n".join(json.dumps(e) for e in rows))
+    s = transcript.user_silent_min(cfg)
+    assert s is not None and 11.0 < s < 13.0  # found behind the giant row
+
+
+# --- FIX 3: silence source reads the RESIDENT window, not a newer digest ------
+
+def test_resident_transcript_prefers_wake_state_over_newer_digest(cfg, tmp_path):
+    """FIX 3: a headless `claude -p` digest can be the mtime-newest jsonl in the
+    same projects dir. Silence checks must read the RESIDENT window
+    (wake_state.transcript), not the digest — else they miss the real window."""
+    import os
+    from cortex import wake_state
+    d = transcript.transcript_dir(cfg)
+    d.mkdir(parents=True, exist_ok=True)
+    resident = d / "resident.jsonl"
+    resident.write_text(json.dumps(_user("real user turn", 20)))
+    digest = d / "digest.jsonl"
+    digest.write_text(json.dumps(_user("archived blob", 1)))
+    # Make the digest the mtime-newest file.
+    now = time.time()
+    os.utime(resident, (now - 100, now - 100))
+    os.utime(digest, (now, now))
+    assert transcript.newest(cfg) == digest  # digest is mtime-newest
+    cfg["paths"]["wake_state_file"] = str(tmp_path / "wake_state.json")
+    wake_state.update(cfg, transcript=str(resident))
+    assert transcript.resident_transcript(cfg) == resident
+    # Silence source reflects the resident's 20-min-old user turn, not the digest.
+    assert 19.0 < transcript.user_silent_min(cfg) < 21.0

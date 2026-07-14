@@ -109,10 +109,38 @@ def mtime(cfg: dict) -> float | None:
     return p.stat().st_mtime if p else None
 
 
-# Bytes read from the tail on each silence poll — a handful of turns is plenty to
-# find the last real user message; capped so a multi-MB transcript never loads
-# whole (benchmark: 8 KiB tail read is sub-millisecond regardless of file size).
+# Bytes read from the tail on the FIRST silence-scan chunk; if no qualifying user
+# turn is found there (one huge tool-result row can fill the whole tail), the scan
+# doubles the window and re-reads, up to _TAIL_MAX_BYTES, so a giant final row can
+# never hide the real last-user message behind it (tonight's fixed-64KiB bug).
 _TAIL_BYTES = 65536
+_TAIL_MAX_BYTES = 4 * 1024 * 1024
+
+
+def resident_transcript(cfg: dict) -> Path | None:
+    """The RESIDENT window's transcript jsonl for silence checks — NOT bare
+    newest(). newest() can return a headless `claude -p` digest that shares the
+    projects dir and is mtime-newest; reading it for user-silence would miss the
+    real window entirely. Resolution order: (1) the recorded wake_state.transcript
+    (the window this wake actually spawned/resumed) when it still exists; else
+    (2) newest_window_lineage (newest jsonl whose first message carries the wake
+    marker = a genuine window, skipping digests); else (3) newest() as a last
+    resort. None only when nothing readable exists."""
+    from cortex import wake_state
+    try:
+        raw = wake_state.load(cfg).get("transcript")
+    except Exception:
+        raw = None
+    if raw:
+        p = Path(str(raw)).expanduser()
+        if p.exists():
+            return p
+    marker = str(cfg.get("wake", {}).get("wake_signal_marker") or "").strip()
+    if marker:
+        lineage = newest_window_lineage(cfg, marker)
+        if lineage is not None:
+            return lineage
+    return newest(cfg)
 
 
 # Leading decoration tolerated before a machine marker: whitespace + at most a
@@ -158,18 +186,27 @@ def _line_markers(cfg: dict) -> list[str]:
 
 
 def _user_text(msg: dict) -> str | None:
-    """String form of a user-role message's content, or None when it is not a
-    user turn / has no text (tool_result blocks yield "")."""
+    """Real user-typed text of a user-role message, or None when this envelope is
+    NOT a genuine user turn. A user-role message carrying only tool_result blocks
+    (role=user tool-result envelope — Claude Code wraps every MCP/tool return this
+    way) has no text block: _user_text returns None so it never resets the silence
+    clock (tonight's tool-result-as-user-presence bug). Only a message with actual
+    text content yields a (possibly empty) string; an all-tool_result / empty
+    envelope is None = not a user turn."""
     if not isinstance(msg, dict) or msg.get("role") != "user":
         return None
     content = msg.get("content")
     if isinstance(content, str):
         return content
     if isinstance(content, list):
+        has_text_block = any(
+            isinstance(b, dict) and b.get("type") == "text" for b in content)
+        if not has_text_block:
+            return None  # tool_result / non-text envelope, not real user speech
         parts = [b.get("text", "") for b in content
                  if isinstance(b, dict) and b.get("type") == "text"]
         return "".join(parts)
-    return ""
+    return None
 
 
 def _entry_ts(o: dict) -> float | None:
@@ -191,21 +228,43 @@ def last_user_message_mtime(cfg: dict) -> float | None:
     writes and the ear-delivered injections (wake bell / tuck-in / free-round /
     night lines — `_line_markers`) do NOT count: those are machine writes that
     must not reset the silence timer (the "永远睡不到alarm" bug family). Returns
-    None when no qualifying user message is found in the tail or the transcript is
-    missing/unreadable — callers fall back to hold behaviour."""
-    p = newest(cfg)
+    None when no qualifying user message is found or the transcript is
+    missing/unreadable — callers fall back to hold behaviour.
+
+    Reads the RESIDENT transcript (resident_transcript, not bare newest — a
+    headless digest must never be mistaken for the window). Scans backward in a
+    growing tail (start _TAIL_BYTES, double up to _TAIL_MAX_BYTES) so a single
+    huge final row (e.g. one multi-MB tool_result) can never bury the last user
+    turn behind it."""
+    p = resident_transcript(cfg)
     if not p:
         return None
     markers = _line_markers(cfg)
     try:
         size = p.stat().st_size
-        with p.open("rb") as f:
-            if size > _TAIL_BYTES:
-                f.seek(size - _TAIL_BYTES)
-                f.readline()  # drop the partial first line
-            chunk = f.read()
     except OSError:
         return None
+    tail = _TAIL_BYTES
+    while True:
+        try:
+            with p.open("rb") as f:
+                partial = size > tail
+                if partial:
+                    f.seek(size - tail)
+                    f.readline()  # drop the partial first line
+                chunk = f.read()
+        except OSError:
+            return None
+        latest = _scan_last_user_ts(chunk, markers)
+        if latest is not None:
+            return latest
+        if not partial or tail >= _TAIL_MAX_BYTES:
+            return None  # whole file scanned / cap hit, no qualifying user turn
+        tail = min(tail * 2, _TAIL_MAX_BYTES)
+
+
+def _scan_last_user_ts(chunk: bytes, markers: list[str]) -> float | None:
+    """Newest real-user-message ts in a decoded jsonl byte chunk, or None."""
     latest: float | None = None
     for raw in chunk.splitlines():
         try:
@@ -214,7 +273,7 @@ def last_user_message_mtime(cfg: dict) -> float | None:
             continue
         text = _user_text(o.get("message"))
         if text is None:
-            continue  # not a user turn
+            continue  # not a user turn (assistant / tool_result / empty envelope)
         if _line_starts_with_marker(text, markers):
             continue  # machine line down the ear channel, not a real user turn
         ts = _entry_ts(o)
