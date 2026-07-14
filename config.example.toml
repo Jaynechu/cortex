@@ -15,9 +15,9 @@ knowledgec_db = ""
 geofence_file = ""
 # Health export JSON (iOS Shortcut nightly dump). No default, must be set to enable.
 health_export = ""
-# Pacemaker affect-flag file (JSON dict written by A1/upset lane). Default: ~/.config/marrow/cortex/affect_flag.json
+# Pacemaker affect-flag file (JSON dict written by A1/upset lane). Default: ~/.config/marrow/cortex/state/affect_flag.json
 affect_flag_file = ""
-# Pacemaker self-schedule queue (JSON list of {due_at}). Default: ~/.config/marrow/cortex/self_schedule.json
+# Pacemaker self-schedule queue (JSON list of {due_at}). Default: ~/.config/marrow/cortex/state/self_schedule.json
 self_schedule_file = ""
 # Handoff note the next fresh window reads (assistant's handoff). Default: ~/.config/marrow/cortex/handoff.md
 handoff_file = ""
@@ -32,12 +32,12 @@ ny_db_pages = ""
 # Default: ~/.config/marrow/logs/wake_timing.log
 wake_timing_log = ""
 # Wake-state audit trail (alarm epoch/generation events). Byte-shared with
-# marrow's [cortex].wake_audit_log_file. Default: <cortex_home>/wake_audit.log
+# marrow's [cortex].wake_audit_log_file. Default: <cortex_home>/state/wake_audit.log
 wake_audit_log = ""
-# Interactive-window (B3v) runtime files. Empty = defaults under cortex_home.
-wake_state_file = ""     # awake marker + resident iTerm session id. Default: <home>/wake_state.json
+# Interactive-window (B3v) runtime files. Empty = defaults under cortex_home/state/.
+wake_state_file = ""     # awake marker + resident iTerm session id. Default: <home>/state/wake_state.json
 wakeup_note_file = ""    # note text the window is told to Read. Default: <home>/wakeup_note.md
-watchdog_pidfile = ""    # per-wake watchdog pid. Default: <home>/watchdog.pid
+watchdog_pidfile = ""    # per-wake watchdog pid. Default: <home>/state/watchdog.pid
 # Claude Code transcript dir for the window. Empty = derived from cortex_home
 # (munge non-alphanumeric -> '-'). Default: ~/.claude/projects/<munged cortex_home>
 transcript_dir = ""
@@ -75,7 +75,7 @@ ready_timeout_sec = 30         # max wait for readiness after a fresh spawn
 # appends a WAKE line to wake it (no keyboard typing). ear_timeout_sec = how
 # long a wake is given to land (transcript grows) before the resident is
 # replaced by a FRESH window that gets the note as its first prompt.
-signal_log = ""                # Default: <cortex_home>/wake_signal.log
+signal_log = ""                # Default: <cortex_home>/state/wake_signal.log
 ear_timeout_sec = 90           # recovery deadline for an alive-window wake to land before respawn
 # A fresh window (rotate / dead resident / ear miss) is spawned with this as
 # claude's FIRST prompt — JUST an emoji, so nothing readable shows in the user's

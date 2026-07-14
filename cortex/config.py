@@ -16,8 +16,6 @@ DEFAULT_MARROW_DB = Path.home() / ".config" / "marrow" / "marrow.db"
 DEFAULT_KNOWLEDGEC_DB = (
     Path.home() / "Library" / "Application Support" / "Knowledge" / "knowledgeC.db"
 )
-DEFAULT_AFFECT_FLAG = Path.home() / ".config" / "marrow" / "cortex" / "affect_flag.json"
-DEFAULT_SELF_SCHEDULE = Path.home() / ".config" / "marrow" / "cortex" / "self_schedule.json"
 DEFAULT_HANDOFF = Path.home() / ".config" / "marrow" / "cortex" / "handoff.md"
 DEFAULT_CORTEX_HOME = Path.home() / ".config" / "marrow" / "cortex"
 DEFAULT_NY_DB_PAGES = Path.home() / "Desktop" / "NY" / "db-pages"
@@ -286,12 +284,12 @@ def health_export_path(cfg: dict) -> Path | None:
 
 def affect_flag_path(cfg: dict) -> Path:
     raw = cfg["paths"].get("affect_flag_file") or ""
-    return Path(raw).expanduser() if raw else DEFAULT_AFFECT_FLAG
+    return Path(raw).expanduser() if raw else state_dir(cfg) / "affect_flag.json"
 
 
 def self_schedule_path(cfg: dict) -> Path:
     raw = cfg["paths"].get("self_schedule_file") or ""
-    return Path(raw).expanduser() if raw else DEFAULT_SELF_SCHEDULE
+    return Path(raw).expanduser() if raw else state_dir(cfg) / "self_schedule.json"
 
 
 def handoff_path(cfg: dict) -> Path:
@@ -303,6 +301,14 @@ def cortex_home(cfg: dict) -> Path:
     """cwd for the resumed full-env marrow cortex session (Decided 07-03 pm)."""
     raw = cfg["paths"].get("cortex_home") or ""
     return Path(raw).expanduser() if raw else DEFAULT_CORTEX_HOME
+
+
+def state_dir(cfg: dict) -> Path:
+    """Runtime state subdirectory (json/log/lock/pid files). Lives under
+    cortex_home/state/ to keep runtime artefacts out of the notebook root."""
+    d = cortex_home(cfg) / "state"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 
 def wishlist_path(cfg: dict) -> Path:
@@ -332,14 +338,14 @@ def wake_timing_log_path(cfg: dict) -> Path:
 def wake_signal_log_path(cfg: dict) -> Path:
     """The ear's wake-signal file: the persistent Monitor `tail -f`s it, the
     pacemaker appends WAKE/NUDGE lines to it (alive-resident wake only).
-    Default: <cortex_home>/wake_signal.log."""
+    Default: <cortex_home>/state/wake_signal.log."""
     raw = cfg["wake"].get("signal_log") or ""
-    return Path(raw).expanduser() if raw else cortex_home(cfg) / "wake_signal.log"
+    return Path(raw).expanduser() if raw else state_dir(cfg) / "wake_signal.log"
 
 
 def wake_audit_log_path(cfg: dict) -> Path:
     """Wake-state audit trail (alarm epoch/generation events). Byte-shared with
     marrow's [cortex].wake_audit_log_file so both sides append to one file.
-    Default: <cortex_home>/wake_audit.log. Override via [paths].wake_audit_log."""
+    Default: <cortex_home>/state/wake_audit.log. Override via [paths].wake_audit_log."""
     raw = cfg["paths"].get("wake_audit_log") or ""
-    return Path(raw).expanduser() if raw else cortex_home(cfg) / "wake_audit.log"
+    return Path(raw).expanduser() if raw else state_dir(cfg) / "wake_audit.log"

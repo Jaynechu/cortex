@@ -33,7 +33,7 @@ class StateValidationError(Exception):
 
 def wake_state_path(cfg: dict) -> Path:
     raw = cfg["paths"].get("wake_state_file") or ""
-    return Path(raw).expanduser() if raw else config.cortex_home(cfg) / "wake_state.json"
+    return Path(raw).expanduser() if raw else config.state_dir(cfg) / "wake_state.json"
 
 
 def wakeup_note_path(cfg: dict) -> Path:
@@ -43,7 +43,7 @@ def wakeup_note_path(cfg: dict) -> Path:
 
 def watchdog_pidfile_path(cfg: dict) -> Path:
     raw = cfg["paths"].get("watchdog_pidfile") or ""
-    return Path(raw).expanduser() if raw else config.cortex_home(cfg) / "watchdog.pid"
+    return Path(raw).expanduser() if raw else config.state_dir(cfg) / "watchdog.pid"
 
 
 def lock_path(cfg: dict) -> Path:

@@ -19,6 +19,7 @@ def _live_fallback_cfg():
 
 @pytest.mark.parametrize("resolve", [
     lambda c: config.cortex_home(c),
+    lambda c: config.state_dir(c),
     lambda c: config.wake_signal_log_path(c),
     lambda c: config.wake_audit_log_path(c),
     lambda c: config.wake_timing_log_path(c),

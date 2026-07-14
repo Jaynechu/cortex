@@ -66,6 +66,7 @@ _LIVE_CONFIG_DIR = (Path.home() / ".config" / "marrow").resolve()
 # corrupting the live window.
 _GUARDED_PATH_FUNCS = [
     (config, "cortex_home"),
+    (config, "state_dir"),
     (config, "wake_signal_log_path"),
     (config, "wake_audit_log_path"),
     (config, "handoff_path"),
