@@ -82,6 +82,16 @@ def _handle_awake(conn, cfg: dict, st: dict, snap_gen: int | None = None) -> str
     from cortex.watchdog import silence_action
     if not _snapshot_awake_current(cfg, snap_gen):
         return "awake gate: snapshot superseded (gen moved) -> hold"
+    # Watchdog-liveness heal (permanent-residency invariant): an awake window
+    # must always have a live watchdog (per-wake poll + fuse). If the recorded
+    # watchdog pid is dead (crash / reboot), respawn one now — the tick is the
+    # 5-min backup, but the watchdog owns exact-time fuse + 60s silence polling.
+    # Idempotent via watchdog.spawn's own singleton guard (a live pid = no-op).
+    from cortex.wake import _window_alive
+    if _window_alive(cfg):
+        from cortex import watchdog
+        if not watchdog._pid_alive(watchdog._recorded_watchdog_pid(cfg)):
+            watchdog.spawn(cfg)
     mt = transcript.mtime(cfg)
     # Silence source for the awake gate = minutes since the last REAL user
     # message (assistant / system / ear injections don't reset it). None = 0.0 =

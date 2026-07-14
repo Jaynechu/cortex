@@ -27,9 +27,16 @@ def _now(cfg: dict) -> datetime:
 
 
 def cmd_wake(cfg: dict) -> str:
-    from cortex.wake import run_wake
+    from cortex.wake import run_wake, _window_alive
     # A human explicitly waking wants activity back — clear DND first.
     wake_state.set_paused(cfg, False)
+    # Already-on-duty guard (singleton invariant): a resident window that is both
+    # alive AND awake is already on duty — re-driving run_wake would re-set_awake
+    # and spawn a second watchdog. The live session already has the human's
+    # attention; refuse rather than double-activate. (Alive-but-dormant still
+    # wakes: that is the intended ear path below.)
+    if _window_alive(cfg) and wake_state.is_awake(cfg):
+        return "wake: already awake on duty -> no-op (one resident)"
     # Always drive the standard wake pipeline (run_wake -> _window_wake_plan
     # + _window_wake), including the alive-resident ear path: it renders a
     # fresh note, sets the awake marker and starts the watchdog, and falls

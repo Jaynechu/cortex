@@ -26,9 +26,40 @@ from cortex import config, db, transcript, wake_state, window
 from cortex.pacemaker import integration
 
 
-def spawn(cfg: dict) -> int:
+def _pid_alive(pid: int | None) -> bool:
+    """True if `pid` is a live process (signal 0 probe). None/invalid -> False.
+    A PermissionError means the pid exists but is owned elsewhere = alive."""
+    if not pid:
+        return False
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists, owned elsewhere
+    except (ValueError, TypeError, OverflowError):
+        return False  # unparseable / out-of-range pid = treat as dead
+
+
+def _recorded_watchdog_pid(cfg: dict) -> int | None:
+    try:
+        return int(wake_state.watchdog_pidfile_path(cfg).read_text().strip())
+    except (OSError, ValueError):
+        return None
+
+
+def spawn(cfg: dict) -> int | None:
     """Launch a detached per-wake watchdog process (`python -m cortex.watchdog`)
-    that outlives the pacemaker tick. Returns its pid."""
+    that outlives the pacemaker tick. Singleton guard (permanent-residency
+    invariant): if the recorded pidfile still names a LIVE watchdog, do NOT spawn
+    a second — return its pid. Only an absent/dead record spawns a fresh one. This
+    is the single choke point behind every set_awake caller (fresh / ear / rearm)
+    and marrow's _spawn_watchdog_if_absent, so a re-wake of an already-resident
+    window never leaks a duplicate watchdog. Returns the live/new pid."""
+    existing = _recorded_watchdog_pid(cfg)
+    if _pid_alive(existing):
+        return existing
     log = wake_state.watchdog_pidfile_path(cfg).with_suffix(".log")
     log.parent.mkdir(parents=True, exist_ok=True)
     f = open(log, "a")
