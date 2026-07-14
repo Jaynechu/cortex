@@ -221,32 +221,55 @@ _BIND_INSERT_BUSY_TIMEOUT_MS = 500
 def _resolve_wake_log_id_fast_fail(conn: sqlite3.Connection, now: datetime,
                                    wake_reasons: str | None) -> int | None:
     """The full _wake_log_id sequence (insert-or-reuse), but with the shared
-    connection's busy_timeout temporarily dropped to ~500ms for BOTH the
-    INSERT and the reuse fallback SELECT (restored after, success or failure,
-    so every OTHER caller of the same `conn` keeps the normal 30s default).
-    Used ONLY inside _bind_wake_log_id's locked closure — every DB statement
-    there runs while _strict_flock is held, and the connection's real
-    busy_timeout is 30s (db.py connect_path); under write contention any one
-    of them could hold the lock up to 30s, starving competing
-    set_awake/claim_lie_down callers (5s deadline) into failing closed. Any
-    sqlite3.Error from either statement (including one raised by the short
-    timeout itself) is swallowed -> None, never propagated into
-    conditional_mutate's locked section. A contention miss here just means
-    "skip the row this wake" (best-effort, see _bind_wake_log_id) — never a
-    reason to hold the state lock longer."""
+    connection's busy_timeout temporarily dropped to ~500ms for every DB
+    statement here (restored after, success or failure, so every OTHER caller
+    of the same `conn` keeps the normal 30s default). Used ONLY inside
+    _bind_wake_log_id's locked closure — every DB statement there runs while
+    _strict_flock is held, and the connection's real busy_timeout is 30s
+    (db.py connect_path); under write contention any one of them could hold
+    the lock up to 30s, starving competing set_awake/claim_lie_down callers
+    (5s deadline) into failing closed.
+
+    codex gate P1: when `wake_reasons` is set (an activation-tagged wake), a
+    FAILED insert must NEVER fall through to the decision-row reuse fallback
+    (_latest_wake_log_id) — that fallback is only for the scheduled
+    (wake_reasons=None) path. Under BEGIN IMMEDIATE contention the fallback
+    SELECT can still succeed (it's a read), so falling through would bind this
+    wake to an UNRELATED old pacemaker decision row; a later lie_down would
+    then overwrite THAT row's tokens/force_slept, corrupting a wake that
+    already happened. A failed insert also leaves an implicit transaction open
+    on `conn` (Python's sqlite3 begins one on the first DML, even a failing
+    one) — rolled back here (best-effort) so no open txn survives this call.
+
+    A contention miss on the activation path returns None outright (skip the
+    row this wake — best-effort accounting, never a reason to hold the state
+    lock longer or corrupt another wake's row)."""
     try:
         prev_timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
     except sqlite3.Error:
         prev_timeout = None
     try:
         conn.execute(f"PRAGMA busy_timeout={_BIND_INSERT_BUSY_TIMEOUT_MS}")
-        try:
-            wid = None
-            if wake_reasons:
+        if wake_reasons:
+            # log_activation_wake_row catches its own sqlite3.Error and
+            # returns None on failure rather than raising, so the failure
+            # signal here is the return value, not an exception. Either way,
+            # a failed insert must never fall through to the decision-row
+            # reuse fallback below (P1) — that reuse is scheduled-wake-only.
+            try:
                 wid = integration.log_activation_wake_row(conn, now, wake_reasons)
+            except sqlite3.Error:
+                wid = None
             if wid is None:
-                wid = _latest_wake_log_id(conn)
+                # A failed/attempted insert can leave an implicit transaction
+                # open on `conn` (Python's sqlite3 begins one on the first DML,
+                # even a failing one) -- roll it back so no open txn survives
+                # this call. A no-op if nothing was ever opened.
+                with contextlib.suppress(sqlite3.Error):
+                    conn.rollback()
             return wid
+        try:
+            return _latest_wake_log_id(conn)
         except sqlite3.Error:
             return None
     finally:
