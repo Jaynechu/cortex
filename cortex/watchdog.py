@@ -258,7 +258,11 @@ def _free_round_note(cfg: dict) -> tuple[str, str | None]:
             data = note.gather(conn, cfg, now, window_sid=sid,
                                advance_baseline=False)
             text = note.render(cfg, now, data).strip()
-            pending = note._latest_replay_ts(conn, cfg)
+            # FIX 6 + P2-B: the deferred advance must use the SAME cutoff this
+            # note was built on, captured inside gather() — not a second query
+            # here, which could race in an event this note never rendered and
+            # then drop it when the baseline advances past it.
+            pending = data.get("replay_cutoff_ts")
         finally:
             conn.close()
         return text, pending

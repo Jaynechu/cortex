@@ -626,6 +626,92 @@ def test_seed_baseline_anchors_first_free_round(marrow_conn, cfg, tmp_path, monk
     assert [e["content"] for e in d["replay"]] == ["post-wake msg"]
 
 
+def test_gather_returns_replay_cutoff_of_rendered_events(marrow_conn, cfg, tmp_path, monkeypatch):
+    """gather() exposes replay_cutoff_ts = the newest ts it actually rendered.
+    When nothing is newer than the baseline it diffed from, the cutoff is that
+    baseline (so a deferred advance never rewinds)."""
+    from cortex import wake_state
+    cfg["paths"]["wake_state_file"] = str(tmp_path / "wake_state.json")
+    make_events_table(marrow_conn)
+    monkeypatch.setattr(note, "_frontmost_app", lambda: None)
+
+    marrow_conn.execute(
+        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
+        ("s", "2026-07-08T03:00:00+00:00", "user", "shown", "wx"))
+    marrow_conn.commit()
+    d = note.gather(marrow_conn, cfg, NOW)
+    assert d["replay_cutoff_ts"] == "2026-07-08T03:00:00+00:00"
+
+    # Baseline caught up; a re-render with nothing new returns the baseline itself.
+    wake_state.set_last_note_ts(cfg, "2026-07-08T03:00:00+00:00")
+    d2 = note.gather(marrow_conn, cfg, NOW)
+    assert d2["replay_cutoff_ts"] == "2026-07-08T03:00:00+00:00"
+
+
+def test_seed_baseline_uses_captured_cutoff_not_requery(marrow_conn, cfg, tmp_path, monkeypatch):
+    """P2-A race: an event inserted between the wake note's assembly and the D6
+    seed (the ~90s window spawn) must NOT be swallowed by the baseline. seed_baseline
+    honours the cutoff captured at assembly, so that later event still shows in the
+    FIRST free-round instead of being dropped."""
+    from cortex import wake_state
+    cfg["paths"]["wake_state_file"] = str(tmp_path / "wake_state.json")
+    make_events_table(marrow_conn)
+    monkeypatch.setattr(note, "_frontmost_app", lambda: None)
+
+    marrow_conn.execute(
+        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
+        ("s", "2026-07-08T03:00:00+00:00", "user", "in wake note", "wx"))
+    marrow_conn.commit()
+    # Assembly captures the cutoff of the note it rendered.
+    captured = note.gather(marrow_conn, cfg, NOW)["replay_cutoff_ts"]
+    assert captured == "2026-07-08T03:00:00+00:00"
+
+    # An event races in during the window spawn — absent from the wake note.
+    marrow_conn.execute(
+        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
+        ("s", "2026-07-08T03:00:30+00:00", "user", "raced in during spawn", "wx"))
+    marrow_conn.commit()
+
+    # Seeding from the CAPTURED cutoff (not a fresh query) keeps the racer replayable.
+    note.seed_baseline(marrow_conn, cfg, cutoff_ts=captured)
+    assert wake_state.get_last_note_ts(cfg) == "2026-07-08T03:00:00+00:00"
+    d = note.gather(marrow_conn, cfg, NOW, advance_baseline=True)
+    assert [e["content"] for e in d["replay"]] == ["raced in during spawn"]
+
+
+def test_deferred_advance_uses_gather_cutoff_not_requery(marrow_conn, cfg, tmp_path, monkeypatch):
+    """P2-B race: an event inserted between gather() (which built the free-round
+    text) and the deferred baseline advance must appear in the NEXT note, not be
+    consumed. Advancing to the cutoff gather() actually used (never a second
+    query) keeps that racer replayable next round."""
+    from cortex import wake_state
+    cfg["paths"]["wake_state_file"] = str(tmp_path / "wake_state.json")
+    make_events_table(marrow_conn)
+    monkeypatch.setattr(note, "_frontmost_app", lambda: None)
+
+    marrow_conn.execute(
+        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
+        ("s", "2026-07-08T03:00:00+00:00", "user", "round1 shown", "wx"))
+    marrow_conn.commit()
+    # Free-round render (advance_baseline=False, as watchdog does): gather returns
+    # the cutoff it built the text on. The caller defers the advance to after write.
+    data = note.gather(marrow_conn, cfg, NOW, advance_baseline=False)
+    assert [e["content"] for e in data["replay"]] == ["round1 shown"]
+    pending = data["replay_cutoff_ts"]
+    assert pending == "2026-07-08T03:00:00+00:00"
+
+    # Event races in AFTER gather built the text but BEFORE the deferred advance.
+    marrow_conn.execute(
+        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
+        ("s", "2026-07-08T03:00:30+00:00", "user", "raced after gather", "wx"))
+    marrow_conn.commit()
+
+    # Deferred advance uses the captured cutoff verbatim — NOT the newer racer.
+    wake_state.set_last_note_ts(cfg, pending)
+    d2 = note.gather(marrow_conn, cfg, NOW, advance_baseline=True)
+    assert [e["content"] for e in d2["replay"]] == ["raced after gather"]
+
+
 def test_gather_survives_naive_due_at_self_schedule(marrow_conn, cfg, tmp_path, monkeypatch):
     """Live-repro regression: a self_schedule.json entry with an offset-free
     (naive) due_at must not crash gather()/render() end-to-end."""

@@ -60,14 +60,23 @@ def _now(cfg: dict) -> datetime:
 def assemble_note(conn: sqlite3.Connection, cfg: dict, now: datetime,
                   decision: dict | None = None, fresh: bool = False,
                   wake_kind: str | None = None,
-                  died_no_handoff: bool = False) -> str:
+                  died_no_handoff: bool = False,
+                  return_cutoff: bool = False):
     """Thin wrapper: gather() + render(). `fresh`/`wake_kind` gate the handoff
     section — only a fresh window (rotate) receives it. `died_no_handoff` adds
-    the respawn-catchup line (dead window left no handoff)."""
+    the respawn-catchup line (dead window left no handoff).
+
+    `return_cutoff` (default False): return (text, replay_cutoff_ts) instead of
+    just text. The cutoff is the replay ts this note was built on, captured at
+    assembly so the D6 wake-open seed anchors to exactly what was rendered — not
+    a later re-query that could race in an event this note never showed."""
     data = note.gather(conn, cfg, now, decision=decision,
                        fresh=fresh, wake_kind=wake_kind,
                        died_no_handoff=died_no_handoff)
-    return note.render(cfg, now, data)
+    text = note.render(cfg, now, data)
+    if return_cutoff:
+        return text, data.get("replay_cutoff_ts")
+    return text
 
 
 def call_marrow_cortex(prompt: str, cwd: str, resume_sid: str | None, cfg: dict) -> dict:
@@ -501,7 +510,8 @@ def run_wake(
     resume_sid = state.cortex_session_id
     timer.mark("state_loaded")
 
-    note_text = assemble_note(conn, cfg, now, decision=decision)
+    note_text, note_cutoff = assemble_note(
+        conn, cfg, now, decision=decision, return_cutoff=True)
     home = str(config.cortex_home(cfg))
     timer.mark("note")
 
@@ -516,16 +526,20 @@ def run_wake(
         # brain; _window_wake handles resume-vs-fresh for the dead case itself.
         plan = _window_wake_plan(cfg)
         window_text = note_text
+        window_cutoff = note_cutoff
         if plan == "fresh":
-            window_text = assemble_note(
-                conn, cfg, now, decision=decision, fresh=True, wake_kind="rotate")
+            window_text, window_cutoff = assemble_note(
+                conn, cfg, now, decision=decision, fresh=True,
+                wake_kind="rotate", return_cutoff=True)
             timer.mark("rotate_note")
         win = _window_wake(conn, cfg, window_text, now, respawn=(plan == "fresh"))
         if win is not None:
             # D6 seed: set_awake (inside _window_wake) just reset last_note_ts to
-            # None. Anchor the diff-mode baseline to the wake-open moment now so
-            # the FIRST free-round tuck-in diffs from here, not epoch zero.
-            note.seed_baseline(conn, cfg)
+            # None. Anchor the diff-mode baseline to the cutoff captured when this
+            # exact note was assembled (P2-A) — not a fresh query after the ~90s
+            # window spawn, which would race in an event absent from the note and
+            # drop it from the first free-round.
+            note.seed_baseline(conn, cfg, cutoff_ts=window_cutoff)
             timer.mark("window_injected")
             timer.mark("wake_complete")
             return win

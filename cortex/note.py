@@ -218,16 +218,24 @@ def _replay_events(conn: sqlite3.Connection, cfg: dict, limit: int, per_chars: i
     return events
 
 
-def seed_baseline(conn: sqlite3.Connection, cfg: dict) -> None:
-    """Seed the diff-mode replay baseline (wake_state.last_note_ts) to the newest
-    eligible event at wake activation, so the FIRST free-round tuck-in diffs from
-    the wake-open moment, not epoch zero (D6: baseline = the wake's initial note).
-    Called once per wake AFTER set_awake (which resets last_note_ts=None). No-op
-    when there is nothing to seed. Never raises — a failed seed just falls back to
-    full replay on the first free-round."""
+def seed_baseline(conn: sqlite3.Connection, cfg: dict,
+                  cutoff_ts: str | None = None) -> None:
+    """Seed the diff-mode replay baseline (wake_state.last_note_ts) so the FIRST
+    free-round tuck-in diffs from the wake-open moment, not epoch zero (D6:
+    baseline = the wake's initial note). Called once per wake AFTER set_awake
+    (which resets last_note_ts=None).
+
+    `cutoff_ts` (P2-A): the replay cutoff captured when the wake's initial note
+    was assembled. When supplied it is used verbatim — the baseline must be
+    EXACTLY the cutoff of what was rendered, never a later re-query that could
+    race in an event the note never showed and drop it from the first free-round.
+    Absent -> fall back to a fresh query (legacy / test callers).
+
+    No-op when there is nothing to seed. Never raises — a failed seed just falls
+    back to full replay on the first free-round."""
     try:
         from cortex import wake_state
-        latest_ts = _latest_replay_ts(conn, cfg)
+        latest_ts = cutoff_ts if cutoff_ts is not None else _latest_replay_ts(conn, cfg)
         if latest_ts:
             wake_state.set_last_note_ts(cfg, latest_ts)
     except Exception:
@@ -400,6 +408,13 @@ def gather(
             replay_stale = _parse_utc(latest_ts) < last_wake_dt
         except (TypeError, ValueError):
             pass
+    # The replay cutoff this render actually used: the newest eligible event ts
+    # (latest_ts), or the diff baseline it started from when nothing newer
+    # exists. Returned so out-of-band consumers (wake seed_baseline, watchdog
+    # deferred advance) persist the SAME cutoff the note was built on instead of
+    # re-querying — a re-query would race in events that never made this note and
+    # then drop them from the next round (P2-A / P2-B).
+    replay_cutoff_ts = latest_ts or note_since_ts
     # Advance the diff-mode baseline to the newest eligible event overall (not
     # just the ones shown this render — same value as latest_ts above), so the
     # NEXT free-round tuck-in diffs from here. Monotonic: only moves forward.
@@ -409,6 +424,7 @@ def gather(
         _safe(wake_state.set_last_note_ts, cfg, latest_ts)
 
     return {
+        "replay_cutoff_ts": replay_cutoff_ts,
         "last_wake": last_wake,
         "budget": budget,
         "active_app": _safe(_frontmost_app),

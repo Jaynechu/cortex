@@ -454,7 +454,8 @@ def test_ctl_wake_live_window_renders_fresh_note(cfg, monkeypatch):
     calls = {"note": None}
 
     def fake_assemble_note(conn, cfg, now, **kw):
-        return "FRESH NOTE TEXT"
+        text = "FRESH NOTE TEXT"
+        return (text, None) if kw.get("return_cutoff") else text
     monkeypatch.setattr(wake, "assemble_note", fake_assemble_note)
     monkeypatch.setattr(window, "write_note",
                         lambda c, text: calls.__setitem__("note", text))
