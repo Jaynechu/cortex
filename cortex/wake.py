@@ -196,26 +196,52 @@ def _wake_log_id(conn: sqlite3.Connection, now: datetime,
     return _latest_wake_log_id(conn)
 
 
+def _delete_wake_log_row(conn: sqlite3.Connection, wid: int) -> None:
+    """Best-effort rollback of an orphaned activation row (see
+    _bind_wake_log_id). Fail-quiet: never raises — a failed delete just leaves
+    one extra row, no worse than before this rollback existed."""
+    try:
+        conn.execute("DELETE FROM ct_wake_log WHERE id = ?", (wid,))
+        conn.commit()
+    except sqlite3.Error:
+        pass
+
+
 def _bind_wake_log_id(conn: sqlite3.Connection, cfg: dict, now: datetime,
                       wake_reasons: str | None, token: tuple[int, str]) -> None:
     """Commit/reuse this wake's ct_wake_log row and patch it into wake_state
     ONLY if `token` (the (gen, state_id) set_awake just returned) still matches
     the live epoch. Used by the one set_awake call with a real conditional
-    reject (expected_gen, the ear path): the row must never be written before
+    reject (expected_gen, the ear path): the row must never be BOUND before
     the transition is known to have won, or a losing race leaves a phantom
-    activation row while the actual (e.g. user) wake gets its own. A stale
-    token here means a newer transition already superseded this wake -> the
-    row this call would bind is simply dropped (best-effort, no correctness
-    impact beyond that wake's tokens going unbound, same as any wake_log_id
-    miss)."""
+    activation row while the actual (e.g. user) wake gets its own.
+
+    The INSERT (when wake_reasons is set) still happens before the bind check
+    — wake_state.conditional_mutate is JSON-file-only by design (no DB access,
+    see wake_state.py), so the write can't move inside it. If ANOTHER actor
+    (a lie_down claim, a newer set_awake) intervenes in that gap and the bind
+    is rejected, the freshly-inserted row would otherwise be orphaned (wake=1,
+    force_slept forever NULL, distorting "Last wake") while never getting
+    bound to any wake_state, so no lie_down can ever record tokens into it
+    either. Roll it back: delete the row WE just inserted (never a REUSED
+    scheduled/decision row, nor a fallback reuse from a failed insert — those
+    belong to run_tick's own log / a prior wake regardless of this wake's
+    outcome, so only the genuine fresh-insert case is rolled back)."""
     from cortex import wake_state
-    wid = _wake_log_id(conn, now, wake_reasons)
+    wid = None
+    fresh_insert = False
+    if wake_reasons:
+        wid = integration.log_activation_wake_row(conn, now, wake_reasons)
+        fresh_insert = wid is not None
+    if wid is None:
+        wid = _latest_wake_log_id(conn)
     if wid is None:
         return
     try:
         wake_state.conditional_mutate(cfg, token, lambda d: d.update(wake_log_id=wid))
     except wake_state.StateValidationError:
-        pass
+        if fresh_insert:
+            _delete_wake_log_row(conn, wid)
 
 
 def wake_id_of(now: datetime) -> str:

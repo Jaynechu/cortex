@@ -240,6 +240,39 @@ def test_window_wake_ear_epoch_reject_writes_no_phantom_row(cfg, monkeypatch):
     assert n == 0  # no phantom activation row written for the losing wake
 
 
+def test_bind_wake_log_id_rolls_back_orphan_on_late_epoch_bump(cfg, monkeypatch):
+    """Codex P2 follow-up: set_awake succeeds and hands back its token, but
+    ANOTHER actor (a lie_down claim, a newer set_awake) bumps gen again before
+    _bind_wake_log_id's conditional_mutate runs. The fresh activation row
+    _wake_log_id already inserted must not be left as an orphan (wake=1,
+    force_slept forever NULL, never bound to any wake_state) — it is deleted
+    on the rejected bind. The superseding actor's OWN row (representing its
+    own wake) must be untouched."""
+    from cortex import wake, wake_state
+
+    conn = db.connect(cfg)
+    # set_awake already ran and returned this token to _bind_wake_log_id's caller.
+    token = wake_state.current_epoch(cfg)
+    # The superseding actor's own row (e.g. its own activation row) — must
+    # survive this rollback untouched.
+    surviving_id = conn.execute(
+        "INSERT INTO ct_wake_log (ts, wake, dry_run, reasons) VALUES (?, 1, 0, 'rotate')",
+        (db.utcnow_iso(),)).lastrowid
+    conn.commit()
+    # Another actor intervenes AFTER set_awake returned `token`, before the bind.
+    wake_state.bump_gen(cfg)
+
+    from datetime import datetime as _dt
+    wake._bind_wake_log_id(conn, cfg, _dt.now(timezone.utc), "user", token)
+
+    rows = conn.execute(
+        "SELECT id, reasons FROM ct_wake_log WHERE wake=1 ORDER BY id").fetchall()
+    conn.close()
+    assert [r["id"] for r in rows] == [surviving_id]  # the orphan is gone
+    assert rows[0]["reasons"] == "rotate"              # superseding row intact
+    assert wake_state.load(cfg).get("wake_log_id") is None  # never bound
+
+
 def test_window_wake_ear_miss_alive_types_rearm_not_respawn(cfg, monkeypatch):
     """Ladder 2a: ear miss on an ALIVE window -> type the rearm bell line (no
     respawn), poll again; land -> ear wake. No fresh window is spawned."""
