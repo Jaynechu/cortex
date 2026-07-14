@@ -180,6 +180,22 @@ def _latest_wake_log_id(conn: sqlite3.Connection) -> int | None:
     return row["id"] if row else None
 
 
+def _wake_log_id(conn: sqlite3.Connection, now: datetime,
+                 wake_reasons: str | None) -> int | None:
+    """The single chokepoint every set_awake caller uses to bind its wake row.
+    A pacemaker-decided wake (`wake_reasons` None) reuses the decision row
+    run_tick already wrote (its latest wake=1). Every non-tick wake (user / ctl
+    / reconcile / rotate — `wake_reasons` set) writes its OWN activation row so
+    the wakeup note's "Last wake" segment counts it. Both feed the same
+    wake_log_id lie_down later updates with tokens/force_slept, so accounting is
+    unchanged. Falls back to the latest row if the fresh insert failed."""
+    if wake_reasons:
+        wid = integration.log_activation_wake_row(conn, now, wake_reasons)
+        if wid is not None:
+            return wid
+    return _latest_wake_log_id(conn)
+
+
 def wake_id_of(now: datetime) -> str:
     return f"{now.strftime('%Y%m%dT%H%M%S')}-{os.getpid()}"
 
@@ -295,7 +311,8 @@ def _wait_new_transcript(cfg, prev_path: str | None, spawn_ts: float) -> str | N
     return None
 
 
-def _spawn_wake(conn, cfg, now, resume: bool = False) -> dict | None:
+def _spawn_wake(conn, cfg, now, resume: bool = False,
+                wake_reasons: str | None = None) -> dict | None:
     """New-window wake. FRESH (resume=False): a brand-new brain whose FIRST
     prompt is the emoji + bell-marker wake prompt (marrow hook detects the
     marker and injects the note). RESUME (resume=True + a recorded claude
@@ -323,12 +340,13 @@ def _spawn_wake(conn, cfg, now, resume: bool = False) -> dict | None:
         _alert_respawn_failed(conn, wake_id_of(now), str(e)[:180])
         return None
     new_path = _wait_new_transcript(cfg, prev_path, spawn_ts)
-    wake_state.set_awake(cfg, _latest_wake_log_id(conn), new_path)
+    wake_state.set_awake(cfg, _wake_log_id(conn, now, wake_reasons), new_path)
     watchdog.spawn(cfg)
     return {"mode": "window", "session_id": None, "text": None}
 
 
-def _window_wake(conn, cfg, note_text, now, respawn: bool = False) -> dict | None:
+def _window_wake(conn, cfg, note_text, now, respawn: bool = False,
+                 wake_reasons: str | None = None) -> dict | None:
     """Interactive wake. `respawn=True` (rotate/rebirth) -> a deliberate FRESH
     brain via the emoji + bell-marker wake prompt (_spawn_wake). `respawn=False` with a DEAD
     resident -> RESUME the same conversation (`claude --resume`), no handoff
@@ -355,11 +373,12 @@ def _window_wake(conn, cfg, note_text, now, respawn: bool = False) -> dict | Non
 
     # Deliberate fresh brain (rotate/rebirth) -> emoji + bell-marker wake prompt, new session.
     if respawn:
-        return _spawn_wake(conn, cfg, now, resume=False)
+        return _spawn_wake(conn, cfg, now, resume=False, wake_reasons=wake_reasons)
     # Simply-dead resident (crash/manual close, no rotate flag) -> resume the
     # same conversation with full context (or fresh-with-catchup if unresumable).
     if not _window_alive(cfg):
-        return _resume_or_fresh_dead(conn, cfg, now, "dead resident")
+        return _resume_or_fresh_dead(conn, cfg, now, "dead resident",
+                                     wake_reasons=wake_reasons)
 
     # Alive resident: the signal-file ear path. Capture the SLEEPING epoch first
     # so the wake line carries it and set_awake is conditional on it: if a user
@@ -375,19 +394,21 @@ def _window_wake(conn, cfg, note_text, now, respawn: bool = False) -> dict | Non
         before = transcript.mtime(cfg)
         window.append_wake_signal(cfg, now, token=token)
         if not _signal_landed(cfg, before, timeout):
-            landed = _ear_miss_ladder(conn, cfg, now, timeout)
+            landed = _ear_miss_ladder(conn, cfg, now, timeout,
+                                      wake_reasons=wake_reasons)
             if landed is not None:
                 return landed
     except window.WindowError:
         return None
     tpath = transcript.newest(cfg)
-    wake_state.set_awake(cfg, _latest_wake_log_id(conn),
+    wake_state.set_awake(cfg, _wake_log_id(conn, now, wake_reasons),
                          str(tpath) if tpath else None, expected_gen=sleep_gen)
     watchdog.spawn(cfg)
     return {"mode": "window", "session_id": None, "text": None}
 
 
-def _ear_miss_ladder(conn, cfg, now, timeout: float) -> dict | None:
+def _ear_miss_ladder(conn, cfg, now, timeout: float,
+                     wake_reasons: str | None = None) -> dict | None:
     """Ear miss on a resident window. Ladder:
       a. claude ALIVE -> type the rearm bell line, poll again; land -> ear wake.
       b. claude DEAD  -> resume the same conversation (`claude --resume`). Only
@@ -404,16 +425,18 @@ def _ear_miss_ladder(conn, cfg, now, timeout: float) -> dict | None:
         before = transcript.mtime(cfg)
         if window.type_wake_signal(cfg, now) and _signal_landed(cfg, before, timeout):
             tpath = transcript.newest(cfg)
-            wake_state.set_awake(cfg, _latest_wake_log_id(conn),
+            wake_state.set_awake(cfg, _wake_log_id(conn, now, wake_reasons),
                                  str(tpath) if tpath else None)
             watchdog.spawn(cfg)
             return {"mode": "window", "session_id": None, "text": None}
         return None  # rearmed but not confirmed -> caller sets awake anyway
 
-    return _resume_or_fresh_dead(conn, cfg, now, "ear miss (claude dead)")
+    return _resume_or_fresh_dead(conn, cfg, now, "ear miss (claude dead)",
+                                 wake_reasons=wake_reasons)
 
 
-def _resume_or_fresh_dead(conn, cfg, now, why: str) -> dict | None:
+def _resume_or_fresh_dead(conn, cfg, now, why: str,
+                          wake_reasons: str | None = None) -> dict | None:
     """A dead resident window with NO rotate flag. A resumable claude session
     UUID -> resume (context back, no catchup) UNLESS that UUID was already
     durably retired by a rotate (wake_state.retired_sid) — the one-shot
@@ -432,7 +455,7 @@ def _resume_or_fresh_dead(conn, cfg, now, why: str) -> dict | None:
 
     if sid:
         _audit_wake(conn, wake_id_of(now), f"{why} -> resume")
-        return _spawn_wake(conn, cfg, now, resume=True)
+        return _spawn_wake(conn, cfg, now, resume=True, wake_reasons=wake_reasons)
 
     _audit_wake(conn, wake_id_of(now), f"{why}, no sid -> fresh")
     delivered_cutoff = _OMITTED_CUTOFF
