@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import subprocess
 import sqlite3
+from pathlib import Path
 
 import pytest
 
-from cortex import db
+from cortex import config, db, wake_state
 
 # Binaries that would touch the real machine (spawn iTerm, type into a window,
 # steal focus, play a sound, probe processes). No test may reach these: a test
@@ -50,6 +51,57 @@ def _block_real_processes(monkeypatch):
     override this guard for their own scope."""
     monkeypatch.setattr(subprocess, "run", _guarded(subprocess.run, "run"))
     monkeypatch.setattr(subprocess, "Popen", _guarded(subprocess.Popen, "Popen"))
+
+
+# Real live-runtime dir (~/.config/marrow/): the machine's actual cortex state,
+# audit, wake_signal and note files. Tonight's incident: the pytest suite wrote
+# test notes/audit lines INTO these live files (a cfg with empty [paths] falls
+# back to DEFAULT_CORTEX_HOME), delivering a test-rendered note to the real
+# window. A test must NEVER resolve a state/log path under this dir — always
+# tmp_path.
+_LIVE_CONFIG_DIR = (Path.home() / ".config" / "marrow").resolve()
+
+# Path builders whose default fallback lands under the live dir. Wrapped so any
+# resolution that would touch real runtime state fails the test loudly instead of
+# corrupting the live window.
+_GUARDED_PATH_FUNCS = [
+    (config, "cortex_home"),
+    (config, "wake_signal_log_path"),
+    (config, "wake_audit_log_path"),
+    (config, "handoff_path"),
+    (config, "wake_timing_log_path"),
+    (wake_state, "wake_state_path"),
+    (wake_state, "wakeup_note_path"),
+    (wake_state, "watchdog_pidfile_path"),
+]
+
+
+def _under_live_dir(p) -> bool:
+    try:
+        rp = Path(p).expanduser().resolve()
+    except (OSError, ValueError, RuntimeError):
+        return False
+    return rp == _LIVE_CONFIG_DIR or _LIVE_CONFIG_DIR in rp.parents
+
+
+@pytest.fixture(autouse=True)
+def _no_live_config_writes(monkeypatch):
+    """Hard wall: any test that resolves a cortex state/log/note path under the
+    real ~/.config/marrow/ fails loudly (same incident class as marrow's live-DB
+    barrier). Every test must supply tmp_path-based [paths]; a bare/empty cfg that
+    falls back to the live default is an isolation bug, not a pass."""
+    def _guard(orig, name):
+        def wrapper(cfg, *a, **kw):
+            out = orig(cfg, *a, **kw)
+            if _under_live_dir(out):
+                raise AssertionError(
+                    f"test isolation: {name}() resolved to the LIVE dir {out!r} — "
+                    f"set cfg['paths'] (cortex_home / wake_state_file / …) to "
+                    f"tmp_path so no test touches real ~/.config/marrow/ runtime")
+            return out
+        return wrapper
+    for mod, name in _GUARDED_PATH_FUNCS:
+        monkeypatch.setattr(mod, name, _guard(getattr(mod, name), name))
 
 
 @pytest.fixture(autouse=True)

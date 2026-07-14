@@ -24,6 +24,8 @@ def cfg(tmp_path):
     c["paths"]["self_schedule_file"] = str(home / "self_schedule.json")
     c["paths"]["transcript_dir"] = str(tmp_path / "transcript")
     c["paths"]["ny_db_pages"] = str(tmp_path / "ny")  # isolate symlinks.ensure_all
+    c["paths"]["wake_timing_log"] = str(home / "wake_timing.log")  # not under cortex_home default
+    c["paths"]["handoff_file"] = str(home / "handoff.md")
     c["wake"]["sentinel"] = False  # no detached sentinel in tests
     return c
 
