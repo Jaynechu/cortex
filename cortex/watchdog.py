@@ -130,14 +130,15 @@ def _wait_until_live(cfg: dict) -> bool:
     return wu is not None and datetime.now(timezone.utc) < wu
 
 
-def _wait_expiry_note(cfg: dict) -> str:
-    """Freshly rendered wakeup note for a wait(N)-expiry tuck-in, or "" when the
-    toggle is off / render fails / it is not a wait-expiry (no wait declared this
-    wake). Never raises — the tuck-in must land regardless."""
+def _free_round_note(cfg: dict) -> str:
+    """Freshly rendered wakeup note for a free-round tuck-in (silence-gate OR
+    wait-expiry — every free-round injection carries one, D6), or "" when the
+    toggle is off / render fails. Diff mode: note.gather replays only events
+    newer than the wake's last rendered note (wake_state.last_note_ts), so a
+    second consecutive injection shows only what's new. Never raises — the
+    tuck-in must land regardless."""
     if not cfg["wake"].get("wait_expiry_note", True):
         return ""
-    if wake_state.get_wait_count(cfg) <= 0:
-        return ""  # no wait declared this wake -> plain tuck-in, not a wait-expiry
     try:
         from datetime import datetime
         from pathlib import Path
@@ -161,17 +162,17 @@ def _wait_expiry_note(cfg: dict) -> str:
 
 
 def _build_tuck_in_line(cfg: dict, mins: float) -> str:
-    """Render the free-round line OUTSIDE any lock (BUG B: the slow wait-expiry
-    note render + template fill must not run inside the strict section). {mins} =
-    real minutes since the user's last message, {user} = marrow user_name. On a
-    wait(N)-expiry a freshly rendered wakeup note is appended below the marker.
-    "" when disabled."""
+    """Render the free-round line OUTSIDE any lock (BUG B: the slow note render +
+    template fill must not run inside the strict section). {mins} = real minutes
+    since the user's last message, {user} = marrow user_name. Every free-round
+    injection (silence-gate AND wait-expiry, D6) appends a freshly rendered
+    (diff-mode) wakeup note below the marker. "" when disabled."""
     tmpl = str(cfg["wake"].get("tuck_in_text") or "").strip()
     if not tmpl:
         return ""
     line = tmpl.replace("{mins}", str(int(round(mins)))) \
                .replace("{user}", config.user_name(cfg))
-    fresh = _wait_expiry_note(cfg)
+    fresh = _free_round_note(cfg)
     if fresh:
         line = line + "\n" + fresh
     return line

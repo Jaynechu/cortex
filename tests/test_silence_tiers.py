@@ -70,17 +70,19 @@ def test_no_user_under_gate_holds(awake_no_sentinel):
 def test_chat_tuck_in_then_grace(awake_no_sentinel):
     cfg = awake_no_sentinel
     wake_state.update(cfg, user_replied_this_wake=True)
-    # First: silent past silent_max (20) -> tuck-in marker, still awake.
+    # First: silent past silent_max (20) -> tuck-in marker (+ note, D6), still awake.
     a1 = watchdog.silence_action(cfg, silent_min=21.0)
     assert a1 == "tuck-in appended"
     assert wake_state.is_awake(cfg) is True
-    lines = _signal_lines(cfg)
-    assert len(lines) == 1 and "[NEW ROUND]" in lines[0]
-    assert "21 min" in lines[0]  # real minutes since user's last message
+    text = "\n".join(_signal_lines(cfg))
+    assert "[NEW ROUND]" in text
+    assert "21 min" in text  # real minutes since user's last message
+    writes_after_first = text.count("[NEW ROUND]")
+    assert writes_after_first == 1
     # Marker stamped -> not re-appended on the next poll.
     a2 = watchdog.silence_action(cfg, silent_min=22.0)
     assert a2 is None
-    assert len(_signal_lines(cfg)) == 1
+    assert "\n".join(_signal_lines(cfg)).count("[NEW ROUND]") == 1
     # Backdate the tuck stamp past the grace window -> auto sleep.
     past = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
     wake_state.update(cfg, tuck_pending=past)
@@ -202,7 +204,7 @@ def test_free_round_template_reads_marrow_user_name(cfg, tmp_path):
     assert "Nim" in line and "the user" not in line
 
 
-# --- wait-expiry note ---------------------------------------------------------
+# --- free-round note (D6: every injection carries one, wait_count gate dropped) -
 
 def test_wait_expiry_tuck_in_carries_fresh_note(awake_no_sentinel):
     """A wait(N) was declared this wake and has expired -> the TUCK-IN marker is
@@ -217,33 +219,32 @@ def test_wait_expiry_tuck_in_carries_fresh_note(awake_no_sentinel):
     assert "Now:" in text  # fresh note appended
 
 
-def test_plain_tuck_in_no_note(awake_no_sentinel):
-    """No wait declared this wake -> plain tuck-in, no rendered note appended."""
+def test_plain_silence_gate_tuck_in_also_carries_note(awake_no_sentinel):
+    """D6: the silence-gate tuck-in (no wait declared this wake, wait_count stays
+    0) ALSO carries a freshly rendered note now — the wait_count>0 gate is gone."""
     cfg = awake_no_sentinel
     wake_state.update(cfg, user_replied_this_wake=True)  # wait_count stays 0
     watchdog.silence_action(cfg, silent_min=21.0)
     text = "\n".join(_signal_lines(cfg))
     assert "[NEW ROUND]" in text
-    assert "Now:" not in text
+    assert "Now:" in text  # note appended even without a declared wait
 
 
-def test_wait_expiry_note_toggle_off(awake_no_sentinel):
-    """Toggle off -> plain marker even on a wait-expiry."""
+def test_free_round_note_toggle_off(awake_no_sentinel):
+    """Toggle off -> plain marker, no note, on either free-round path."""
     cfg = awake_no_sentinel
     cfg["wake"]["wait_expiry_note"] = False
     wake_state.update(cfg, user_replied_this_wake=True)
-    wake_state.bump_wait_count(cfg)
     watchdog.silence_action(cfg, silent_min=21.0)
     text = "\n".join(_signal_lines(cfg))
     assert "[NEW ROUND]" in text
     assert "Now:" not in text
 
 
-def test_wait_expiry_render_failure_falls_back(awake_no_sentinel, monkeypatch):
+def test_free_round_note_render_failure_falls_back(awake_no_sentinel, monkeypatch):
     """A render blow-up must never block the tuck-in -> plain marker still lands."""
     cfg = awake_no_sentinel
     wake_state.update(cfg, user_replied_this_wake=True)
-    wake_state.bump_wait_count(cfg)
     monkeypatch.setattr(
         "cortex.note.gather",
         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
@@ -254,7 +255,50 @@ def test_wait_expiry_render_failure_falls_back(awake_no_sentinel, monkeypatch):
     assert "Now:" not in text  # note omitted, marker survived
 
 
-# --- awake gate (tick) --------------------------------------------------------
+def test_two_consecutive_injections_second_diffs_against_first(awake_no_sentinel):
+    """Two consecutive free-round injections in the same wake: the second note
+    replays only events newer than the first note's ts — user activity on
+    another channel between rounds shows up, the already-seen event does not."""
+    cfg = awake_no_sentinel
+    wake_state.update(cfg, user_replied_this_wake=True)
+    conn = db.connect(cfg)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "session_id TEXT, timestamp TEXT, role TEXT, content TEXT, channel TEXT)")
+    conn.execute(
+        "INSERT INTO events (session_id, timestamp, role, content, channel) "
+        "VALUES ('s', '2026-07-08T03:00:00+00:00', 'user', 'round one message', 'wx')")
+    conn.commit()
+    conn.close()
+
+    # Round 1: wait-expiry free-round injection (fresh baseline note).
+    wake_state.bump_wait_count(cfg)
+    past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    wake_state.set_wait_until(cfg, past)
+    a1 = watchdog.silence_action(cfg, silent_min=0.0)
+    assert a1 == "wait-expiry free-round appended"
+    text1 = "\n".join(_signal_lines(cfg))
+    assert "round one message" in text1
+
+    # Activity on another channel lands between rounds.
+    conn = db.connect(cfg)
+    conn.execute(
+        "INSERT INTO events (session_id, timestamp, role, content, channel) "
+        "VALUES ('s', '2026-07-08T03:05:00+00:00', 'user', 'round two message', 'tg')")
+    conn.commit()
+    conn.close()
+
+    # Round 2: another wait() + expiry -> second free-round injection.
+    wake_state.commit_wait(cfg, past, cap=0)
+    a2 = watchdog.silence_action(cfg, silent_min=0.0)
+    assert a2 == "wait-expiry free-round appended"
+    lines = _signal_lines(cfg)
+    # Only the SECOND note's content (after the second marker) should carry
+    # round two's message; round one's message must not be repeated.
+    second_marker_idx = "\n".join(lines).rindex("[NEW ROUND]")
+    text2_only = "\n".join(lines)[second_marker_idx:]
+    assert "round two message" in text2_only
+    assert "round one message" not in text2_only
 
 def _fresh_transcript(cfg):
     import json

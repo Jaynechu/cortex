@@ -18,7 +18,7 @@ from cortex import config
 
 _AWAKE_KEYS = ("awake", "awake_since", "wake_log_id", "transcript",
                "silence_wait_until", "wait_count", "user_replied_this_wake",
-               "tuck_pending")
+               "tuck_pending", "last_note_ts")
 
 _LOCK_TIMEOUT_SEC = 5.0
 
@@ -308,7 +308,8 @@ def set_awake(cfg: dict, wake_log_id: int | None, transcript: str | None,
             d.update(awake=True, next_wake_at=None,
                      awake_since=datetime.now(timezone.utc).isoformat(),
                      wake_log_id=wake_log_id, transcript=transcript, wait_count=0,
-                     user_replied_this_wake=False, tuck_pending=None)
+                     user_replied_this_wake=False, tuck_pending=None,
+                     last_note_ts=None)
             _save(cfg, d)
             return int(d["gen"]), str(d["state_id"])
     except StateValidationError:
@@ -428,6 +429,19 @@ def clear_wait_until(cfg: dict) -> None:
         d = load(cfg)
         if d.pop("silence_wait_until", None) is not None:
             _save(cfg, d)
+
+
+def get_last_note_ts(cfg: dict) -> str | None:
+    """ISO timestamp baseline for the diff-mode Replay section: the newest
+    replayed event's ts as of the last rendered note (wake's initial note or
+    any free-round tuck-in). None = no note rendered yet this wake -> full
+    (epoch-zero) replay."""
+    v = load(cfg).get("last_note_ts")
+    return str(v) if v else None
+
+
+def set_last_note_ts(cfg: dict, ts_iso: str) -> None:
+    update(cfg, last_note_ts=ts_iso)
 
 
 def get_wait_count(cfg: dict) -> int:

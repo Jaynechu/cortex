@@ -172,10 +172,16 @@ def _strip_markers(text: str) -> str:
     return _MEDIA_TAG_RE.sub(" ", text).strip()
 
 
-def _replay_events(conn: sqlite3.Connection, cfg: dict, limit: int, per_chars: int) -> list[dict]:
+def _replay_events(conn: sqlite3.Connection, cfg: dict, limit: int, per_chars: int,
+                   since_ts: str | None = None) -> list[dict]:
     """Last `limit` real user/assistant events (cross-session, chronological),
     each tagged [channel HH:mm] + role marker (N=user, Y=assistant) and capped
     at per_chars. Excludes role='tl' and cortex self-talk channels.
+
+    `since_ts` (diff mode, D6): only events with timestamp > since_ts — a
+    free-round tuck-in replays what happened since the wake's last rendered
+    note, not the whole wake. None = full replay (epoch zero / wake's initial
+    note).
 
     Replay is meant to show the real user<->assistant exchange context; cortex's
     own wake monologues (channel='ct') are excluded so the note does not replay
@@ -186,12 +192,14 @@ def _replay_events(conn: sqlite3.Connection, cfg: dict, limit: int, per_chars: i
     placeholders = ",".join("?" for _ in exclude) if exclude else ""
     where_channel = (
         f" AND COALESCE(channel,'') NOT IN ({placeholders})" if exclude else "")
+    where_since = " AND timestamp > ?" if since_ts else ""
+    params = (*exclude, *((since_ts,) if since_ts else ()), limit)
     try:
         rows = conn.execute(
             "SELECT role, content, timestamp, channel FROM events "
-            "WHERE role IN ('user', 'assistant')" + where_channel
+            "WHERE role IN ('user', 'assistant')" + where_channel + where_since
             + " ORDER BY id DESC LIMIT ?",
-            (*exclude, limit),
+            params,
         ).fetchall()
     except sqlite3.OperationalError:
         return []
@@ -348,21 +356,30 @@ def gather(
             awake_since_hm = since_dt.astimezone(_tz(cfg)).strftime("%H:%M")
         except (TypeError, ValueError):
             pass
+    # Diff mode (D6): replay only events newer than the last rendered note this
+    # wake (last_note_ts). Absent (wake's initial note, or wake_state load
+    # failed) -> full replay, same as before this refactor.
+    note_since_ts = ws.get("last_note_ts")
     replay = _safe(
         _replay_events, conn, cfg,
         ncfg.get("replay_events", 4),
         ncfg.get("replay_event_chars", 300),
+        note_since_ts,
         default=[],
     )
     replay_stale = False
-    if replay and last_wake:
-        latest_ts = _safe(_latest_replay_ts, conn, cfg)
-        if latest_ts:
-            try:
-                last_wake_dt = now - timedelta(minutes=last_wake["minutes_ago"])
-                replay_stale = _parse_utc(latest_ts) < last_wake_dt
-            except (TypeError, ValueError):
-                pass
+    latest_ts = _safe(_latest_replay_ts, conn, cfg)
+    if replay and last_wake and latest_ts:
+        try:
+            last_wake_dt = now - timedelta(minutes=last_wake["minutes_ago"])
+            replay_stale = _parse_utc(latest_ts) < last_wake_dt
+        except (TypeError, ValueError):
+            pass
+    # Advance the diff-mode baseline to the newest eligible event overall (not
+    # just the ones shown this render — same value as latest_ts above), so the
+    # NEXT free-round tuck-in diffs from here. Monotonic: only moves forward.
+    if latest_ts and (not note_since_ts or latest_ts > note_since_ts):
+        _safe(wake_state.set_last_note_ts, cfg, latest_ts)
 
     return {
         "last_wake": last_wake,

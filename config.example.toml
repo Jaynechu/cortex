@@ -106,7 +106,7 @@ tuck_in_text = "⏳ [NEW ROUND] {mins} min since {user}'s last message. Choose a
 # Line-start markers identifying a NON-user turn down the ear channel (so they
 # don't reset the silence timer). wake_signal_marker is added automatically.
 machine_line_markers = ["[TUCK-IN]", "[NEW ROUND]", "[NIGHT]"]
-wait_expiry_note = true      # on a wait(N)-expiry free-round, append a freshly rendered wakeup note (note content only)
+wait_expiry_note = true      # every free-round tuck-in (silence-gate or wait(N)-expiry) appends a freshly rendered wakeup note (diff mode: only events since the last rendered note this wake)
 
 # Per-wake watchdog thresholds (spawned at injection, killed at lie_down).
 [wake.watchdog]

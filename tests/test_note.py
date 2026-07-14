@@ -335,6 +335,32 @@ def test_replay_strips_media_markers(marrow_conn, cfg):
     assert ev[0]["content"] == "你看 这个"
 
 
+def test_replay_events_since_ts_filters_older_events(marrow_conn, cfg):
+    """Diff mode (D6): since_ts excludes events at or before it, keeps newer."""
+    make_events_table(marrow_conn)
+    marrow_conn.executemany(
+        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
+        [
+            ("s", "2026-07-08T03:00:00+00:00", "user", "old message", "wx"),
+            ("s", "2026-07-08T03:05:00+00:00", "assistant", "old reply", "wx"),
+            ("s", "2026-07-08T03:10:00+00:00", "user", "new message", "wx"),
+        ],
+    )
+    marrow_conn.commit()
+    ev = note._replay_events(marrow_conn, cfg, 6, 300, since_ts="2026-07-08T03:05:00+00:00")
+    assert [e["content"] for e in ev] == ["new message"]
+
+
+def test_replay_events_since_ts_none_is_full_replay(marrow_conn, cfg):
+    make_events_table(marrow_conn)
+    marrow_conn.execute(
+        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
+        ("s", "2026-07-08T03:00:00+00:00", "user", "hi", "wx"))
+    marrow_conn.commit()
+    ev = note._replay_events(marrow_conn, cfg, 6, 300, since_ts=None)
+    assert len(ev) == 1
+
+
 def test_replay_exclude_channels_configurable(marrow_conn):
     make_events_table(marrow_conn)
     marrow_conn.execute(
@@ -432,7 +458,10 @@ def test_frontmost_app_ok(monkeypatch):
 # gather integration (external facts stubbed)
 # --------------------------------------------------------------------------- #
 
-def test_gather_end_to_end(marrow_conn, cfg, monkeypatch):
+def test_gather_end_to_end(marrow_conn, cfg, tmp_path, monkeypatch):
+    # Isolate wake_state so a stale last_note_ts on a real machine's live state
+    # (diff-mode baseline, D6) can never filter out this fixture's replay row.
+    cfg["paths"]["wake_state_file"] = str(tmp_path / "wake_state.json")
     make_events_table(marrow_conn)
     marrow_conn.execute(
         "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
@@ -458,6 +487,72 @@ def test_gather_end_to_end(marrow_conn, cfg, monkeypatch):
     text = note.render(cfg, NOW, data)
     assert text.startswith("Now: ")
     assert "Wake:" not in text
+
+
+# --------------------------------------------------------------------------- #
+# gather diff mode (D6): last_note_ts baseline persisted + advanced per render
+# --------------------------------------------------------------------------- #
+
+def test_gather_second_call_diffs_against_first(marrow_conn, cfg, tmp_path, monkeypatch):
+    """Two consecutive gather() calls in the same wake: the first (wake's
+    initial note) sees everything; the second sees only events newer than the
+    first's baseline (last_note_ts persisted in wake_state)."""
+    from cortex import wake_state
+    cfg["paths"]["wake_state_file"] = str(tmp_path / "wake_state.json")
+    make_events_table(marrow_conn)
+    monkeypatch.setattr(note, "_frontmost_app", lambda: None)
+
+    marrow_conn.execute(
+        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
+        ("s", "2026-07-08T03:00:00+00:00", "user", "first round message", "wx"))
+    marrow_conn.commit()
+
+    data1 = note.gather(marrow_conn, cfg, NOW)
+    assert [e["content"] for e in data1["replay"]] == ["first round message"]
+    baseline = wake_state.get_last_note_ts(cfg)
+    assert baseline == "2026-07-08T03:00:00+00:00"
+
+    # New activity lands between the two rounds (e.g. wx channel while cortex slept).
+    marrow_conn.execute(
+        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
+        ("s", "2026-07-08T03:10:00+00:00", "user", "second round message", "wx"))
+    marrow_conn.commit()
+
+    data2 = note.gather(marrow_conn, cfg, NOW)
+    # Only the new event, not the one already shown in the first note.
+    assert [e["content"] for e in data2["replay"]] == ["second round message"]
+    # Baseline advances forward.
+    assert wake_state.get_last_note_ts(cfg) == "2026-07-08T03:10:00+00:00"
+
+
+def test_gather_diff_shows_cross_channel_activity(marrow_conn, cfg, tmp_path, monkeypatch):
+    """User activity on wx/tg channels between rounds shows up in the diff (not
+    just the active window's own channel)."""
+    from cortex import wake_state
+    cfg["paths"]["wake_state_file"] = str(tmp_path / "wake_state.json")
+    make_events_table(marrow_conn)
+    monkeypatch.setattr(note, "_frontmost_app", lambda: None)
+
+    marrow_conn.execute(
+        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
+        ("s", "2026-07-08T03:00:00+00:00", "assistant", "cli reply", "cli"))
+    marrow_conn.commit()
+    note.gather(marrow_conn, cfg, NOW)  # wake's initial note -> baseline set
+
+    marrow_conn.executemany(
+        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
+        [
+            ("s", "2026-07-08T03:05:00+00:00", "user", "wx message", "wx"),
+            ("s", "2026-07-08T03:06:00+00:00", "user", "tg message", "tg"),
+        ],
+    )
+    marrow_conn.commit()
+
+    data2 = note.gather(marrow_conn, cfg, NOW)
+    channels = [(e["channel"], e["content"]) for e in data2["replay"]]
+    assert ("wx", "wx message") in channels
+    assert ("tg", "tg message") in channels
+    assert ("cli", "cli reply") not in channels  # already seen in round 1
 
 
 def test_gather_survives_naive_due_at_self_schedule(marrow_conn, cfg, tmp_path, monkeypatch):

@@ -61,7 +61,7 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
 - respawn(cfg, initial_prompt, resume_sid): SIGTERM old claude, close session, _spawn, persist sid. Silent — say() is sole attention-getter.
 - find_claude_pid: session tty → ps exact-match, fallback pgrep -x + cwd filter; 0 or >1 → None never guess (window.py:388-459). hard_interrupt = SIGINT on that pid only (462-473).
 ### wake_state.json (`wake_state.py`)
-- Keys: awake set = awake/awake_since/wake_log_id/transcript/silence_wait_until/wait_count/user_replied_this_wake/tuck_pending (cleared together by clear_awake/claim_lie_down).
+- Keys: awake set = awake/awake_since/wake_log_id/transcript/silence_wait_until/wait_count/user_replied_this_wake/tuck_pending/last_note_ts (cleared together by clear_awake/claim_lie_down).
 - Also: session id; rotated (read-and-clear via take_rotated); sentinel_pid.
 - night_wrap_key/night_rotated_key = once/night dedup (pacemaker_tick.py:38/47).
 - load tolerates missing/corrupt → {}. Writes via _flock (blocking exclusive on sibling .lock, best-effort) + _save (temp + os.replace, no half-written read); cross-process lost-update fixed (wake_state.py:50-127).
@@ -74,7 +74,9 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
 - Fuse: window_tokens>=fuse_tokens (150k) → _fuse then exit; else silence_action (watchdog.py:202-232).
 - silence_action (watchdog.py:151-199, shared by watchdog.run + _handle_awake): two-tier, live wait_until (cortex.wait) holds both.
 - No-user tier → no_user_gate_min (5) silent proxy lie_down.
-- Chat tier → silent_max_min (20) tuck_in_text marker once (stamps tuck_pending), then tuck_grace_min (5) more → proxy lie_down.
+- Chat tier → silent_max_min (15) tuck_in_text marker once (stamps tuck_pending), then tuck_grace_min (5) more → proxy lie_down.
+- Wait-expiry tier → wait(N) deadline past: epoch-guarded free-round injection immediately, bypasses silent_min (watchdog.py:194-289).
+- Every free-round injection (both tiers) appends a diff-mode wakeup note below the marker (D6, wait_expiry_note toggle, watchdog.py:133-177).
 - force_slept="auto" = routine silence marker (note.py neutral, no catchup line), distinct from "timeout" (retired) and real incidents (fuse/stale).
 - _fuse: esc → inject fuse_handoff_prompt (summarize + handoff + lie_down(rotate=True)) → poll awake 300s grace; proxy-lie_down only if session didn't; catchup only when handoff unwritten (watchdog.py:76-109).
 - esc verify: still growing → hard_interrupt SIGINT, gated hard_interrupt_enabled (43-66).
@@ -96,6 +98,7 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
 - gather (note.py:311-340): every section behind _safe(), render pure, omit cleanly when absent (386-446).
 - Sections: header Now/Plan Used/Active [+ force_slept | died_no_handoff catchup] · Pending self-schedule (note.pending_window_min 15).
 - Replay (note.replay_events 4, excl channels ('ct',), marker-stripped, 300ch) · turn_end_text · title prefix. "Wake:" reason line retired.
+- Diff mode: replay filters events newer than wake_state.last_note_ts (baseline = wake's initial note); every gather() advances it to the newest eligible event (note.py:359-374).
 - Budget line (note.py:449-475): `Plan Used: 5h X% | 7d Y% | Cortex Today Nk/Mk | Net Session Token: Wk`. 5h/7d from ct_rate_limit kv.
 - Cortex Today via note._today_tokens (delegates to integration._today_tokens, parity by construction).
 - Net Session = window_tokens key from ct_pacemaker_state (label kept for marrow parity, not net spend).
