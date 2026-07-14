@@ -48,10 +48,16 @@ def test_pid_alive_none_and_dead_false():
 # --- spawn singleton guard (double-watchdog prevention) -----------------------
 
 def test_spawn_skips_when_recorded_pid_alive(cfg, monkeypatch):
-    """A live recorded watchdog pid = already on duty: spawn returns it, never
-    launches a second subprocess."""
+    """A live recorded watchdog pid whose IDENTITY confirms it is the cortex
+    watchdog (ps command line names cortex.watchdog) = already on duty: spawn
+    returns it, never launches a second subprocess."""
     import os
     wake_state.watchdog_pidfile_path(cfg).write_text(str(os.getpid()))
+    # Identity check (FIX 7): ps -p <pid> -o command= must name cortex.watchdog.
+    monkeypatch.setattr(watchdog.subprocess, "run",
+                        lambda *a, **k: type("R", (), {
+                            "returncode": 0,
+                            "stdout": "python -m cortex.watchdog"})())
     spawned = {"n": 0}
     monkeypatch.setattr(watchdog.subprocess, "Popen",
                         lambda *a, **k: spawned.__setitem__("n", spawned["n"] + 1)
@@ -59,6 +65,25 @@ def test_spawn_skips_when_recorded_pid_alive(cfg, monkeypatch):
     pid = watchdog.spawn(cfg)
     assert spawned["n"] == 0  # no second watchdog
     assert pid == os.getpid()  # returns the live one
+
+
+def test_spawn_launches_when_recorded_pid_recycled(cfg, monkeypatch):
+    """FIX 7: a live recorded pid whose command line is NOT the watchdog (recycled
+    pid inherited by an unrelated process) must NOT count as on-duty — spawn a
+    fresh watchdog instead of heal-skipping forever."""
+    import os
+    wake_state.watchdog_pidfile_path(cfg).write_text(str(os.getpid()))
+    monkeypatch.setattr(watchdog.subprocess, "run",
+                        lambda *a, **k: type("R", (), {
+                            "returncode": 0,
+                            "stdout": "/usr/bin/some-unrelated-process"})())
+    spawned = {"n": 0}
+    monkeypatch.setattr(watchdog.subprocess, "Popen",
+                        lambda *a, **k: spawned.__setitem__("n", spawned["n"] + 1)
+                        or type("P", (), {"pid": 4243})())
+    pid = watchdog.spawn(cfg)
+    assert spawned["n"] == 1  # recycled pid ignored -> fresh watchdog spawned
+    assert pid == 4243
 
 
 def test_spawn_launches_when_no_record(cfg, monkeypatch):
@@ -69,6 +94,43 @@ def test_spawn_launches_when_no_record(cfg, monkeypatch):
     pid = watchdog.spawn(cfg)
     assert spawned["n"] == 1
     assert pid == 4242
+
+
+def test_concurrent_spawn_launches_only_one(cfg, monkeypatch):
+    """FIX 2: the singleton check+spawn is serialised (flock) and the parent
+    writes the pid claim before releasing — two concurrent callers can never both
+    launch a watchdog. Simulate the race: two threads call spawn together; only
+    ONE Popen fires, both return the same live pid."""
+    import threading
+    spawned = {"n": 0}
+    lock = threading.Lock()
+    barrier = threading.Barrier(2)
+
+    def fake_popen(*a, **k):
+        with lock:
+            spawned["n"] += 1
+        return type("P", (), {"pid": 7777})()
+    monkeypatch.setattr(watchdog.subprocess, "Popen", fake_popen)
+
+    # Identity check reads the pidfile claim: alive+watchdog once a pid==7777 is
+    # recorded (the parent writes it inside the lock before releasing).
+    def fake_alive(cfg_, pid):
+        return pid == 7777
+    monkeypatch.setattr(watchdog, "_watchdog_pid_alive", fake_alive)
+
+    results = {}
+
+    def worker(idx):
+        barrier.wait()
+        results[idx] = watchdog.spawn(cfg)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(2)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert spawned["n"] == 1  # exactly one watchdog launched despite the race
+    assert results[0] == results[1] == 7777  # both callers got the live pid
 
 
 def test_spawn_launches_when_recorded_pid_dead(cfg, monkeypatch):

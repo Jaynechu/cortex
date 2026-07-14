@@ -16,6 +16,8 @@ Last wake (watchdog.log carries the pid + skip/ambiguous detail).
 """
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import os
 import subprocess
 import sys
@@ -49,6 +51,58 @@ def _recorded_watchdog_pid(cfg: dict) -> int | None:
         return None
 
 
+# The watchdog runs as `python -m cortex.watchdog`; a recycled pid of an
+# unrelated process would pass a bare kill(pid,0) liveness probe and make the
+# singleton guard heal-skip forever. Confirm the pid's command line actually
+# names this module before trusting the record.
+_WATCHDOG_CMD_PATTERN = "cortex.watchdog"
+
+
+def _watchdog_pid_alive(cfg: dict, pid: int | None) -> bool:
+    """True only if `pid` is BOTH live AND actually the cortex watchdog process
+    (identity check, not just kill(pid,0)). Guards the recycled-pid trap: after a
+    reboot/pid wrap an unrelated process can inherit the recorded pid and read as
+    "watchdog alive", so heals skip forever. macOS has no /proc — match the
+    process command line via `ps -p <pid> -o command=` against the watchdog module
+    pattern. If ps is unavailable/errors, fall back to bare liveness (better to
+    risk a duplicate than to never heal). Dead pid -> False without spawning ps."""
+    if not _pid_alive(pid):
+        return False
+    try:
+        out = subprocess.run(
+            ["ps", "-p", str(int(pid)), "-o", "command="],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return True  # cannot verify identity -> trust liveness (avoid dup spawn)
+    if out.returncode != 0:
+        return False  # ps found no such pid -> dead/recycled
+    return _WATCHDOG_CMD_PATTERN in (out.stdout or "")
+
+
+@contextlib.contextmanager
+def _spawn_lock(cfg: dict):
+    """Exclusive flock serialising the singleton check+spawn (BUG: the old
+    check-then-act let two callers both pass the liveness test while the pidfile
+    was absent/stale — the child writes its pid only AFTER Popen, so both parents
+    spawned). Held across check + Popen + claim-write so the whole critical
+    section is atomic. Advisory flock is released on ANY process exit (even a
+    crash before writing the claim), so a caller that dies mid-spawn never
+    deadlocks the next one — stale-claim recovery is just the next holder finding
+    a dead/absent pid and spawning fresh."""
+    lp = wake_state.watchdog_pidfile_path(cfg).with_suffix(".spawn.lock")
+    lp.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(lp), os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        with contextlib.suppress(OSError):
+            os.close(fd)
+
+
 def spawn(cfg: dict) -> int | None:
     """Launch a detached per-wake watchdog process (`python -m cortex.watchdog`)
     that outlives the pacemaker tick. Singleton guard (permanent-residency
@@ -56,19 +110,31 @@ def spawn(cfg: dict) -> int | None:
     a second — return its pid. Only an absent/dead record spawns a fresh one. This
     is the single choke point behind every set_awake caller (fresh / ear / rearm)
     and marrow's _spawn_watchdog_if_absent, so a re-wake of an already-resident
-    window never leaks a duplicate watchdog. Returns the live/new pid."""
-    existing = _recorded_watchdog_pid(cfg)
-    if _pid_alive(existing):
-        return existing
-    log = wake_state.watchdog_pidfile_path(cfg).with_suffix(".log")
-    log.parent.mkdir(parents=True, exist_ok=True)
-    f = open(log, "a")
-    p = subprocess.Popen(
-        [sys.executable, "-m", "cortex.watchdog"],
-        stdout=f, stderr=f, stdin=subprocess.DEVNULL,
-        start_new_session=True, env={**os.environ},
-    )
-    return p.pid
+    window never leaks a duplicate watchdog. Returns the live/new pid.
+
+    Serialised under _spawn_lock: the check + Popen + claim-write run in one
+    atomic critical section, so two concurrent callers can never both spawn. The
+    parent writes the child pid into the pidfile immediately (the claim) before
+    releasing the lock — no window where the next caller sees an empty pidfile for
+    a watchdog that is in fact already spawning."""
+    with _spawn_lock(cfg):
+        existing = _recorded_watchdog_pid(cfg)
+        if _watchdog_pid_alive(cfg, existing):
+            return existing
+        log = wake_state.watchdog_pidfile_path(cfg).with_suffix(".log")
+        log.parent.mkdir(parents=True, exist_ok=True)
+        f = open(log, "a")
+        p = subprocess.Popen(
+            [sys.executable, "-m", "cortex.watchdog"],
+            stdout=f, stderr=f, stdin=subprocess.DEVNULL,
+            start_new_session=True, env={**os.environ},
+        )
+        # Parent writes the claim (child pid) before releasing the lock, so the
+        # next caller sees a live pid instead of racing the child's own late
+        # pidfile write in main().
+        with contextlib.suppress(OSError):
+            wake_state.watchdog_pidfile_path(cfg).write_text(str(p.pid))
+        return p.pid
 
 
 def _verify_esc_or_hard_interrupt(cfg: dict, grace_sec: float, trigger: str) -> str | None:
@@ -161,15 +227,18 @@ def _wait_until_live(cfg: dict) -> bool:
     return wu is not None and datetime.now(timezone.utc) < wu
 
 
-def _free_round_note(cfg: dict) -> str:
+def _free_round_note(cfg: dict) -> tuple[str, str | None]:
     """Freshly rendered wakeup note for a free-round tuck-in (silence-gate OR
-    wait-expiry — every free-round injection carries one, D6), or "" when the
-    toggle is off / render fails. Diff mode: note.gather replays only events
-    newer than the wake's last rendered note (wake_state.last_note_ts), so a
-    second consecutive injection shows only what's new. Never raises — the
-    tuck-in must land regardless."""
+    wait-expiry — every free-round injection carries one, D6). Returns
+    (text, pending_baseline_ts): text is "" when the toggle is off / render
+    fails; pending_baseline_ts is the newest eligible replay ts that the caller
+    must persist as the new diff baseline ONLY AFTER the tuck-in write + epoch
+    commit succeed (FIX 6 — advancing it during render lost replay events forever
+    when a stale-epoch / failed write dropped the injection). Diff mode: gather
+    replays only events newer than the wake's last rendered note. Never raises —
+    the tuck-in must land regardless."""
     if not cfg["wake"].get("wait_expiry_note", True):
-        return ""
+        return "", None
     try:
         from datetime import datetime
         from pathlib import Path
@@ -184,32 +253,54 @@ def _free_round_note(cfg: dict) -> str:
             sid = Path(str(raw)).stem[:8]
         conn = db.connect(cfg)
         try:
+            # advance_baseline=False: render must NOT persist the baseline. The
+            # caller advances it only after the injection is committed.
             data = note.gather(conn, cfg, now, window_sid=sid,
-                               advance_baseline=True)
-            return note.render(cfg, now, data).strip()
+                               advance_baseline=False)
+            text = note.render(cfg, now, data).strip()
+            pending = note._latest_replay_ts(conn, cfg)
         finally:
             conn.close()
+        return text, pending
     except Exception:
-        return ""
+        return "", None
 
 
-def _build_tuck_in_line(cfg: dict, mins: float) -> str:
+def _build_tuck_in_line(cfg: dict, mins: float) -> tuple[str, str | None]:
     """Render the free-round line OUTSIDE any lock (BUG B: the slow note render +
     template fill must not run inside the strict section). {mins} = real minutes
     since the user's last message, {user} = marrow user_name. Every free-round
     injection (silence-gate AND wait-expiry, D6) prepends a freshly rendered
     (diff-mode) wakeup note ABOVE the 3-choice marker line — intel before choice
-    (acceptance), and the marker lands LAST so it is the final decision cue. ""
-    when disabled."""
+    (acceptance), and the marker lands LAST so it is the final decision cue.
+    Returns (line, pending_baseline_ts): the caller advances the diff baseline to
+    pending_baseline_ts ONLY AFTER the line is committed + written (FIX 6). ("",
+    None) when disabled."""
     tmpl = str(cfg["wake"].get("tuck_in_text") or "").strip()
     if not tmpl:
-        return ""
+        return "", None
     line = tmpl.replace("{mins}", str(int(round(mins)))) \
                .replace("{user}", config.user_name(cfg))
-    fresh = _free_round_note(cfg)
+    fresh, pending = _free_round_note(cfg)
     if fresh:
         line = fresh + "\n" + line
-    return line
+    return line, pending
+
+
+def _advance_note_baseline(cfg: dict, pending_ts: str | None) -> None:
+    """Persist the diff-mode replay baseline (wake_state.last_note_ts) to
+    pending_ts, but ONLY after a free-round injection has actually committed +
+    been written (FIX 6). Monotonic: only moves forward. A failed inject never
+    reaches here, so the events it would have shown stay replayable next round.
+    Best-effort — never raises."""
+    if not pending_ts:
+        return
+    try:
+        cur = wake_state.get_last_note_ts(cfg)
+        if not cur or str(pending_ts) > str(cur):
+            wake_state.set_last_note_ts(cfg, str(pending_ts))
+    except Exception:
+        pass
 
 
 def _write_tuck_in_line(cfg: dict, line: str) -> None:
@@ -310,7 +401,9 @@ def silence_action(cfg: dict, silent_min: float, *, allow_tuck: bool = True) -> 
     # already cleared the wait). On a fresh epoch: clear the wait + stamp
     # tuck_pending (grace arms) + append the free-round line.
     if _wait_expired(cfg):
-        line = _build_tuck_in_line(cfg, silent_min) if allow_tuck else ""
+        line, pending_ts = ("", None)
+        if allow_tuck:
+            line, pending_ts = _build_tuck_in_line(cfg, silent_min)
         try:
             committed = wake_state.conditional_mutate(
                 cfg, token0, _clear_wait_and_stamp())
@@ -320,11 +413,21 @@ def silence_action(cfg: dict, silent_min: float, *, allow_tuck: bool = True) -> 
             return None  # not awake / already stamped -> no double injection
         if allow_tuck:
             _write_tuck_in_line(cfg, line)
+            _advance_note_baseline(cfg, pending_ts)  # FIX 6: only after commit+write
         return "wait-expiry free-round appended"
 
     if not wake_state.user_replied_this_wake(cfg):
+        # Accident safety net only (not a daily-flow step): fires when the user
+        # never spoke this wake. Time it from awake_since (elapsed since wake) —
+        # NOT from silent_min, which is derived from a user-message ts that on a
+        # never-spoken wake is None -> 0.0 and would never elapse. Semantics
+        # unchanged otherwise: proxy auto lie_down (arms next alarm via dice), no
+        # marker.
         gate = float(wcfg.get("no_user_gate_min", 5))
-        if silent_min >= gate:
+        elapsed = wake_state.awake_since_min(cfg)
+        if elapsed is None:
+            elapsed = silent_min  # no awake_since -> fall back to prior behaviour
+        if elapsed >= gate:
             lie_down_mod.lie_down(cfg, force_slept="auto")
             return "no-user gate -> auto sleep"
         return None
@@ -341,7 +444,9 @@ def silence_action(cfg: dict, silent_min: float, *, allow_tuck: bool = True) -> 
         # re-check awake + epoch + no-live-wait + tuck_pending-still-absent under
         # the strict lock and stamp tuck_pending in the same section (fixes the
         # TOCTOU at the old :214-219). Only a committed stamp appends the line.
-        line = _build_tuck_in_line(cfg, silent_min) if allow_tuck else ""
+        line, pending_ts = ("", None)
+        if allow_tuck:
+            line, pending_ts = _build_tuck_in_line(cfg, silent_min)
         try:
             committed = wake_state.conditional_mutate(
                 cfg, token0, _stamp_tuck_pending())
@@ -351,6 +456,7 @@ def silence_action(cfg: dict, silent_min: float, *, allow_tuck: bool = True) -> 
             return None  # awake cleared / wait live / already stamped
         if allow_tuck:
             _write_tuck_in_line(cfg, line)
+            _advance_note_baseline(cfg, pending_ts)  # FIX 6: only after commit+write
         return "tuck-in appended"
     # Marker already sent; wait out the grace window (measured from the marker).
     try:

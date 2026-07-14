@@ -368,6 +368,23 @@ def user_replied_this_wake(cfg: dict) -> bool:
     return bool(load(cfg).get("user_replied_this_wake"))
 
 
+def awake_since_min(cfg: dict) -> float | None:
+    """Minutes elapsed since this wake began (awake_since), or None when not
+    awake / unparseable. The no-user silence tier times from HERE (elapsed since
+    wake), not from a user-message ts that may never exist on a fresh wake where
+    the user never spoke."""
+    raw = load(cfg).get("awake_since")
+    if not raw:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - dt).total_seconds() / 60.0
+
+
 def commit_wait(cfg: dict, until_iso: str, cap: int) -> dict:
     """Accept one wait() as a single atomic strict-locked mutation: verify the
     session is still awake and under cap, BUMP gen (an accepted wait is a new

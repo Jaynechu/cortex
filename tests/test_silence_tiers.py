@@ -52,15 +52,32 @@ def _signal_lines(cfg):
 
 def test_no_user_short_gate_auto_sleeps(awake_no_sentinel):
     cfg = awake_no_sentinel
-    # no user reply this wake, silent past no_user_gate_min (5) -> auto sleep
-    action = watchdog.silence_action(cfg, silent_min=6.0)
+    # No user reply this wake; the no-user tier times from awake_since (FIX 1),
+    # not silent_min. Backdate the wake past no_user_gate_min (5) -> auto sleep.
+    past = (datetime.now(timezone.utc) - timedelta(minutes=6)).isoformat()
+    wake_state.update(cfg, awake_since=past)
+    action = watchdog.silence_action(cfg, silent_min=0.0)
     assert action and "auto sleep" in action
     assert wake_state.is_awake(cfg) is False
     assert _signal_lines(cfg) == []  # no marker on the no-user path
 
 
+def test_no_user_gate_elapses_on_fresh_wake_with_zero_silent_min(awake_no_sentinel):
+    """FIX 1 regression: a fresh wake where the user NEVER speaks has no user
+    message ts -> user_silent_min() is None -> silent_min=0.0. The old gate timed
+    from that 0.0 and never elapsed (safety net dead). Now it times from
+    awake_since, so an elapsed-but-never-spoken wake still auto-sleeps."""
+    cfg = awake_no_sentinel
+    past = (datetime.now(timezone.utc) - timedelta(minutes=7)).isoformat()
+    wake_state.update(cfg, awake_since=past)  # user_replied_this_wake stays False
+    action = watchdog.silence_action(cfg, silent_min=0.0)  # no user turn -> 0.0
+    assert action and "auto sleep" in action
+    assert wake_state.is_awake(cfg) is False
+
+
 def test_no_user_under_gate_holds(awake_no_sentinel):
     cfg = awake_no_sentinel
+    # awake_since is ~now (set_awake) -> elapsed < no_user_gate_min -> hold.
     assert watchdog.silence_action(cfg, silent_min=3.0) is None
     assert wake_state.is_awake(cfg) is True
 
@@ -190,7 +207,7 @@ def test_wait_expiry_fires_once_then_falls_through(awake_no_sentinel):
 def test_free_round_template_substitutes_mins_and_user(cfg):
     """{mins} = real minutes since the user's last message; {user} = marrow
     user_name (fallback "the user" when marrow config absent). No {n}/{cap}."""
-    line = watchdog._build_tuck_in_line(cfg, mins=17.0)
+    line, _pending = watchdog._build_tuck_in_line(cfg, mins=17.0)
     assert "17 min" in line
     assert "the user" in line  # no marrow config -> fallback
     assert "{n}" not in line and "{cap}" not in line and "{mins}" not in line
@@ -200,7 +217,7 @@ def test_free_round_template_reads_marrow_user_name(cfg, tmp_path):
     """{user} resolves from marrow's config.toml (sibling of the db path)."""
     (tmp_path / "config.toml").write_text('user_name = "Nim"\n')
     cfg["paths"]["marrow_db"] = str(tmp_path / "marrow.db")
-    line = watchdog._build_tuck_in_line(cfg, mins=17.0)
+    line, _pending = watchdog._build_tuck_in_line(cfg, mins=17.0)
     assert "Nim" in line and "the user" not in line
 
 
@@ -302,11 +319,39 @@ def test_two_consecutive_injections_second_diffs_against_first(awake_no_sentinel
     assert "round one message" not in text2_only
 
 
+def test_stale_epoch_wait_expiry_does_not_advance_baseline(awake_no_sentinel, monkeypatch):
+    """FIX 6: the diff baseline (last_note_ts) must advance ONLY after the tuck-in
+    commit + write succeed. If conditional_mutate raises (user returned = stale
+    epoch) the injection is dropped, so its replay events must stay replayable
+    next round — last_note_ts unchanged, nothing written to wake_signal.log."""
+    cfg = awake_no_sentinel
+    wake_state.update(cfg, user_replied_this_wake=True, wait_count=1)
+    conn = db.connect(cfg)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "session_id TEXT, timestamp TEXT, role TEXT, content TEXT, channel TEXT)")
+    conn.execute(
+        "INSERT INTO events (session_id, timestamp, role, content, channel) "
+        "VALUES ('s', '2026-07-08T03:00:00+00:00', 'user', 'unseen event', 'wx')")
+    conn.commit()
+    conn.close()
+    before = wake_state.get_last_note_ts(cfg)  # None (no note rendered yet)
+    past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    wake_state.set_wait_until(cfg, past)
+    # Simulate a user return between render and commit: conditional_mutate raises.
+    def _stale(*a, **k):
+        raise wake_state.StateValidationError("epoch token stale")
+    monkeypatch.setattr(wake_state, "conditional_mutate", _stale)
+    assert watchdog.silence_action(cfg, silent_min=0.0) is None  # dropped
+    assert _signal_lines(cfg) == []  # nothing injected
+    assert wake_state.get_last_note_ts(cfg) == before  # baseline NOT advanced
+
+
 def test_free_round_note_precedes_choice_marker(cfg):
     """Acceptance (intel before choice): the rendered note (a `Now:` line) comes
     ABOVE the [NEW ROUND] 3-choice marker, and the marker is the LAST line of the
     block so the ear's is_machine_line still matches the single-write chunk."""
-    line = watchdog._build_tuck_in_line(cfg, mins=17.0)
+    line, _pending = watchdog._build_tuck_in_line(cfg, mins=17.0)
     assert "Now:" in line and "[NEW ROUND]" in line
     assert line.index("Now:") < line.index("[NEW ROUND]")  # intel first
     # Marker on the final non-empty line -> single-write block stays machine-tagged.
