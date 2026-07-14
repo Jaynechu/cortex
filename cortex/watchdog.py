@@ -67,8 +67,8 @@ def _verify_esc_or_hard_interrupt(cfg: dict, grace_sec: float, trigger: str) -> 
 
 
 _DEFAULT_FUSE_PROMPT = (
-    "Summarise this whole session into one section and append it to handoff.md "
-    "— follow the format and style of the preceding sections. Call "
+    "⚙️ [FUSE] Summarise this whole session into one section and append it to "
+    "handoff.md — follow the format and style of the preceding sections. Call "
     "lie_down(rotate=True) when done."
 )
 

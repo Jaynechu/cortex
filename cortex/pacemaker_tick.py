@@ -37,6 +37,16 @@ def _night_close(cfg: dict, now, st: dict) -> str | None:
         # current turn). Marking non-resumable waits until it actually lies down.
         if st.get("night_wrap_key") == key:
             return None
+        # Presence gate (D9): NIGHT is non-urgent. If the user messaged within the
+        # last silent_max_min, hold WITHOUT consuming night_wrap_key so a later
+        # tick still delivers it once the conversation goes quiet (a few minutes
+        # late is harmless). user_silent_min counts only real user turns; None =
+        # unknown -> proceed (don't block on a missing signal).
+        wcfg = cfg.get("wake", {}).get("watchdog", {}) or {}
+        silent_max = float(wcfg.get("silent_max_min", 15))
+        silent_min = transcript.user_silent_min(cfg)
+        if silent_min is not None and silent_min < silent_max:
+            return f"night close: user present ({silent_min:.0f}min) -> hold"
         prompt = ncfg.get("close_prompt") or ""
         wake_state.update(cfg, night_wrap_key=key)
         if prompt and window.inject_prompt(cfg, prompt):

@@ -47,6 +47,30 @@ enabled = true
     assert cfg["knowledgec"]["categories"]["default"] == "uncategorized"
 
 
+def test_every_injected_prompt_carries_a_machine_marker(tmp_path):
+    """Phase 3 D8: every watcher/system text injected into the cortex window (so
+    it lands as a user-role turn) must begin with a recognised machine marker,
+    else recall/tl read it as user speech. Grep-level guard over all prompt
+    defaults + the fuse constant."""
+    from cortex import transcript
+    from cortex.watchdog import _DEFAULT_FUSE_PROMPT
+
+    cfg = config.load(tmp_path / "none.toml")
+    markers = transcript._line_markers(cfg)  # [CORTEX-WAKE] + machine_line_markers
+
+    def marked(text: str) -> bool:
+        return any(m in text for m in markers)
+
+    wake = cfg["wake"]
+    assert marked(wake["tuck_in_text"])
+    assert marked(wake["ctl_sleep_prompt"])
+    assert marked(cfg["gates"]["night"]["close_prompt"])
+    assert marked(_DEFAULT_FUSE_PROMPT)
+    # the family covers the new fuse / ctl / command markers
+    for needle in ("[FUSE]", "[CTL]", "[CMD"):
+        assert needle in markers
+
+
 def test_path_helpers_default_when_empty():
     cfg = config.load(Path("/does/not/exist.toml"))
     assert config.marrow_db_path(cfg) == config.DEFAULT_MARROW_DB

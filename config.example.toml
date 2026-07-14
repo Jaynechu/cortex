@@ -103,9 +103,10 @@ sentinel = true             # arm cortex.sentinel (one-shot exact-time wake) at 
 # expiry. {mins} = real minutes since the user's last message; {user} = marrow
 # user_name (fallback "the user"). No-user tier gets no marker.
 tuck_in_text = "⏳ [NEW ROUND] {mins} min since {user}'s last message. Choose again: 1) play around (playbook); 2) wait(N) (16-55min); 3) lie_down(next_wake_min=N) (90-360min). Feel free to do anything. No need to wait for reply - {user} will wake you the moment she's back."
-# Line-start markers identifying a NON-user turn down the ear channel (so they
-# don't reset the silence timer). wake_signal_marker is added automatically.
-machine_line_markers = ["[TUCK-IN]", "[NEW ROUND]", "[NIGHT]"]
+# Markers identifying a NON-user turn (so they don't reset the silence timer and
+# downstream memory drops them). wake_signal_marker is added automatically.
+# Substring match: "[CMD" catches every ⚙️ [CMD ct-*] slash-command body.
+machine_line_markers = ["[TUCK-IN]", "[NEW ROUND]", "[NIGHT]", "[FUSE]", "[CTL]", "[CMD"]
 wait_expiry_note = true      # every free-round tuck-in (silence-gate or wait(N)-expiry) appends a freshly rendered wakeup note (diff mode: only events since the last rendered note this wake)
 
 # Per-wake watchdog thresholds (spawned at injection, killed at lie_down).
@@ -176,7 +177,7 @@ cap = 0
 # resident window when the night window opens: it writes its handoff and lies
 # down. Once down, the session is marked non-resumable so the first post-night
 # wake is a plain fresh spawn that reads the handoff via SessionStart.
-close_prompt = "Night window is open. Write your handoff entry now, then call lie_down to end this wake."
+close_prompt = "⏳ [NIGHT] Night window is open — one full sleep now. Write your handoff entry, then lie_down to end this wake."
 # Daily wake-token budget: once today's SUM(NET spend — cache-miss rewrite +
 # output, ct_wake_log.net_tokens with a tokens fallback) reaches tokens,
 # self-wakes stop; resets naturally at local midnight.

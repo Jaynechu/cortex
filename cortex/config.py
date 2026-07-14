@@ -87,10 +87,12 @@ _DEFAULTS: dict[str, Any] = {
             "1) play around (playbook); 2) wait(N) (16-55min); "
             "3) lie_down(next_wake_min=N) (90-360min). Feel free to do anything. "
             "No need to wait for reply - {user} will wake you the moment she's back.",
-        # Line-start markers that identify a NON-user turn (wake bell / free-round
-        # / night line) arriving down the ear channel, so they never reset the
-        # silence timer. wake_signal_marker is added automatically.
-        "machine_line_markers": ["[TUCK-IN]", "[NEW ROUND]", "[NIGHT]"],
+        # Markers that identify a NON-user turn (wake bell / free-round / night /
+        # fuse / ctl / slash-command line), so they never reset the silence timer
+        # and downstream memory drops them. wake_signal_marker is added
+        # automatically. Substring match, so "[CMD" catches every ⚙️ [CMD ct-*].
+        "machine_line_markers": ["[TUCK-IN]", "[NEW ROUND]", "[NIGHT]",
+                                 "[FUSE]", "[CTL]", "[CMD"],
         # When a declared wait(N) expires, append a freshly rendered wakeup note
         # to the free-round marker (note content only, no behavioural nudge).
         "wait_expiry_note": True,
@@ -98,7 +100,8 @@ _DEFAULTS: dict[str, Any] = {
         # {mins} = next_wake_min; {rotate} = "write your handoff then " when
         # --rotate, else ""; {rotate_arg} = ", rotate=true" when --rotate, else "".
         "ctl_sleep_prompt":
-            "Wrap up this turn: {rotate}lie_down(next_wake_min={mins}{rotate_arg}).",
+            "⚙️ [CTL] Wrap up this turn: "
+            "{rotate}lie_down(next_wake_min={mins}{rotate_arg}).",
     },
     # marrow repo invocation for the wake call (separate venv/deps, C3).
     "marrow": {
