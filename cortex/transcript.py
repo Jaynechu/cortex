@@ -115,6 +115,30 @@ def mtime(cfg: dict) -> float | None:
 _TAIL_BYTES = 65536
 
 
+# Leading decoration tolerated before a machine marker: whitespace + at most a
+# couple of decoration glyphs (⏳U+23F3 ☀️U+2600 ⚙️U+2699), VS16, ZWJ. Narrowed
+# to real decoration ranges — deliberately EXCLUDES CJK/kana/hangul so a Chinese
+# user message quoting a marker keeps its lead char and still resets the timer.
+_MARKER_LEAD_RE = re.compile(
+    r"^\s*(?:[\U00002300-\U000027BF\U00002B00-\U00002BFF"
+    r"\U0001F300-\U0001FAFF\U0000FE0F\U0000200D]\s*){0,3}")
+
+
+def _line_starts_with_marker(text: str, markers: list[str]) -> bool:
+    """True iff ANY line of *text* begins with a machine marker after a tolerated
+    leading decoration run. Machine writes (wake bell '<emoji> [CORTEX-WAKE] …',
+    tuck-in block whose final line is '⏳ [NEW ROUND] …') always line-start their
+    marker; a real user message merely quoting one mid-sentence never matches, so
+    it still resets the silence timer (zero false positives on real speech)."""
+    if not markers:
+        return False
+    for line in text.splitlines() or [text]:
+        head = _MARKER_LEAD_RE.sub("", line, count=1)
+        if any(head.startswith(mk) for mk in markers):
+            return True
+    return False
+
+
 def _line_markers(cfg: dict) -> list[str]:
     """Machine-line markers that identify a NON-user turn arriving down the ear
     channel (wake bell, tuck-in / free-round injection). A transcript entry whose
@@ -191,7 +215,7 @@ def last_user_message_mtime(cfg: dict) -> float | None:
         text = _user_text(o.get("message"))
         if text is None:
             continue  # not a user turn
-        if any(mk in text for mk in markers):
+        if _line_starts_with_marker(text, markers):
             continue  # machine line down the ear channel, not a real user turn
         ts = _entry_ts(o)
         if ts is not None and (latest is None or ts > latest):

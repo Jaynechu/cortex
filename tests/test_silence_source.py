@@ -85,6 +85,30 @@ def test_tuck_in_marker_line_does_not_reset(cfg):
     assert 17.0 < transcript.user_silent_min(cfg) < 19.0
 
 
+# --- real user speech quoting a marker MUST still reset the timer -------------
+
+def test_marker_quoted_mid_sentence_resets(cfg):
+    """Line-start match only: a real user message merely quoting a marker
+    mid-sentence is user activity and resets the silence timer. Previously the
+    substring check (`mk in text`) dropped it -> silence wrongly stayed high."""
+    _write(cfg, [
+        _user("q", 20),
+        _user("did the [NEW ROUND] path fire, or is [CORTEX-WAKE] stuck?", 1),
+    ])
+    assert 0.5 < transcript.user_silent_min(cfg) < 1.5  # reset by the real msg
+
+
+def test_cjk_lead_before_marker_resets(cfg):
+    """CJK/kana/hangul are outside the decoration class, so a Chinese message
+    opening with a real word then a marker line-starts on the CJK char (not the
+    bracket) -> real user activity -> resets the timer."""
+    _write(cfg, [
+        _user("q", 22),
+        _user("看 [FUSE] path fired?", 1),
+    ])
+    assert 0.5 < transcript.user_silent_min(cfg) < 1.5
+
+
 def test_content_block_form_user_message(cfg):
     # Content-block (list) form is concatenated to text and honoured.
     d = transcript.transcript_dir(cfg)
