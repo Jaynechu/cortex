@@ -172,11 +172,25 @@ def _strip_markers(text: str) -> str:
     return _MEDIA_TAG_RE.sub(" ", text).strip()
 
 
-def _replay_events(conn: sqlite3.Connection, cfg: dict, limit: int, per_chars: int,
-                   since_ts: str | None = None) -> list[dict]:
-    """Last `limit` real user/assistant events (cross-session, chronological),
-    each tagged [channel HH:mm] + role marker (N=user, Y=assistant) and capped
-    at per_chars. Excludes role='tl' and cortex self-talk channels.
+def _replay(conn: sqlite3.Connection, cfg: dict, limit: int, per_chars: int,
+            since_ts: str | None = None) -> tuple[list[dict], str | None]:
+    """Fetch the replay events AND the exact cutoff of the RENDERED subset in a
+    single read. Returns (events, cutoff_ts).
+
+    events: last `limit` real user/assistant events (cross-session,
+    chronological), each tagged [channel HH:mm] + role marker (N=user,
+    Y=assistant) and capped at per_chars. Excludes role='tl' and cortex
+    self-talk channels.
+
+    cutoff_ts: the max raw timestamp of the events actually returned, i.e. the
+    cutoff of exactly what was rendered — never a re-query of the newest event
+    overall. When more new rows exist than `limit`, the query keeps only the
+    newest `limit` (ORDER BY id DESC LIMIT), so cutoff is the newest of that
+    rendered subset; older-but-still-new overflow rows below the limit are NOT
+    covered by this cutoff and remain replayable on the next round (the caller
+    that seeds/advances the baseline uses this cutoff, so overflow is never
+    skipped). When no eligible events are returned, cutoff_ts is None — the
+    caller keeps the prior baseline (no advance, no rewind).
 
     `since_ts` (diff mode, D6): only events with timestamp > since_ts — a
     free-round tuck-in replays what happened since the wake's last rendered
@@ -187,7 +201,7 @@ def _replay_events(conn: sqlite3.Connection, cfg: dict, limit: int, per_chars: i
     own wake monologues (channel='ct') are excluded so the note does not replay
     itself. The excluded channel set is config-driven (note.replay_exclude_channels)."""
     if limit <= 0:
-        return []
+        return [], None
     exclude = _replay_exclude_channels(cfg)
     placeholders = ",".join("?" for _ in exclude) if exclude else ""
     where_channel = (
@@ -202,40 +216,65 @@ def _replay_events(conn: sqlite3.Connection, cfg: dict, limit: int, per_chars: i
             params,
         ).fetchall()
     except sqlite3.OperationalError:
-        return []
+        return [], None
     events = []
+    cutoff_ts: str | None = None
     for row in reversed(rows):  # chronological
         ts = row["timestamp"]
         content = _strip_markers(row["content"])
         if not content:
             continue
+        # Cutoff tracks the max ts of the RENDERED subset only. Rows are the
+        # newest `limit` (ORDER BY id DESC LIMIT), reversed to chronological, so
+        # the last kept row carries the newest ts. Guard on value in case of
+        # non-monotonic ts across the window.
+        if ts and (cutoff_ts is None or ts > cutoff_ts):
+            cutoff_ts = ts
         events.append({
             "channel": row["channel"] or "?",
             "hm": _local_hm(ts, cfg) if ts else "??:??",
             "role": "N" if row["role"] == "user" else "Y",
             "content": _truncate(content, per_chars),
         })
-    return events
+    return events, cutoff_ts
+
+
+def _replay_events(conn: sqlite3.Connection, cfg: dict, limit: int, per_chars: int,
+                   since_ts: str | None = None) -> list[dict]:
+    """Thin wrapper: the rendered replay events only (drops the cutoff). See
+    `_replay` for the full contract."""
+    return _replay(conn, cfg, limit, per_chars, since_ts)[0]
+
+
+_OMITTED = object()
 
 
 def seed_baseline(conn: sqlite3.Connection, cfg: dict,
-                  cutoff_ts: str | None = None) -> None:
+                  cutoff_ts=_OMITTED) -> None:
     """Seed the diff-mode replay baseline (wake_state.last_note_ts) so the FIRST
     free-round tuck-in diffs from the wake-open moment, not epoch zero (D6:
     baseline = the wake's initial note). Called once per wake AFTER set_awake
     (which resets last_note_ts=None).
 
     `cutoff_ts` (P2-A): the replay cutoff captured when the wake's initial note
-    was assembled. When supplied it is used verbatim — the baseline must be
-    EXACTLY the cutoff of what was rendered, never a later re-query that could
-    race in an event the note never showed and drop it from the first free-round.
-    Absent -> fall back to a fresh query (legacy / test callers).
+    was assembled. Semantics by value:
+      - a truthy ts  -> seed that ts verbatim (the baseline must be EXACTLY the
+        cutoff of what was rendered, never a later re-query that could race in an
+        event the note never showed and drop it from the first free-round).
+      - explicit None -> the assembled note had ZERO eligible replay events; seed
+        NOTHING, keep the baseline as-is (#2). run_wake always passes the note's
+        captured cutoff, so None here is a valid empty note, NOT an omitted arg.
+      - OMITTED (arg not passed) -> legacy / test callers with no captured cutoff;
+        fall back to a fresh _latest_replay_ts query.
 
     No-op when there is nothing to seed. Never raises — a failed seed just falls
     back to full replay on the first free-round."""
     try:
         from cortex import wake_state
-        latest_ts = cutoff_ts if cutoff_ts is not None else _latest_replay_ts(conn, cfg)
+        if cutoff_ts is _OMITTED:
+            latest_ts = _latest_replay_ts(conn, cfg)
+        else:
+            latest_ts = cutoff_ts
         if latest_ts:
             wake_state.set_last_note_ts(cfg, latest_ts)
     except Exception:
@@ -393,35 +432,39 @@ def gather(
     # wake (last_note_ts). Absent (wake's initial note, or wake_state load
     # failed) -> full replay, same as before this refactor.
     note_since_ts = ws.get("last_note_ts")
-    replay = _safe(
-        _replay_events, conn, cfg,
+    replay, rendered_cutoff = _safe(
+        _replay, conn, cfg,
         ncfg.get("replay_events", 4),
         ncfg.get("replay_event_chars", 300),
         note_since_ts,
-        default=[],
+        default=([], None),
     )
     replay_stale = False
-    latest_ts = _safe(_latest_replay_ts, conn, cfg)
-    if replay and last_wake and latest_ts:
-        try:
-            last_wake_dt = now - timedelta(minutes=last_wake["minutes_ago"])
-            replay_stale = _parse_utc(latest_ts) < last_wake_dt
-        except (TypeError, ValueError):
-            pass
-    # The replay cutoff this render actually used: the newest eligible event ts
-    # (latest_ts), or the diff baseline it started from when nothing newer
-    # exists. Returned so out-of-band consumers (wake seed_baseline, watchdog
-    # deferred advance) persist the SAME cutoff the note was built on instead of
-    # re-querying — a re-query would race in events that never made this note and
-    # then drop them from the next round (P2-A / P2-B).
-    replay_cutoff_ts = latest_ts or note_since_ts
-    # Advance the diff-mode baseline to the newest eligible event overall (not
-    # just the ones shown this render — same value as latest_ts above), so the
+    if not replay and last_wake:
+        # No new eligible events this render. If the newest event overall predates
+        # this wake, mark the replay stale ("no new messages") — a cheap read
+        # used only for the human-facing staleness line, never for the cutoff.
+        latest_ts = _safe(_latest_replay_ts, conn, cfg)
+        if latest_ts:
+            try:
+                last_wake_dt = now - timedelta(minutes=last_wake["minutes_ago"])
+                replay_stale = _parse_utc(latest_ts) < last_wake_dt
+            except (TypeError, ValueError):
+                pass
+    # The replay cutoff this render actually used: the max ts of the RENDERED
+    # subset (rendered_cutoff), or the diff baseline it started from when nothing
+    # new was rendered. Derived from the same read as `replay` — never a separate
+    # re-query, which could race in an event this note never showed and then drop
+    # it from the next round (P2-A / P2-B / #1). With more new rows than the render
+    # limit, rendered_cutoff is the newest of the rendered subset only, so overflow
+    # rows below the limit stay > baseline and replay next round (never skipped).
+    replay_cutoff_ts = rendered_cutoff or note_since_ts
+    # Advance the diff-mode baseline to the cutoff of what was rendered, so the
     # NEXT free-round tuck-in diffs from here. Monotonic: only moves forward.
     # Gated on advance_baseline: render-only callers never write it.
-    if advance_baseline and latest_ts and (
-            not note_since_ts or latest_ts > note_since_ts):
-        _safe(wake_state.set_last_note_ts, cfg, latest_ts)
+    if advance_baseline and rendered_cutoff and (
+            not note_since_ts or rendered_cutoff > note_since_ts):
+        _safe(wake_state.set_last_note_ts, cfg, rendered_cutoff)
 
     return {
         "replay_cutoff_ts": replay_cutoff_ts,

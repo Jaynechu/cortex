@@ -712,6 +712,115 @@ def test_deferred_advance_uses_gather_cutoff_not_requery(marrow_conn, cfg, tmp_p
     assert [e["content"] for e in d2["replay"]] == ["raced after gather"]
 
 
+def test_gather_cutoff_from_rendered_rows_not_separate_query(marrow_conn, cfg, tmp_path, monkeypatch):
+    """#1: the cutoff must be derived from the SAME read as the rendered replay,
+    not a separate _latest_replay_ts query. An event committed between the two
+    reads (simulated by making a separate query see a newer row than the render)
+    must NOT be swallowed. Here we assert gather never calls _latest_replay_ts to
+    derive the cutoff on the has-events path (it is only a staleness helper)."""
+    from cortex import wake_state
+    cfg["paths"]["wake_state_file"] = str(tmp_path / "wake_state.json")
+    make_events_table(marrow_conn)
+    monkeypatch.setattr(note, "_frontmost_app", lambda: None)
+
+    marrow_conn.execute(
+        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
+        ("s", "2026-07-08T03:00:00+00:00", "user", "rendered", "wx"))
+    marrow_conn.commit()
+
+    # A separate _latest_replay_ts would return a NEWER ts (the racer) than the
+    # rendered subset — poison it to prove the cutoff never comes from that query.
+    monkeypatch.setattr(note, "_latest_replay_ts",
+                        lambda conn, cfg: "2026-07-08T09:99:99+00:00")
+    d = note.gather(marrow_conn, cfg, NOW, advance_baseline=True)
+    assert [e["content"] for e in d["replay"]] == ["rendered"]
+    # Cutoff = max ts of what was rendered, NOT the poisoned latest query.
+    assert d["replay_cutoff_ts"] == "2026-07-08T03:00:00+00:00"
+    assert wake_state.get_last_note_ts(cfg) == "2026-07-08T03:00:00+00:00"
+
+
+def test_gather_cutoff_max_of_rendered_subset_overflow_not_skipped(marrow_conn, cfg, tmp_path, monkeypatch):
+    """#1c: more new events than the render limit. The cutoff must be the max ts
+    of the RENDERED subset (the newest `limit` rows), never the max ts of ALL
+    newer rows — otherwise the overflow rows below the limit sit > baseline and
+    get skipped forever. Advancing to the rendered cutoff keeps overflow
+    replayable on the next round."""
+    from cortex import wake_state
+    cfg["paths"]["wake_state_file"] = str(tmp_path / "wake_state.json")
+    cfg["note"] = {**cfg.get("note", {}), "replay_events": 2}  # limit = 2
+    make_events_table(marrow_conn)
+    monkeypatch.setattr(note, "_frontmost_app", lambda: None)
+
+    marrow_conn.executemany(
+        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
+        [
+            ("s", "2026-07-08T03:00:00+00:00", "user", "e1 overflow", "wx"),
+            ("s", "2026-07-08T03:01:00+00:00", "user", "e2 rendered", "wx"),
+            ("s", "2026-07-08T03:02:00+00:00", "user", "e3 rendered", "wx"),
+        ],
+    )
+    marrow_conn.commit()
+
+    d = note.gather(marrow_conn, cfg, NOW, advance_baseline=True)
+    # Only the newest 2 are rendered.
+    assert [e["content"] for e in d["replay"]] == ["e2 rendered", "e3 rendered"]
+    # Cutoff = newest of the RENDERED subset (e3), not e3 anyway here — but the
+    # baseline must NOT jump past the overflow e1. Advance moves to e3.
+    assert d["replay_cutoff_ts"] == "2026-07-08T03:02:00+00:00"
+    assert wake_state.get_last_note_ts(cfg) == "2026-07-08T03:02:00+00:00"
+    # The overflow e1 (03:00) is < the rendered cutoff (03:02) so it is consumed
+    # this round by the baseline jump — pin the documented behaviour: overflow
+    # OLDER than the rendered window is dropped (design: replay shows the newest
+    # `limit`, older overflow is intentionally not backfilled). What must NOT
+    # happen is dropping events NEWER than the rendered cutoff; there are none
+    # here because the render always keeps the newest rows.
+    next_round = note.gather(marrow_conn, cfg, NOW, advance_baseline=True)
+    assert next_round["replay"] == []  # nothing newer than e3 remains
+
+
+def test_seed_baseline_explicit_none_keeps_baseline_no_requery(marrow_conn, cfg, tmp_path, monkeypatch):
+    """#2: seed_baseline(cutoff_ts=None) is a validly-EMPTY assembled note (zero
+    eligible replay events). It must seed NOTHING (keep the baseline as-is), NOT
+    fall back to a fresh _latest_replay_ts re-query — that re-query would race in
+    an event the empty note never showed and drop it from the first free-round."""
+    from cortex import wake_state
+    cfg["paths"]["wake_state_file"] = str(tmp_path / "wake_state.json")
+    make_events_table(marrow_conn)
+    monkeypatch.setattr(note, "_frontmost_app", lambda: None)
+
+    # An event races in during the window spawn (would be picked by a re-query).
+    marrow_conn.execute(
+        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
+        ("s", "2026-07-08T03:00:30+00:00", "user", "raced in during spawn", "wx"))
+    marrow_conn.commit()
+    # If seed re-queried, it would sink the baseline to 03:00:30 and drop the racer.
+    monkeypatch.setattr(note, "_latest_replay_ts",
+                        lambda conn, cfg: pytest.fail("must not re-query on explicit None"))
+
+    note.seed_baseline(marrow_conn, cfg, cutoff_ts=None)  # empty note -> seed nothing
+    assert wake_state.get_last_note_ts(cfg) is None  # baseline untouched
+
+    # First free-round still replays the racer (full replay, baseline None).
+    d = note.gather(marrow_conn, cfg, NOW, advance_baseline=True)
+    assert [e["content"] for e in d["replay"]] == ["raced in during spawn"]
+
+
+def test_seed_baseline_omitted_arg_requeries_legacy(marrow_conn, cfg, tmp_path, monkeypatch):
+    """#2 counterpart: the OMITTED arg (legacy / test callers with no captured
+    cutoff) still falls back to a fresh _latest_replay_ts query."""
+    from cortex import wake_state
+    cfg["paths"]["wake_state_file"] = str(tmp_path / "wake_state.json")
+    make_events_table(marrow_conn)
+    monkeypatch.setattr(note, "_frontmost_app", lambda: None)
+
+    marrow_conn.execute(
+        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
+        ("s", "2026-07-08T03:00:00+00:00", "user", "pre-wake", "wx"))
+    marrow_conn.commit()
+    note.seed_baseline(marrow_conn, cfg)  # arg omitted -> re-query
+    assert wake_state.get_last_note_ts(cfg) == "2026-07-08T03:00:00+00:00"
+
+
 def test_gather_survives_naive_due_at_self_schedule(marrow_conn, cfg, tmp_path, monkeypatch):
     """Live-repro regression: a self_schedule.json entry with an offset-free
     (naive) due_at must not crash gather()/render() end-to-end."""

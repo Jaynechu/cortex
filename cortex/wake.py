@@ -53,6 +53,13 @@ class WakeError(Exception):
     pass
 
 
+# Sentinel: the dead-path did NOT replace the note (so the caller keeps the
+# first note's captured cutoff for seeding). Distinct from None, which is a
+# valid delivered-note cutoff (the replacement catch-up note had zero eligible
+# replay events).
+_OMITTED_CUTOFF = object()
+
+
 def _now(cfg: dict) -> datetime:
     return datetime.now(ZoneInfo(cfg["core"]["timezone"]))
 
@@ -428,10 +435,20 @@ def _resume_or_fresh_dead(conn, cfg, now, why: str) -> dict | None:
         return _spawn_wake(conn, cfg, now, resume=True)
 
     _audit_wake(conn, wake_id_of(now), f"{why}, no sid -> fresh")
+    delivered_cutoff = _OMITTED_CUTOFF
     if not _handoff_written_this_window(cfg):
-        catchup_note = assemble_note(conn, cfg, now, died_no_handoff=True)
+        # A second note is assembled and DELIVERED here (replacing the first note
+        # written before _window_wake was entered). Seeding must anchor to THIS
+        # note's cutoff, not the first's — else an event arriving between the two
+        # assemblies is shown here yet stays > the first-note baseline and gets
+        # duplicated in the first free-round (#3). Propagate the delivered cutoff.
+        catchup_note, delivered_cutoff = assemble_note(
+            conn, cfg, now, died_no_handoff=True, return_cutoff=True)
         window.write_note(cfg, catchup_note)
-    return _spawn_wake(conn, cfg, now, resume=False)
+    result = _spawn_wake(conn, cfg, now, resume=False)
+    if result is not None and delivered_cutoff is not _OMITTED_CUTOFF:
+        result["note_cutoff"] = delivered_cutoff
+    return result
 
 
 def _handoff_written_this_window(cfg) -> bool:
@@ -535,11 +552,18 @@ def run_wake(
         win = _window_wake(conn, cfg, window_text, now, respawn=(plan == "fresh"))
         if win is not None:
             # D6 seed: set_awake (inside _window_wake) just reset last_note_ts to
-            # None. Anchor the diff-mode baseline to the cutoff captured when this
-            # exact note was assembled (P2-A) — not a fresh query after the ~90s
-            # window spawn, which would race in an event absent from the note and
-            # drop it from the first free-round.
-            note.seed_baseline(conn, cfg, cutoff_ts=window_cutoff)
+            # None. Anchor the diff-mode baseline to the cutoff captured when the
+            # DELIVERED note was assembled (P2-A) — not a fresh query after the
+            # ~90s window spawn, which would race in an event absent from the note
+            # and drop it from the first free-round.
+            #
+            # The dead-window path may REPLACE the first note with a second
+            # died_no_handoff catch-up note; when it does it reports that note's
+            # cutoff via win["note_cutoff"] (may be None = empty replay). Seed from
+            # the delivered note's cutoff so an event arriving between the two
+            # assemblies is not duplicated in the first free-round (#3).
+            seed_cutoff = win["note_cutoff"] if "note_cutoff" in win else window_cutoff
+            note.seed_baseline(conn, cfg, cutoff_ts=seed_cutoff)
             timer.mark("window_injected")
             timer.mark("wake_complete")
             return win

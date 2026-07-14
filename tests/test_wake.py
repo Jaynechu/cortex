@@ -372,6 +372,74 @@ def test_resume_or_fresh_dead_retired_sid_forces_fresh(monkeypatch, marrow_conn,
     assert captured["resume"] is False  # never resumes a retired session
 
 
+def test_resume_or_fresh_dead_seeds_from_delivered_catchup_cutoff(
+        monkeypatch, marrow_conn, rot_cfg):
+    """#3: the dead-no-handoff branch REPLACES the first note with a second
+    died_no_handoff catch-up note before spawning. Seeding must anchor to the
+    DELIVERED (catch-up) note's cutoff — propagated via win['note_cutoff'] — not
+    the first note's. An event arriving between the two assemblies is shown in
+    the delivered note yet, if seeded from the first note's older cutoff, would
+    stay > baseline and duplicate in the first free-round.
+
+    Here we prove the replacement note's cutoff is captured and returned. The
+    catch-up note is assembled inside _resume_or_fresh_dead; its cutoff reflects
+    the racer event present at that assembly, and that exact cutoff rides back on
+    the result dict for run_wake's seed_baseline call."""
+    from cortex import transcript, wake_state, window
+    # Rebuild events with a channel column (the autouse fixture omits it, which
+    # the replay query needs to see the racer event).
+    marrow_conn.execute("DROP TABLE events")
+    marrow_conn.execute(
+        "CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, "
+        "timestamp TEXT, role TEXT, content TEXT, channel TEXT)")
+    marrow_conn.commit()
+
+    # No resumable sid + no handoff -> the fresh-with-catchup branch.
+    monkeypatch.setattr(transcript, "newest_window_lineage", lambda cfg, marker: None)
+    monkeypatch.setattr(window, "claude_session_id", lambda cfg: None)
+    monkeypatch.setattr(wake, "_handoff_written_this_window", lambda cfg: False)
+    monkeypatch.setattr(window, "write_note", lambda cfg, text: None)
+    monkeypatch.setattr(wake, "_spawn_wake",
+                        lambda conn, cfg, now, resume=False: {"mode": "window"})
+    monkeypatch.setattr(wake.note, "_frontmost_app", lambda: None)
+
+    # Event that races in AFTER the first note but is present when the catch-up
+    # note is assembled inside _resume_or_fresh_dead.
+    marrow_conn.execute(
+        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
+        ("s", "2026-07-08T03:00:30+00:00", "user", "raced between assemblies", "wx"))
+    marrow_conn.commit()
+
+    result = wake._resume_or_fresh_dead(marrow_conn, rot_cfg, DAY1, "test")
+    # The delivered catch-up note's cutoff rides back for seeding.
+    assert result["note_cutoff"] == "2026-07-08T03:00:30+00:00"
+
+    # Seeding from the delivered cutoff: the racer is at the baseline, so it is
+    # NOT re-shown (not duplicated) in the first free-round.
+    wake_state.set_awake(rot_cfg, None, None)  # resets last_note_ts to None
+    wake.note.seed_baseline(marrow_conn, rot_cfg, cutoff_ts=result["note_cutoff"])
+    d = wake.note.gather(marrow_conn, rot_cfg, DAY1, advance_baseline=True)
+    assert d["replay"] == []  # racer already delivered -> not duplicated
+
+
+def test_resume_or_fresh_dead_no_note_replacement_keeps_first_cutoff(
+        monkeypatch, marrow_conn, rot_cfg):
+    """#3 counterpart: when the dead path does NOT replace the note (handoff was
+    written this window), no note_cutoff key is set, so run_wake keeps the first
+    note's captured cutoff."""
+    from cortex import transcript, window
+    monkeypatch.setattr(transcript, "newest_window_lineage", lambda cfg, marker: None)
+    monkeypatch.setattr(window, "claude_session_id", lambda cfg: None)
+    monkeypatch.setattr(wake, "_handoff_written_this_window", lambda cfg: True)
+    captured = {}
+    monkeypatch.setattr(wake, "_spawn_wake",
+                        lambda conn, cfg, now, resume=False:
+                        captured.update(spawned=True) or {"mode": "window"})
+    result = wake._resume_or_fresh_dead(marrow_conn, rot_cfg, DAY1, "test")
+    assert captured.get("spawned") is True
+    assert "note_cutoff" not in result  # no replacement -> caller keeps first cutoff
+
+
 def test_night_close_idle_rotate_records_retired_sid(monkeypatch, night_cfg):
     """_night_close's idle-resident rotate branch also records retired_sid,
     same as lie_down(rotate=True) — this is the exact path in the coordinator's
