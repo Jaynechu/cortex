@@ -300,6 +300,52 @@ def test_bind_wake_log_id_racing_scheduled_wake_cannot_adopt(cfg, monkeypatch):
     assert scheduled_wid != ear_wid
 
 
+def test_bind_wake_log_id_fails_fast_under_db_write_contention(cfg, monkeypatch):
+    """4th round (codex gate): the shared connection's busy_timeout is 30s
+    (db.connect_path). A DB INSERT/SELECT held under write contention while
+    inside the locked closure could hold _strict_flock for up to 30s, starving
+    competing set_awake/claim_lie_down (their own 5s deadline). Simulate real
+    contention with a SECOND connection holding an uncommitted write txn on
+    the same db file: the activation must still complete within ~1s, write no
+    row, and leave wake_log_id None -- accounting is best-effort, the state
+    machine never waits on the ledger."""
+    import sqlite3
+    import time
+    from cortex import wake, wake_state
+
+    conn = db.connect(cfg)
+    token = wake_state.current_epoch(cfg)  # still current -> the bind proceeds
+
+    # A second connection holds an uncommitted write transaction on the SAME
+    # db file, so any writer (and, under a rollback-journal, potentially a
+    # reader) on `conn` contends for the lock.
+    blocker = sqlite3.connect(cfg["paths"]["marrow_db"])
+    blocker.execute("BEGIN IMMEDIATE")
+    blocker.execute("INSERT INTO ct_wake_log (ts, wake, dry_run) VALUES ('x', 1, 0)")
+    try:
+        from datetime import datetime as _dt
+        started = time.monotonic()
+        wake._bind_wake_log_id(conn, cfg, _dt.now(timezone.utc), "user", token)
+        elapsed = time.monotonic() - started
+    finally:
+        blocker.rollback()
+        blocker.close()
+
+    assert elapsed < 2.0  # fails fast, nowhere near the connection's real 30s
+    assert wake_state.load(cfg).get("wake_log_id") is None  # skipped, not bound
+
+    # The blocker's own uncommitted insert was rolled back -> confirm no row
+    # from OUR side landed either, on a fresh read after the contention clears.
+    n = conn.execute("SELECT COUNT(*) AS n FROM ct_wake_log WHERE wake=1").fetchone()["n"]
+    # `conn`'s OWN busy_timeout was restored to its normal (pre-override) value
+    # -- the short window never leaks into any other caller sharing this
+    # connection.
+    restored = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+    conn.close()
+    assert n == 0
+    assert restored != wake._BIND_INSERT_BUSY_TIMEOUT_MS
+
+
 def test_bind_wake_log_id_lock_hiccup_leaves_real_row_intact(cfg, monkeypatch):
     """StateValidationError also covers lock timeout / unreadable state, not
     just a stale token (codex gate finding #2). Even on that failure mode, a

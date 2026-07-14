@@ -12,6 +12,7 @@ stays decoupled (Frame: "own project, sibling of marrow").
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import subprocess
@@ -214,6 +215,46 @@ def _wake_log_id(conn: sqlite3.Connection, now: datetime,
     return _latest_wake_log_id(conn)
 
 
+_BIND_INSERT_BUSY_TIMEOUT_MS = 500
+
+
+def _resolve_wake_log_id_fast_fail(conn: sqlite3.Connection, now: datetime,
+                                   wake_reasons: str | None) -> int | None:
+    """The full _wake_log_id sequence (insert-or-reuse), but with the shared
+    connection's busy_timeout temporarily dropped to ~500ms for BOTH the
+    INSERT and the reuse fallback SELECT (restored after, success or failure,
+    so every OTHER caller of the same `conn` keeps the normal 30s default).
+    Used ONLY inside _bind_wake_log_id's locked closure — every DB statement
+    there runs while _strict_flock is held, and the connection's real
+    busy_timeout is 30s (db.py connect_path); under write contention any one
+    of them could hold the lock up to 30s, starving competing
+    set_awake/claim_lie_down callers (5s deadline) into failing closed. Any
+    sqlite3.Error from either statement (including one raised by the short
+    timeout itself) is swallowed -> None, never propagated into
+    conditional_mutate's locked section. A contention miss here just means
+    "skip the row this wake" (best-effort, see _bind_wake_log_id) — never a
+    reason to hold the state lock longer."""
+    try:
+        prev_timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+    except sqlite3.Error:
+        prev_timeout = None
+    try:
+        conn.execute(f"PRAGMA busy_timeout={_BIND_INSERT_BUSY_TIMEOUT_MS}")
+        try:
+            wid = None
+            if wake_reasons:
+                wid = integration.log_activation_wake_row(conn, now, wake_reasons)
+            if wid is None:
+                wid = _latest_wake_log_id(conn)
+            return wid
+        except sqlite3.Error:
+            return None
+    finally:
+        if prev_timeout is not None:
+            with contextlib.suppress(sqlite3.Error):
+                conn.execute(f"PRAGMA busy_timeout={int(prev_timeout)}")
+
+
 def _bind_wake_log_id(conn: sqlite3.Connection, cfg: dict, now: datetime,
                       wake_reasons: str | None, token: tuple[int, str]) -> None:
     """Ear path only: insert/reuse this wake's ct_wake_log row AND bind it into
@@ -235,16 +276,22 @@ def _bind_wake_log_id(conn: sqlite3.Connection, cfg: dict, now: datetime,
     no adoption window, no tombstone. `_latest_wake_log_id`'s reuse fallback is
     additionally scoped to genuine pacemaker decision rows (explanation IS NOT
     NULL — only run_tick's write_wake_log sets it), so it can never adopt an
-    activation row from a different in-flight actor either way."""
+    activation row from a different in-flight actor either way.
+
+    4th round (codex gate): the shared connection's busy_timeout is 30s
+    (db.connect_path) — any DB statement here held under write contention could
+    hold THIS strict lock for up to 30s, starving competing
+    set_awake/claim_lie_down (their own 5s deadline) into silently dropping
+    real transitions. Every DB statement now runs with a ~500ms busy_timeout
+    override (_resolve_wake_log_id_fast_fail): on contention it fails fast,
+    the row is simply skipped (wake_log_id stays None on this wake —
+    best-effort accounting, same class of degradation as any other
+    log_activation_wake_row failure), and the state transition itself
+    completes normally. The state machine never waits on the ledger."""
     from cortex import wake_state
 
     def _insert_and_bind(d: dict) -> None:
-        wid = None
-        if wake_reasons:
-            wid = integration.log_activation_wake_row(conn, now, wake_reasons)
-        if wid is None:
-            wid = _latest_wake_log_id(conn)
-        d["wake_log_id"] = wid
+        d["wake_log_id"] = _resolve_wake_log_id_fast_fail(conn, now, wake_reasons)
 
     try:
         wake_state.conditional_mutate(cfg, token, _insert_and_bind)
