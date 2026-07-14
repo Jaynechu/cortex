@@ -51,6 +51,30 @@ def test_concurrent_bump_no_lost_update(cfg):
     assert wake_state.get_wait_count(cfg) == 4 * N
 
 
+def test_commit_wait_writes_audit_line(cfg):
+    """An accepted wait bumps gen (a new cancellation epoch) — it must leave a
+    commit_wait audit line (old->new gen) so the bump is visible in forensics,
+    mirroring lie_down_claim. A refused wait writes nothing."""
+    wake_state.set_awake(cfg, 1, None)  # awake, gen bumped, wait_count 0
+    gen_before = wake_state.current_epoch(cfg)[0]
+    res = wake_state.commit_wait(cfg, "2099-01-01T00:00:00+00:00", cap=0)
+    assert res["ok"] is True
+    lines = wake_state.config.wake_audit_log_path(cfg).read_text().splitlines()
+    commits = [ln for ln in lines if "\tcommit_wait\t" in ln]
+    assert len(commits) == 1
+    assert f"gen {gen_before}->{gen_before + 1}" in commits[0]
+
+
+def test_commit_wait_refused_writes_no_audit(cfg):
+    """A refused wait (not awake) does not bump gen -> no commit_wait audit line."""
+    wake_state.update(cfg, awake=None)  # not awake
+    res = wake_state.commit_wait(cfg, "2099-01-01T00:00:00+00:00", cap=0)
+    assert res["ok"] is False
+    p = wake_state.config.wake_audit_log_path(cfg)
+    lines = p.read_text().splitlines() if p.exists() else []
+    assert not any("\tcommit_wait\t" in ln for ln in lines)
+
+
 def test_sentinel_pid_self_guarded_clear(cfg):
     wake_state.set_sentinel_pid(cfg, 500)
     # Clearing with a mismatched pid is a no-op (a newer arm owns the record).

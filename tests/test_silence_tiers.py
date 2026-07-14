@@ -292,13 +292,26 @@ def test_two_consecutive_injections_second_diffs_against_first(awake_no_sentinel
     wake_state.commit_wait(cfg, past, cap=0)
     a2 = watchdog.silence_action(cfg, silent_min=0.0)
     assert a2 == "wait-expiry free-round appended"
-    lines = _signal_lines(cfg)
-    # Only the SECOND note's content (after the second marker) should carry
-    # round two's message; round one's message must not be repeated.
-    second_marker_idx = "\n".join(lines).rindex("[NEW ROUND]")
-    text2_only = "\n".join(lines)[second_marker_idx:]
+    joined = "\n".join(_signal_lines(cfg))
+    # Note now precedes its choice marker (intel-before-choice): round 2's note
+    # sits BETWEEN the first marker and the second. Slice from just after the
+    # first [NEW ROUND] -> only round 2's content; round 1's must not repeat.
+    first_marker_end = joined.index("[NEW ROUND]") + len("[NEW ROUND]")
+    text2_only = joined[first_marker_end:]
     assert "round two message" in text2_only
     assert "round one message" not in text2_only
+
+
+def test_free_round_note_precedes_choice_marker(cfg):
+    """Acceptance (intel before choice): the rendered note (a `Now:` line) comes
+    ABOVE the [NEW ROUND] 3-choice marker, and the marker is the LAST line of the
+    block so the ear's is_machine_line still matches the single-write chunk."""
+    line = watchdog._build_tuck_in_line(cfg, mins=17.0)
+    assert "Now:" in line and "[NEW ROUND]" in line
+    assert line.index("Now:") < line.index("[NEW ROUND]")  # intel first
+    # Marker on the final non-empty line -> single-write block stays machine-tagged.
+    assert line.rstrip().splitlines()[-1].lstrip().startswith("⏳ [NEW ROUND]")
+
 
 def _fresh_transcript(cfg):
     import json

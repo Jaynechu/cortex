@@ -76,7 +76,8 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
 - No-user tier → no_user_gate_min (5) silent proxy lie_down.
 - Chat tier → silent_max_min (15) tuck_in_text marker once (stamps tuck_pending), then tuck_grace_min (5) more → proxy lie_down.
 - Wait-expiry tier → wait(N) deadline past: epoch-guarded free-round injection immediately, bypasses silent_min (watchdog.py:194-289).
-- Every free-round injection (both tiers) appends a diff-mode wakeup note below the marker (D6, wait_expiry_note toggle, watchdog.py:133-177).
+- Every free-round injection (both tiers) prepends a diff-mode wakeup note ABOVE the 3-choice marker (intel-before-choice; marker is the final line so the block stays machine-tagged; D6, wait_expiry_note toggle, watchdog.py:133-178).
+- watchdog._log = timestamped heartbeat to watchdog.log (start/retire/fuse/silence_action) — proves the dedicated watchdog is live vs riding only the tick backup (watchdog.py:336-345).
 - force_slept="auto" = routine silence marker (note.py neutral, no catchup line), distinct from "timeout" (retired) and real incidents (fuse/stale).
 - _fuse: esc → inject fuse_handoff_prompt (summarize + handoff + lie_down(rotate=True)) → poll awake 300s grace; proxy-lie_down only if session didn't; catchup only when handoff unwritten (watchdog.py:76-109).
 - esc verify: still growing → hard_interrupt SIGINT, gated hard_interrupt_enabled (43-66).
@@ -91,7 +92,7 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
 - claim_lie_down (§4) = atomic awake-claim, only winner runs body, later gets `{"skipped":"not awake"}`.
 - lie_down body: record occupancy `tokens` into ct_wake_log (sole writer; bare `except:pass` = known silent-drop; net_tokens column historical/unwritten) → clear due self_schedule → integration.lie_down floor redraw.
 - Then: store_window_tokens → kill watchdog (skip if self) → optional set_rotated → _arm_sentinel; result adds next_wake=HH:MM.
-- wait (wait.py:23-35): one-shot watchdog silence extension; cap wake.wait_max_per_wake (2)/wake.
+- wait (wait.py:23-35): one-shot watchdog silence extension; cap wake.wait_max_per_wake (2)/wake. commit_wait bumps gen + writes a `commit_wait` wake_audit line (old->new gen) like lie_down_claim (wake_state.py:371-401).
 - Clamped triggers.clamp_window_minutes to [wake.wait_min, wake.wait_max] (1/55) — OWN bounds, decoupled from floor draw window (floor_min_min/floor_max_min 10/55).
 - say (say.py, window.py:476-483): sound + front resident window — urgent-only ping, else silent; --note accepted but ignored (CLI symmetry).
 ## 6. Wakeup note (`note.py`)

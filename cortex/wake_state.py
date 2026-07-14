@@ -389,16 +389,23 @@ def commit_wait(cfg: dict, until_iso: str, cap: int) -> dict:
             if cap > 0 and used >= cap:
                 return {"ok": False, "refused": True, "wait_count": used,
                         "cap": cap}
-            d["gen"] = int(d["gen"]) + 1
+            old_gen = int(d["gen"])
+            d["gen"] = old_gen + 1
+            new_gen = d["gen"]
             d["silence_wait_until"] = until_iso
             count = used + 1
             d["wait_count"] = count
             d.pop("tuck_pending", None)
             _save(cfg, d)
-            return {"ok": True, "wait_count": count, "cap": cap}
     except StateValidationError:
         return {"ok": False, "refused": True, "reason": "state locked",
                 "wait_count": 0, "cap": cap}
+    # Audit OUTSIDE the strict lock (parity with claim_lie_down): an accepted
+    # wait bumps gen — a new cancellation epoch that must be visible in the
+    # trail (a silent bump hid the wait during incident forensics).
+    wake_audit(cfg, "commit_wait", f"gen {old_gen}->{new_gen}",
+               f"until={until_iso} count={count}")
+    return {"ok": True, "wait_count": count, "cap": cap}
 
 
 def set_wait_until(cfg: dict, until_iso: str) -> None:

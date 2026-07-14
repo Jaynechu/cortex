@@ -165,8 +165,10 @@ def _build_tuck_in_line(cfg: dict, mins: float) -> str:
     """Render the free-round line OUTSIDE any lock (BUG B: the slow note render +
     template fill must not run inside the strict section). {mins} = real minutes
     since the user's last message, {user} = marrow user_name. Every free-round
-    injection (silence-gate AND wait-expiry, D6) appends a freshly rendered
-    (diff-mode) wakeup note below the marker. "" when disabled."""
+    injection (silence-gate AND wait-expiry, D6) prepends a freshly rendered
+    (diff-mode) wakeup note ABOVE the 3-choice marker line — intel before choice
+    (acceptance), and the marker lands LAST so it is the final decision cue. ""
+    when disabled."""
     tmpl = str(cfg["wake"].get("tuck_in_text") or "").strip()
     if not tmpl:
         return ""
@@ -174,7 +176,7 @@ def _build_tuck_in_line(cfg: dict, mins: float) -> str:
                .replace("{user}", config.user_name(cfg))
     fresh = _free_round_note(cfg)
     if fresh:
-        line = line + "\n" + fresh
+        line = fresh + "\n" + line
     return line
 
 
@@ -333,16 +335,30 @@ def silence_action(cfg: dict, silent_min: float, *, allow_tuck: bool = True) -> 
     return None
 
 
+def _log(msg: str) -> None:
+    """Timestamped heartbeat line to stdout (redirected to watchdog.log by the
+    spawner). Proves the dedicated watchdog is alive vs riding only the tick
+    backup — the log was silent for days with no way to tell a live watchdog
+    from a dead one. Best-effort, never raises."""
+    try:
+        ts = datetime.now(timezone.utc).isoformat()
+        print(f"{ts}\t{msg}", flush=True)
+    except Exception:
+        pass
+
+
 def run(cfg: dict) -> int:
     wcfg = cfg["wake"].get("watchdog", {})
     poll = int(wcfg.get("poll_sec", 60))
     fuse = int(wcfg.get("fuse_tokens", 150_000))
     grace = float(wcfg.get("hard_interrupt_grace_sec", 30))
 
+    _log(f"watchdog start pid={os.getpid()} poll={poll}s fuse={fuse}")
     while True:
         time.sleep(poll)
         st = wake_state.load(cfg)
         if not st.get("awake"):
+            _log("awake cleared -> watchdog retires")
             return 0  # cortex lay down on its own -> watchdog retires
         if wake_state.is_paused(cfg):
             continue  # DND: no reaps / tuck-ins / fuse while paused
@@ -362,12 +378,16 @@ def run(cfg: dict) -> int:
             conn.close()
 
         if fuse and tokens >= fuse:
+            _log(f"fuse: tokens={tokens} >= {fuse}")
             _fuse(cfg, grace)
             return 0
         # Two-tier silence: chat (tuck-in then grace) / no-user (short gate).
         # A proxy sleep here is force_slept="auto" (routine, not an incident).
-        if silence_action(cfg, silent_min) and not wake_state.load(cfg).get("awake"):
-            return 0
+        action = silence_action(cfg, silent_min)
+        if action:
+            _log(f"silence_action: {action} (silent={silent_min:.0f}min)")
+            if not wake_state.load(cfg).get("awake"):
+                return 0
 
 
 def main(argv: list[str] | None = None) -> int:
