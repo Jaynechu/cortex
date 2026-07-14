@@ -586,10 +586,13 @@ def test_wake_log_id_writes_fresh_row_for_non_tick_wake(marrow_conn):
 
 def test_wake_log_id_reuses_latest_for_scheduled(marrow_conn):
     """Scheduled wake (wake_reasons=None): reuse the decision row run_tick already
-    wrote — no duplicate activation row."""
+    wrote (explanation set -- only write_wake_log sets it, the discriminator
+    _latest_wake_log_id scopes on to avoid adopting a different actor's
+    activation row) — no duplicate activation row."""
     ts = DAY1.astimezone(timezone.utc).isoformat()
     marrow_conn.execute(
-        "INSERT INTO ct_wake_log (ts, wake, dry_run, reasons) VALUES (?, 1, 0, 'floor')",
+        "INSERT INTO ct_wake_log (ts, wake, dry_run, reasons, explanation) "
+        "VALUES (?, 1, 0, 'floor', '14:00 floor check due')",
         (ts,))
     marrow_conn.commit()
     scheduled_id = _wake_rows(marrow_conn)[0]["id"]

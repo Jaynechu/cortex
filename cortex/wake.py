@@ -174,21 +174,39 @@ def _render_daybrief(cfg: dict) -> None:
 
 
 def _latest_wake_log_id(conn: sqlite3.Connection) -> int | None:
+    """Latest PACEMAKER DECISION row (wake=1), never an activation row from a
+    different in-flight actor. Scoped on `explanation IS NOT NULL`: only
+    run_tick's write_wake_log sets that column (every decision carries one);
+    log_activation_wake_row never does. Without this scope, a scheduled wake
+    racing an ear/user/ctl activation could adopt the OTHER actor's just-
+    inserted row via this "latest wake=1" query — a real adoption hole (the
+    activation's own bind would then either double-bind the same row to two
+    wakes, or lose it if the activation's compensating cleanup ever deleted
+    a row the adopter now depends on)."""
     row = conn.execute(
-        "SELECT id FROM ct_wake_log WHERE wake = 1 ORDER BY id DESC LIMIT 1"
+        "SELECT id FROM ct_wake_log WHERE wake = 1 AND explanation IS NOT NULL "
+        "ORDER BY id DESC LIMIT 1"
     ).fetchone()
     return row["id"] if row else None
 
 
 def _wake_log_id(conn: sqlite3.Connection, now: datetime,
                  wake_reasons: str | None) -> int | None:
-    """The single chokepoint every set_awake caller uses to bind its wake row.
-    A pacemaker-decided wake (`wake_reasons` None) reuses the decision row
-    run_tick already wrote (its latest wake=1). Every non-tick wake (user / ctl
-    / reconcile / rotate — `wake_reasons` set) writes its OWN activation row so
-    the wakeup note's "Last wake" segment counts it. Both feed the same
-    wake_log_id lie_down later updates with tokens/force_slept, so accounting is
-    unchanged. Falls back to the latest row if the fresh insert failed."""
+    """The single chokepoint every UNCONDITIONAL set_awake caller uses to bind
+    its wake row (fresh spawn / resume / rearm — none of these have a reject
+    path, so insert-then-bind can never race a losing epoch check). A
+    pacemaker-decided wake (`wake_reasons` None) reuses the decision row
+    run_tick already wrote (its latest wake=1 row WITH an explanation — see
+    _latest_wake_log_id). Every non-tick wake (user / ctl / reconcile / rotate
+    — `wake_reasons` set) writes its OWN activation row so the wakeup note's
+    "Last wake" segment counts it. Both feed the same wake_log_id lie_down
+    later updates with tokens/force_slept, so accounting is unchanged. Falls
+    back to the latest decision row if the fresh insert failed.
+
+    The ear path (the one set_awake call with a real conditional reject,
+    expected_gen) does NOT use this — see _bind_wake_log_id, which makes the
+    insert + bind one atomic locked step so a losing race never leaves an
+    orphan row to clean up."""
     if wake_reasons:
         wid = integration.log_activation_wake_row(conn, now, wake_reasons)
         if wid is not None:
@@ -196,52 +214,42 @@ def _wake_log_id(conn: sqlite3.Connection, now: datetime,
     return _latest_wake_log_id(conn)
 
 
-def _delete_wake_log_row(conn: sqlite3.Connection, wid: int) -> None:
-    """Best-effort rollback of an orphaned activation row (see
-    _bind_wake_log_id). Fail-quiet: never raises — a failed delete just leaves
-    one extra row, no worse than before this rollback existed."""
-    try:
-        conn.execute("DELETE FROM ct_wake_log WHERE id = ?", (wid,))
-        conn.commit()
-    except sqlite3.Error:
-        pass
-
-
 def _bind_wake_log_id(conn: sqlite3.Connection, cfg: dict, now: datetime,
                       wake_reasons: str | None, token: tuple[int, str]) -> None:
-    """Commit/reuse this wake's ct_wake_log row and patch it into wake_state
-    ONLY if `token` (the (gen, state_id) set_awake just returned) still matches
-    the live epoch. Used by the one set_awake call with a real conditional
-    reject (expected_gen, the ear path): the row must never be BOUND before
-    the transition is known to have won, or a losing race leaves a phantom
-    activation row while the actual (e.g. user) wake gets its own.
+    """Ear path only: insert/reuse this wake's ct_wake_log row AND bind it into
+    wake_state as ONE atomic step under the strict wake_state lock, keyed to
+    `token` (the (gen, state_id) set_awake just returned).
 
-    The INSERT (when wake_reasons is set) still happens before the bind check
-    — wake_state.conditional_mutate is JSON-file-only by design (no DB access,
-    see wake_state.py), so the write can't move inside it. If ANOTHER actor
-    (a lie_down claim, a newer set_awake) intervenes in that gap and the bind
-    is rejected, the freshly-inserted row would otherwise be orphaned (wake=1,
-    force_slept forever NULL, distorting "Last wake") while never getting
-    bound to any wake_state, so no lie_down can ever record tokens into it
-    either. Roll it back: delete the row WE just inserted (never a REUSED
-    scheduled/decision row, nor a fallback reuse from a failed insert — those
-    belong to run_tick's own log / a prior wake regardless of this wake's
-    outcome, so only the genuine fresh-insert case is rolled back)."""
+    Structural fix (codex gate, 3rd round on this race): a prior version did
+    the DB write BEFORE the lock, then tried to bind, then compensated with a
+    DELETE on a rejected bind. That had two real holes: (1) a racing scheduled
+    wake could ADOPT the just-inserted row via _latest_wake_log_id's unscoped
+    "latest wake=1" reuse before our bind ran, so our DELETE removed the row
+    the WINNER was now pointing at (lie_down loses that wake's tokens); (2) a
+    transient lock failure (StateValidationError also fires on lock timeout /
+    unreadable state, not just a stale token) deleted a REAL wake's row that
+    was never actually orphaned. Both are closed by making the write part of
+    the SAME conditional_mutate call: the closure below only runs (only
+    inserts) once the token has already been proven current under the lock, so
+    a stale/failed check means NOTHING was ever inserted — no delete needed,
+    no adoption window, no tombstone. `_latest_wake_log_id`'s reuse fallback is
+    additionally scoped to genuine pacemaker decision rows (explanation IS NOT
+    NULL — only run_tick's write_wake_log sets it), so it can never adopt an
+    activation row from a different in-flight actor either way."""
     from cortex import wake_state
-    wid = None
-    fresh_insert = False
-    if wake_reasons:
-        wid = integration.log_activation_wake_row(conn, now, wake_reasons)
-        fresh_insert = wid is not None
-    if wid is None:
-        wid = _latest_wake_log_id(conn)
-    if wid is None:
-        return
+
+    def _insert_and_bind(d: dict) -> None:
+        wid = None
+        if wake_reasons:
+            wid = integration.log_activation_wake_row(conn, now, wake_reasons)
+        if wid is None:
+            wid = _latest_wake_log_id(conn)
+        d["wake_log_id"] = wid
+
     try:
-        wake_state.conditional_mutate(cfg, token, lambda d: d.update(wake_log_id=wid))
+        wake_state.conditional_mutate(cfg, token, _insert_and_bind)
     except wake_state.StateValidationError:
-        if fresh_insert:
-            _delete_wake_log_row(conn, wid)
+        pass  # stale token or lock hiccup -> nothing was inserted, no cleanup needed
 
 
 def wake_id_of(now: datetime) -> str:

@@ -240,37 +240,94 @@ def test_window_wake_ear_epoch_reject_writes_no_phantom_row(cfg, monkeypatch):
     assert n == 0  # no phantom activation row written for the losing wake
 
 
-def test_bind_wake_log_id_rolls_back_orphan_on_late_epoch_bump(cfg, monkeypatch):
-    """Codex P2 follow-up: set_awake succeeds and hands back its token, but
-    ANOTHER actor (a lie_down claim, a newer set_awake) bumps gen again before
-    _bind_wake_log_id's conditional_mutate runs. The fresh activation row
-    _wake_log_id already inserted must not be left as an orphan (wake=1,
-    force_slept forever NULL, never bound to any wake_state) — it is deleted
-    on the rejected bind. The superseding actor's OWN row (representing its
-    own wake) must be untouched."""
+def test_bind_wake_log_id_stale_token_inserts_nothing(cfg, monkeypatch):
+    """Structural fix (3rd round, codex gate): the insert now happens INSIDE
+    the same conditional_mutate closure that binds it, so a stale token means
+    the closure never runs at all — nothing is ever inserted, so there is
+    nothing to compensate/delete afterward (the prior delete-based design's
+    core flaw)."""
     from cortex import wake, wake_state
 
     conn = db.connect(cfg)
-    # set_awake already ran and returned this token to _bind_wake_log_id's caller.
-    token = wake_state.current_epoch(cfg)
-    # The superseding actor's own row (e.g. its own activation row) — must
-    # survive this rollback untouched.
-    surviving_id = conn.execute(
-        "INSERT INTO ct_wake_log (ts, wake, dry_run, reasons) VALUES (?, 1, 0, 'rotate')",
-        (db.utcnow_iso(),)).lastrowid
-    conn.commit()
+    token = wake_state.current_epoch(cfg)  # set_awake's returned token
     # Another actor intervenes AFTER set_awake returned `token`, before the bind.
     wake_state.bump_gen(cfg)
 
     from datetime import datetime as _dt
     wake._bind_wake_log_id(conn, cfg, _dt.now(timezone.utc), "user", token)
 
-    rows = conn.execute(
-        "SELECT id, reasons FROM ct_wake_log WHERE wake=1 ORDER BY id").fetchall()
+    n = conn.execute("SELECT COUNT(*) AS n FROM ct_wake_log WHERE wake=1").fetchone()["n"]
     conn.close()
-    assert [r["id"] for r in rows] == [surviving_id]  # the orphan is gone
-    assert rows[0]["reasons"] == "rotate"              # superseding row intact
+    assert n == 0  # nothing was ever inserted -- not inserted-then-deleted
     assert wake_state.load(cfg).get("wake_log_id") is None  # never bound
+
+
+def test_bind_wake_log_id_racing_scheduled_wake_cannot_adopt(cfg, monkeypatch):
+    """Adoption hole (codex gate): a racing SCHEDULED wake (wake_reasons=None,
+    reuses the latest decision row via _latest_wake_log_id) must never adopt a
+    row from an in-flight ear activation. _latest_wake_log_id is scoped to
+    explanation IS NOT NULL (only run_tick's write_wake_log sets it) so an
+    activation row (no explanation) is invisible to that reuse — the winner
+    (ear activation, token still current) gets its own valid row id; the
+    scheduled wake reuses ONLY the genuine decision row, never the winner's."""
+    from cortex import wake, wake_state
+
+    conn = db.connect(cfg)
+    # The pacemaker decision row a scheduled wake would normally reuse.
+    decision_id = conn.execute(
+        "INSERT INTO ct_wake_log (ts, wake, dry_run, explanation) VALUES (?,1,0,?)",
+        (db.utcnow_iso(), "14:00 floor check due")).lastrowid
+    conn.commit()
+
+    token = wake_state.current_epoch(cfg)  # still current -> the ear bind wins
+    from datetime import datetime as _dt
+    now = _dt.now(timezone.utc)
+    wake._bind_wake_log_id(conn, cfg, now, "user", token)
+
+    ear_wid = wake_state.load(cfg).get("wake_log_id")
+    rows = conn.execute(
+        "SELECT id, reasons, explanation FROM ct_wake_log WHERE wake=1 ORDER BY id"
+    ).fetchall()
+    # The ear activation won and bound its OWN fresh row, not the decision row.
+    assert ear_wid is not None and ear_wid != decision_id
+    assert {r["id"] for r in rows} == {decision_id, ear_wid}
+
+    # A scheduled wake racing in now (wake_reasons=None) must reuse ONLY the
+    # genuine decision row -- never adopt the ear activation's row.
+    scheduled_wid = wake._wake_log_id(conn, now, None)
+    conn.close()
+    assert scheduled_wid == decision_id
+    assert scheduled_wid != ear_wid
+
+
+def test_bind_wake_log_id_lock_hiccup_leaves_real_row_intact(cfg, monkeypatch):
+    """StateValidationError also covers lock timeout / unreadable state, not
+    just a stale token (codex gate finding #2). Even on that failure mode, a
+    PRE-EXISTING real wake's row (e.g. the row a different already-bound wake
+    is using) must be left untouched -- the new structure never deletes
+    anything, so this holds by construction."""
+    from cortex import wake, wake_state
+
+    conn = db.connect(cfg)
+    real_id = conn.execute(
+        "INSERT INTO ct_wake_log (ts, wake, dry_run, reasons) VALUES (?,1,0,?)",
+        (db.utcnow_iso(), "rotate")).lastrowid
+    conn.commit()
+
+    def failing_conditional_mutate(cfg_, token_, mutate):
+        raise wake_state.StateValidationError("lock acquire timeout")
+
+    monkeypatch.setattr(wake_state, "conditional_mutate", failing_conditional_mutate)
+
+    from datetime import datetime as _dt
+    wake._bind_wake_log_id(conn, cfg, _dt.now(timezone.utc), "user",
+                           (0, "sid"))
+
+    rows = conn.execute(
+        "SELECT id, reasons FROM ct_wake_log WHERE wake=1").fetchall()
+    conn.close()
+    assert [r["id"] for r in rows] == [real_id]  # untouched
+    assert rows[0]["reasons"] == "rotate"
 
 
 def test_window_wake_ear_miss_alive_types_rearm_not_respawn(cfg, monkeypatch):
