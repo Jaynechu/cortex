@@ -440,17 +440,33 @@ def gather(
         default=([], None),
     )
     replay_stale = False
-    if not replay and last_wake:
-        # No new eligible events this render. If the newest event overall predates
-        # this wake, mark the replay stale ("no new messages") — a cheap read
-        # used only for the human-facing staleness line, never for the cutoff.
-        latest_ts = _safe(_latest_replay_ts, conn, cfg)
-        if latest_ts:
-            try:
-                last_wake_dt = now - timedelta(minutes=last_wake["minutes_ago"])
-                replay_stale = _parse_utc(latest_ts) < last_wake_dt
-            except (TypeError, ValueError):
-                pass
+    if last_wake:
+        try:
+            last_wake_dt = now - timedelta(minutes=last_wake["minutes_ago"])
+        except (TypeError, ValueError):
+            last_wake_dt = None
+        if last_wake_dt is not None:
+            if not replay:
+                # No new eligible events this render. If the newest event overall
+                # predates this wake, mark the replay stale ("no new messages") — a
+                # cheap read used only for the human-facing line, never for cutoff.
+                latest_ts = _safe(_latest_replay_ts, conn, cfg)
+                if latest_ts:
+                    try:
+                        replay_stale = _parse_utc(latest_ts) < last_wake_dt
+                    except (TypeError, ValueError):
+                        pass
+            elif note_since_ts is None and rendered_cutoff:
+                # Initial-wake FULL replay (no diff baseline yet): _replay applied
+                # no since filter, so it can return events that all PREDATE this
+                # wake. Their newest (rendered_cutoff) older than the prior wake =
+                # nothing fresh -> "no new messages", not a fake-fresh "### Replay"
+                # of an old conversation. Reuses rendered_cutoff (no extra query).
+                try:
+                    if _parse_utc(rendered_cutoff) < last_wake_dt:
+                        replay_stale = True
+                except (TypeError, ValueError):
+                    pass
     # The replay cutoff this render actually used: the max ts of the RENDERED
     # subset (rendered_cutoff), or the diff baseline it started from when nothing
     # new was rendered. Derived from the same read as `replay` — never a separate

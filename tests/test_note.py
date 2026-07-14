@@ -626,6 +626,83 @@ def test_seed_baseline_anchors_first_free_round(marrow_conn, cfg, tmp_path, monk
     assert [e["content"] for e in d["replay"]] == ["post-wake msg"]
 
 
+# --------------------------------------------------------------------------- #
+# BUG B: initial-wake full replay must not present pre-wake events as fresh
+# --------------------------------------------------------------------------- #
+
+def _seed_prev_wake(conn, minutes_ago: int) -> str:
+    """Write a prior wake=1 row `minutes_ago` before NOW; return its ISO ts."""
+    ts = (NOW - timedelta(minutes=minutes_ago)).astimezone(ZoneInfo("UTC")).isoformat()
+    conn.execute("INSERT INTO ct_wake_log (ts, wake, dry_run) VALUES (?, 1, 0)", (ts,))
+    conn.commit()
+    return ts
+
+
+def test_gather_initial_wake_only_old_events_is_stale(
+        marrow_conn, cfg, tmp_path, monkeypatch):
+    """BUG B: initial wake (no diff baseline) where every eligible event PREDATES
+    the prior wake -> 'no new messages', never a fake-fresh '### Replay' of an old
+    conversation. _replay applies no since filter on the initial note, so it would
+    otherwise return the old rows and render() would show them as fresh."""
+    cfg["paths"]["wake_state_file"] = str(tmp_path / "wake_state.json")
+    cfg["paths"]["handoff_file"] = str(tmp_path / "handoff.md")
+    make_events_table(marrow_conn)
+    monkeypatch.setattr(note, "_frontmost_app", lambda: None)
+    _seed_prev_wake(marrow_conn, 16)  # prior wake 16 min ago
+    # Only OLD events, all before the prior wake (well before NOW).
+    marrow_conn.execute(
+        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
+        ("s", "2026-07-08T02:00:00+00:00", "user", "an old conversation", "wx"))
+    marrow_conn.commit()
+
+    data = note.gather(marrow_conn, cfg, NOW)  # initial wake: no last_note_ts
+    assert data["replay_stale"] is True
+    text = note.render(cfg, NOW, data)
+    assert "No new messages since last wake." in text
+    assert "### Replay" not in text
+    assert "an old conversation" not in text
+
+
+def test_gather_initial_wake_new_events_render_replay(
+        marrow_conn, cfg, tmp_path, monkeypatch):
+    """BUG B counterpart: initial wake with genuinely NEW events (after the prior
+    wake) -> replay is rendered and the cutoff is the newest rendered event."""
+    cfg["paths"]["wake_state_file"] = str(tmp_path / "wake_state.json")
+    cfg["paths"]["handoff_file"] = str(tmp_path / "handoff.md")
+    make_events_table(marrow_conn)
+    monkeypatch.setattr(note, "_frontmost_app", lambda: None)
+    _seed_prev_wake(marrow_conn, 16)
+    # Event AFTER the prior wake (04:14Z) — genuinely fresh.
+    marrow_conn.execute(
+        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
+        ("s", "2026-07-08T04:20:00+00:00", "user", "a fresh message", "wx"))
+    marrow_conn.commit()
+
+    data = note.gather(marrow_conn, cfg, NOW)  # initial wake
+    assert data["replay_stale"] is False
+    assert [e["content"] for e in data["replay"]] == ["a fresh message"]
+    assert data["replay_cutoff_ts"] == "2026-07-08T04:20:00+00:00"
+    text = note.render(cfg, NOW, data)
+    assert "### Replay" in text
+    assert "a fresh message" in text
+
+
+def test_last_wake_after_short_rotate_cycle_reports_minutes(marrow_conn):
+    """BUG A (note side): with the previously-missing wake rows now written, a
+    16-min rotate cycle's most recent wake row (outside the current-wake epsilon)
+    is what 'Last wake' reports — ~16min, not the noon scheduled wake hours back."""
+    # Noon scheduled wake (hours ago) + a rotate-cycle wake 16 min ago.
+    noon = (NOW - timedelta(minutes=280)).astimezone(ZoneInfo("UTC")).isoformat()
+    rotate = (NOW - timedelta(minutes=16)).astimezone(ZoneInfo("UTC")).isoformat()
+    cur = (NOW - timedelta(seconds=5)).astimezone(ZoneInfo("UTC")).isoformat()
+    marrow_conn.executemany(
+        "INSERT INTO ct_wake_log (ts, wake, dry_run, reasons) VALUES (?, 1, 0, ?)",
+        [(noon, "floor"), (rotate, "rotate"), (cur, "user")])
+    marrow_conn.commit()
+    lw = note._last_wake(marrow_conn, NOW)
+    assert lw["minutes_ago"] == 16  # the rotate cycle wake, not noon
+
+
 def test_gather_returns_replay_cutoff_of_rendered_events(marrow_conn, cfg, tmp_path, monkeypatch):
     """gather() exposes replay_cutoff_ts = the newest ts it actually rendered.
     When nothing is newer than the baseline it diffed from, the cutoff is that
