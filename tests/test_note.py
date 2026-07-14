@@ -507,7 +507,8 @@ def test_gather_second_call_diffs_against_first(marrow_conn, cfg, tmp_path, monk
         ("s", "2026-07-08T03:00:00+00:00", "user", "first round message", "wx"))
     marrow_conn.commit()
 
-    data1 = note.gather(marrow_conn, cfg, NOW)
+    # Free-round render advances the baseline (advance_baseline=True).
+    data1 = note.gather(marrow_conn, cfg, NOW, advance_baseline=True)
     assert [e["content"] for e in data1["replay"]] == ["first round message"]
     baseline = wake_state.get_last_note_ts(cfg)
     assert baseline == "2026-07-08T03:00:00+00:00"
@@ -518,7 +519,7 @@ def test_gather_second_call_diffs_against_first(marrow_conn, cfg, tmp_path, monk
         ("s", "2026-07-08T03:10:00+00:00", "user", "second round message", "wx"))
     marrow_conn.commit()
 
-    data2 = note.gather(marrow_conn, cfg, NOW)
+    data2 = note.gather(marrow_conn, cfg, NOW, advance_baseline=True)
     # Only the new event, not the one already shown in the first note.
     assert [e["content"] for e in data2["replay"]] == ["second round message"]
     # Baseline advances forward.
@@ -537,7 +538,8 @@ def test_gather_diff_shows_cross_channel_activity(marrow_conn, cfg, tmp_path, mo
         "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
         ("s", "2026-07-08T03:00:00+00:00", "assistant", "cli reply", "cli"))
     marrow_conn.commit()
-    note.gather(marrow_conn, cfg, NOW)  # wake's initial note -> baseline set
+    # Free-round render advances the baseline (advance_baseline=True).
+    note.gather(marrow_conn, cfg, NOW, advance_baseline=True)  # round 1 -> baseline set
 
     marrow_conn.executemany(
         "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
@@ -548,11 +550,80 @@ def test_gather_diff_shows_cross_channel_activity(marrow_conn, cfg, tmp_path, mo
     )
     marrow_conn.commit()
 
-    data2 = note.gather(marrow_conn, cfg, NOW)
+    data2 = note.gather(marrow_conn, cfg, NOW, advance_baseline=True)
     channels = [(e["channel"], e["content"]) for e in data2["replay"]]
     assert ("wx", "wx message") in channels
     assert ("tg", "tg message") in channels
     assert ("cli", "cli reply") not in channels  # already seen in round 1
+
+
+def test_gather_render_only_does_not_advance_baseline(marrow_conn, cfg, tmp_path, monkeypatch):
+    """Render-only paths (marrow render_module / --print-note / SessionStart
+    re-render) default advance_baseline=False and MUST NOT move the baseline."""
+    from cortex import wake_state
+    cfg["paths"]["wake_state_file"] = str(tmp_path / "wake_state.json")
+    make_events_table(marrow_conn)
+    monkeypatch.setattr(note, "_frontmost_app", lambda: None)
+
+    marrow_conn.execute(
+        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
+        ("s", "2026-07-08T03:00:00+00:00", "user", "msg", "wx"))
+    marrow_conn.commit()
+
+    note.gather(marrow_conn, cfg, NOW)  # render-only, default False
+    assert wake_state.get_last_note_ts(cfg) is None
+    note.gather(marrow_conn, cfg, NOW)  # again -> still no baseline
+    assert wake_state.get_last_note_ts(cfg) is None
+
+
+def test_gather_free_rounds_diff_across_interleaved_print_note(marrow_conn, cfg, tmp_path, monkeypatch):
+    """Two consecutive free-rounds diff correctly even when a render-only
+    --print-note peek happens in between (the peek must not eat the diff)."""
+    from cortex import wake_state
+    cfg["paths"]["wake_state_file"] = str(tmp_path / "wake_state.json")
+    make_events_table(marrow_conn)
+    monkeypatch.setattr(note, "_frontmost_app", lambda: None)
+
+    marrow_conn.execute(
+        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
+        ("s", "2026-07-08T03:00:00+00:00", "user", "round1 msg", "wx"))
+    marrow_conn.commit()
+    d1 = note.gather(marrow_conn, cfg, NOW, advance_baseline=True)  # free-round 1
+    assert [e["content"] for e in d1["replay"]] == ["round1 msg"]
+
+    # New activity, then a render-only debug peek that must not advance baseline.
+    marrow_conn.execute(
+        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
+        ("s", "2026-07-08T03:05:00+00:00", "user", "round2 msg", "wx"))
+    marrow_conn.commit()
+    note.gather(marrow_conn, cfg, NOW)  # --print-note peek, False
+
+    d2 = note.gather(marrow_conn, cfg, NOW, advance_baseline=True)  # free-round 2
+    contents = [e["content"] for e in d2["replay"]]
+    assert contents == ["round2 msg"]  # peek did not consume it
+
+
+def test_seed_baseline_anchors_first_free_round(marrow_conn, cfg, tmp_path, monkeypatch):
+    """seed_baseline (D6 wake-open seed) anchors the baseline so the FIRST
+    free-round diffs from wake-open, not epoch zero."""
+    from cortex import wake_state
+    cfg["paths"]["wake_state_file"] = str(tmp_path / "wake_state.json")
+    make_events_table(marrow_conn)
+    monkeypatch.setattr(note, "_frontmost_app", lambda: None)
+
+    marrow_conn.execute(
+        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
+        ("s", "2026-07-08T03:00:00+00:00", "user", "pre-wake msg", "wx"))
+    marrow_conn.commit()
+    note.seed_baseline(marrow_conn, cfg)
+    assert wake_state.get_last_note_ts(cfg) == "2026-07-08T03:00:00+00:00"
+
+    marrow_conn.execute(
+        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
+        ("s", "2026-07-08T03:05:00+00:00", "user", "post-wake msg", "wx"))
+    marrow_conn.commit()
+    d = note.gather(marrow_conn, cfg, NOW, advance_baseline=True)
+    assert [e["content"] for e in d["replay"]] == ["post-wake msg"]
 
 
 def test_gather_survives_naive_due_at_self_schedule(marrow_conn, cfg, tmp_path, monkeypatch):

@@ -522,6 +522,10 @@ def run_wake(
             timer.mark("rotate_note")
         win = _window_wake(conn, cfg, window_text, now, respawn=(plan == "fresh"))
         if win is not None:
+            # D6 seed: set_awake (inside _window_wake) just reset last_note_ts to
+            # None. Anchor the diff-mode baseline to the wake-open moment now so
+            # the FIRST free-round tuck-in diffs from here, not epoch zero.
+            note.seed_baseline(conn, cfg)
             timer.mark("window_injected")
             timer.mark("wake_complete")
             return win

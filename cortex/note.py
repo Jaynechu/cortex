@@ -218,6 +218,22 @@ def _replay_events(conn: sqlite3.Connection, cfg: dict, limit: int, per_chars: i
     return events
 
 
+def seed_baseline(conn: sqlite3.Connection, cfg: dict) -> None:
+    """Seed the diff-mode replay baseline (wake_state.last_note_ts) to the newest
+    eligible event at wake activation, so the FIRST free-round tuck-in diffs from
+    the wake-open moment, not epoch zero (D6: baseline = the wake's initial note).
+    Called once per wake AFTER set_awake (which resets last_note_ts=None). No-op
+    when there is nothing to seed. Never raises — a failed seed just falls back to
+    full replay on the first free-round."""
+    try:
+        from cortex import wake_state
+        latest_ts = _latest_replay_ts(conn, cfg)
+        if latest_ts:
+            wake_state.set_last_note_ts(cfg, latest_ts)
+    except Exception:
+        pass
+
+
 def _latest_replay_ts(conn: sqlite3.Connection, cfg: dict) -> str | None:
     """ISO timestamp of the most recent non-ct user/assistant event, or None."""
     exclude = _replay_exclude_channels(cfg)
@@ -311,6 +327,7 @@ def gather(
     wake_kind: str | None = None,
     died_no_handoff: bool = False,
     window_sid: str | None = None,
+    advance_baseline: bool = False,
 ) -> dict:
     """Assemble the wakeup note data dict. conn must use sqlite3.Row factory.
     `fresh`/`wake_kind` are accepted for caller compatibility; the handoff
@@ -320,7 +337,15 @@ def gather(
     `window_sid` (caller-supplied) overrides the wake_state transcript for the
     Window line — the caller's own transcript stem is correct even after a
     rotation, whereas wake_state.transcript was cleared at lie_down and is only
-    re-set after this note is written. awake_since still comes from wake_state."""
+    re-set after this note is written. awake_since still comes from wake_state.
+
+    `advance_baseline` (default False): move the diff-mode replay baseline
+    (wake_state.last_note_ts) to the newest eligible event. ONLY the free-round
+    tuck-in path passes True — each free-round consumes the events it showed so
+    the next one diffs from here. Every render-only path (marrow render_module /
+    --print-note / any SessionStart re-render) MUST leave this False, else a
+    passive re-render advances the baseline and the next real free-round silently
+    drops replay events."""
     ncfg = _note_cfg(cfg)
 
     from cortex import wake_state
@@ -378,7 +403,9 @@ def gather(
     # Advance the diff-mode baseline to the newest eligible event overall (not
     # just the ones shown this render — same value as latest_ts above), so the
     # NEXT free-round tuck-in diffs from here. Monotonic: only moves forward.
-    if latest_ts and (not note_since_ts or latest_ts > note_since_ts):
+    # Gated on advance_baseline: render-only callers never write it.
+    if advance_baseline and latest_ts and (
+            not note_since_ts or latest_ts > note_since_ts):
         _safe(wake_state.set_last_note_ts, cfg, latest_ts)
 
     return {

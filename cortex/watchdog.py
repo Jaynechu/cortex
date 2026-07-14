@@ -184,7 +184,8 @@ def _free_round_note(cfg: dict) -> str:
             sid = Path(str(raw)).stem[:8]
         conn = db.connect(cfg)
         try:
-            data = note.gather(conn, cfg, now, window_sid=sid)
+            data = note.gather(conn, cfg, now, window_sid=sid,
+                               advance_baseline=True)
             return note.render(cfg, now, data).strip()
         finally:
             conn.close()
