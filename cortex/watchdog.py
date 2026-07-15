@@ -263,6 +263,16 @@ def _free_round_note(cfg: dict) -> tuple[str, str | None]:
             # here, which could race in an event this note never rendered and
             # then drop it when the baseline advances past it.
             pending = data.get("replay_cutoff_ts")
+            # Mirror the FULL (non-diff) note to disk so a human reading the file
+            # sees complete state — the injected note above stays diff-mode.
+            # Best-effort: a mirror failure must not affect the tuck-in.
+            try:
+                from cortex import window
+                full = note.gather(conn, cfg, now, window_sid=sid,
+                                   advance_baseline=False, full_replay=True)
+                window.write_note(cfg, note.render(cfg, now, full).strip())
+            except Exception:
+                pass
         finally:
             conn.close()
         return text, pending

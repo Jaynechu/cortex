@@ -272,6 +272,35 @@ def test_free_round_note_render_failure_falls_back(awake_no_sentinel, monkeypatc
     assert "Now:" not in text  # note omitted, marker survived
 
 
+def test_free_round_mirrors_full_note_to_file(awake_no_sentinel):
+    """A free-round tuck-in refreshes the on-disk wakeup_note.md with a FULL
+    render so a human reading the file sees complete state."""
+    cfg = awake_no_sentinel
+    wake_state.update(cfg, user_replied_this_wake=True)
+    note_path = wake_state.wakeup_note_path(cfg)
+    note_path.write_text("stale", encoding="utf-8")
+    watchdog.silence_action(cfg, silent_min=21.0)
+    assert note_path.read_text(encoding="utf-8").lstrip().startswith("Now:")
+
+
+def test_free_round_mirror_uses_full_replay(awake_no_sentinel, monkeypatch):
+    """The mirror render must pass full_replay=True (non-diff), while the injected
+    note stays diff-mode (full_replay defaults False)."""
+    from cortex import note as _note
+    seen = []
+    real_gather = _note.gather
+
+    def _spy(conn, cfg, now, **kw):
+        seen.append(kw.get("full_replay", False))
+        return real_gather(conn, cfg, now, **kw)
+
+    monkeypatch.setattr(_note, "gather", _spy)
+    wake_state.update(awake_no_sentinel, user_replied_this_wake=True)
+    watchdog.silence_action(awake_no_sentinel, silent_min=21.0)
+    assert False in seen  # injected diff note
+    assert True in seen   # full mirror render
+
+
 def test_two_consecutive_injections_second_diffs_against_first(awake_no_sentinel):
     """Two consecutive free-round injections in the same wake: the second note
     replays only events newer than the first note's ts — user activity on

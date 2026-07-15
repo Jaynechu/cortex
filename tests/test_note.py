@@ -35,6 +35,7 @@ def test_render_full_note(cfg):
     data = {
         "wake_parts": ["wander"],
         "last_wake": {"minutes_ago": 12, "force_slept": None},
+        "last_active": {"minutes_ago": 12},
         "budget": {
             "five_h_pct": 5.0, "five_h_reset": "04:50",
             "seven_d_pct": 50.0, "seven_d_countdown": "1d2h",
@@ -49,7 +50,7 @@ def test_render_full_note(cfg):
     }
     text = note.render(cfg, NOW, data)
     assert "Wake:" not in text  # reason line retired
-    assert text.startswith("Now: 14:30 Wed | Last wake: 12min ago")
+    assert text.startswith("Now: 14:30 Wed | Last active: 12min ago")
     # Plan Used line: USED %, pipe-joined, template口径
     assert ("Plan Used: 5h 5% (04:50) | 7d 50% (1d2h) | "
             "Cortex Today 250k/1M 25% | Net Session Token: 50k") in text
@@ -68,7 +69,7 @@ def test_render_omits_absent_lines(cfg):
     text = note.render(cfg, NOW, {})
     assert "Wake:" not in text  # reason line retired
     assert text.startswith("Now: 14:30 Wed")
-    assert "Last wake:" not in text
+    assert "Last active:" not in text
     assert "Plan Used:" not in text
     assert "Active (Mac):" not in text
     assert "Pending" not in text
@@ -106,7 +107,7 @@ def test_render_title_empty_omits_it(cfg):
 def test_render_force_slept_marker_and_catchup(cfg):
     data = {"last_wake": {"minutes_ago": 40, "force_slept": "timeout"}}
     text = note.render(cfg, NOW, data)
-    assert "Last wake: 40min ago (force-slept mid-task)" in text
+    assert "Last active: 40min ago (force-slept mid-task)" in text
     # catch-up backfill hint appears only on a force-slept prior window
     assert "recall all events from DB" in text
 
@@ -116,7 +117,7 @@ def test_render_auto_sleep_is_neutral(cfg):
     catchup hint. Rows stay queryable, but the note reads it as ordinary."""
     data = {"last_wake": {"minutes_ago": 40, "force_slept": "auto"}}
     text = note.render(cfg, NOW, data)
-    assert "Last wake: 40min ago" in text
+    assert "Last active: 40min ago" in text
     assert "force-slept mid-task" not in text
     assert "recall all events from DB" not in text
 
@@ -191,6 +192,50 @@ def test_last_wake_none_when_only_current(marrow_conn):
     assert note._last_wake(marrow_conn, NOW) is None
 
 
+def test_last_active_newest_cortex_row(marrow_conn, cfg):
+    """Newest ct_activity row for the cortex channel gives the minutes; rows on
+    other channels are ignored even when they are more recent."""
+    ct = (NOW - timedelta(minutes=7)).astimezone(ZoneInfo("UTC")).isoformat()
+    cli = (NOW - timedelta(minutes=1)).astimezone(ZoneInfo("UTC")).isoformat()
+    marrow_conn.executemany(
+        "INSERT INTO ct_activity (ts, sid, channel) VALUES (?, ?, ?)",
+        [(ct, "s1", "ct"), (cli, "s2", "cli")],
+    )
+    marrow_conn.commit()
+    la = note._last_active(marrow_conn, cfg, NOW)
+    assert la["minutes_ago"] == 7
+    assert la["ts"] == ct
+
+
+def test_last_active_none_without_cortex_row(marrow_conn, cfg):
+    """No cortex-channel row -> None (render falls back to the wake row)."""
+    cli = (NOW - timedelta(minutes=2)).astimezone(ZoneInfo("UTC")).isoformat()
+    marrow_conn.execute(
+        "INSERT INTO ct_activity (ts, sid, channel) VALUES (?, ?, ?)",
+        (cli, "s2", "cli"))
+    marrow_conn.commit()
+    assert note._last_active(marrow_conn, cfg, NOW) is None
+
+
+def test_render_last_active_falls_back_to_wake_minutes(cfg):
+    """No last_active -> the line uses the wake row's minutes but keeps the
+    'Last active:' label and the force-slept suffix."""
+    data = {"last_wake": {"minutes_ago": 22, "force_slept": "timeout"}}
+    text = note.render(cfg, NOW, data)
+    assert "Last active: 22min ago (force-slept mid-task)" in text
+
+
+def test_render_last_active_overrides_wake_minutes(cfg):
+    """last_active minutes win over the wake row's minutes; the suffix still
+    comes from the wake row."""
+    data = {
+        "last_wake": {"minutes_ago": 40, "force_slept": "timeout"},
+        "last_active": {"minutes_ago": 3},
+    }
+    text = note.render(cfg, NOW, data)
+    assert "Last active: 3min ago (force-slept mid-task)" in text
+
+
 # --------------------------------------------------------------------------- #
 # catchup suppression — handoff written after the prior wake ts
 # --------------------------------------------------------------------------- #
@@ -244,7 +289,7 @@ def test_render_catchup_suppressed_when_handoff_written(cfg):
         "catchup_handoff_written": True,
     }
     text = note.render(cfg, NOW, data)
-    assert "Last wake: 40min ago (force-slept mid-task)" in text  # tag still shown
+    assert "Last active: 40min ago (force-slept mid-task)" in text  # tag still shown
     assert "recall all events from DB" not in text  # catchup suppressed
 
 

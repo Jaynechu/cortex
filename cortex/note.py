@@ -94,6 +94,34 @@ def _last_wake(conn: sqlite3.Connection, now: datetime) -> dict | None:
     return None
 
 
+def _cortex_channel(cfg: dict) -> str:
+    """Channel tag marrow's Stop hook stamps on cortex self-talk turns
+    (MARROW_CHANNEL=ct). Newest ct_activity row with this channel = the cortex
+    session's last reply."""
+    return str(_note_cfg(cfg).get("cortex_channel") or "ct")
+
+
+def _last_active(conn: sqlite3.Connection, cfg: dict, now: datetime) -> dict | None:
+    """Age of the cortex session's last reply, from the newest ct_activity row
+    (channel = cortex_channel). At inject time the current turn's Stop has not
+    fired, so the newest row is the previous reply — no epsilon skip needed.
+    None when the table is absent or has no cortex row."""
+    try:
+        row = conn.execute(
+            "SELECT MAX(ts) AS ts FROM ct_activity WHERE channel = ?",
+            (_cortex_channel(cfg),),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    if not row or not row["ts"]:
+        return None
+    try:
+        age = now - _parse_utc(row["ts"])
+    except (TypeError, ValueError):
+        return None
+    return {"minutes_ago": int(age.total_seconds() // 60), "ts": row["ts"]}
+
+
 def _handoff_after(cfg: dict, prev_ts: str | None) -> bool:
     """True if the handoff file is non-empty and was modified after `prev_ts`
     (the prior wake=1 row's ISO-UTC ts). Uses the DB row ts as the stable
@@ -375,6 +403,7 @@ def gather(
     died_no_handoff: bool = False,
     window_sid: str | None = None,
     advance_baseline: bool = False,
+    full_replay: bool = False,
 ) -> dict:
     """Assemble the wakeup note data dict. conn must use sqlite3.Row factory.
     `fresh`/`wake_kind` are accepted for caller compatibility; the handoff
@@ -400,6 +429,7 @@ def gather(
     kv = _safe(_rate_limit_kv, conn, default={})
     budget = _safe(_build_budget, conn, cfg, now, kv, ncfg)
     last_wake = _safe(_last_wake, conn, now)
+    last_active = _safe(_last_active, conn, cfg, now)
     # Catchup suppression: the prior window may have been reaped (force_slept set)
     # yet still wrote its handoff before dying. If the handoff was touched after
     # that prior wake row's ts and is non-empty, there is nothing to backfill ->
@@ -430,8 +460,9 @@ def gather(
             pass
     # Diff mode (D6): replay only events newer than the last rendered note this
     # wake (last_note_ts). Absent (wake's initial note, or wake_state load
-    # failed) -> full replay, same as before this refactor.
-    note_since_ts = ws.get("last_note_ts")
+    # failed) -> full replay, same as before this refactor. `full_replay` forces
+    # a full (non-diff) render for the on-disk mirror without touching baseline.
+    note_since_ts = None if full_replay else ws.get("last_note_ts")
     replay, rendered_cutoff = _safe(
         _replay, conn, cfg,
         ncfg.get("replay_events", 4),
@@ -490,6 +521,7 @@ def gather(
     return {
         "replay_cutoff_ts": replay_cutoff_ts,
         "last_wake": last_wake,
+        "last_active": last_active,
         "budget": budget,
         "active_app": _safe(_frontmost_app),
         "pending": _safe(_pending, cfg, now, default=[]),
@@ -557,11 +589,15 @@ def render(cfg: dict, now: datetime, data: dict) -> str:
 
     now_seg = f"Now: {now.strftime('%H:%M %a')}"
     last = data.get("last_wake")
-    if last:
-        seg = f"Last wake: {last['minutes_ago']}min ago"
+    # Minutes from the cortex session's last reply (ct_activity); fall back to
+    # the prior wake row's age so the line never disappears when activity is
+    # missing. force_slept marker always sourced from the wake row.
+    active = data.get("last_active") or last
+    if active:
+        seg = f"Last active: {active['minutes_ago']}min ago"
         # "auto" = routine proxy sleep on the silence path -> render neutrally,
         # never as a force incident. Only real force incidents get the tag.
-        if last.get("force_slept") and last.get("force_slept") != "auto":
+        if last and last.get("force_slept") and last.get("force_slept") != "auto":
             seg += " (force-slept mid-task)"
         now_seg += f" | {seg}"
     header.append(now_seg)
