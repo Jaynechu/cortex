@@ -106,7 +106,7 @@ def lie_down(cfg: dict, force_slept: str | None = None, rotate: bool = False,
     state = wake_state.claim_lie_down(cfg, force_slept=force_slept)
     if state is None:
         return {"skipped": "not awake", "force_slept": force_slept,
-                "rotated": rotate, "next_wake": None}
+                "rotated": False, "next_wake": None}
     token = state.get("claim_token")
     conn = db.connect(cfg)
     try:
@@ -118,7 +118,7 @@ def lie_down(cfg: dict, force_slept: str | None = None, rotate: bool = False,
         # ledger, sentinel) so we never re-arm against a stale generation.
         if not _token_ok(cfg, token):
             return {"tokens": tokens, "cleared_due": cleared,
-                    "force_slept": force_slept, "rotated": rotate,
+                    "force_slept": force_slept, "rotated": False,
                     "next_wake": None, "superseded": True}
         # wake redraw from now; next_floor drives the next_wake HH:MM the marrow
         # MCP wrapper surfaces to the session.
@@ -136,10 +136,11 @@ def lie_down(cfg: dict, force_slept: str | None = None, rotate: bool = False,
         # rotate/retire writes are conditional CHILDREN of the claim gen (they do
         # NOT bump — bumping would self-invalidate this claim's own sentinel), so
         # a superseding user reset suppresses them.
+        rotated = False
         if rotate:
             try:
-                wake_state.conditional_mutate(cfg, token, _mark_rotated(
-                    state.get("transcript")))
+                rotated = bool(wake_state.conditional_mutate(
+                    cfg, token, _mark_rotated(state.get("transcript"))))
             except wake_state.StateValidationError:
                 pass  # superseded -> the newer epoch owns the window, no rotate
         # awake marker already cleared atomically by claim_lie_down at entry.
@@ -149,7 +150,7 @@ def lie_down(cfg: dict, force_slept: str | None = None, rotate: bool = False,
         next_floor = _arm_sentinel(cfg, next_floor, token)
         next_wake = _local_hm(next_floor, cfg)
         return {"tokens": tokens, "cleared_due": cleared,
-                "force_slept": force_slept, "rotated": rotate,
+                "force_slept": force_slept, "rotated": rotated,
                 "next_wake": next_wake}
     finally:
         conn.close()
