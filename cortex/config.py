@@ -147,6 +147,14 @@ _DEFAULTS: dict[str, Any] = {
         # reaches this, self-wakes stop; resets at local midnight.
         "daily_budget": {"tokens": 1_000_000},
     },
+    # External-wake (cortex.kick) reason templates rendered into the wakeup note
+    # (§Copy C5). {id} = outbox note id; {minutes} = channel silence minutes.
+    # A bridge/cli poke appends one of these; note.py renders + clears them.
+    "kick": {
+        "reason_reply": "watch: note #{id} got her reply",
+        "reason_timeout": "watch: note #{id} silent {minutes}min",
+        "reason_morning": "morning: she's up — flag cleared, day cadence",
+    },
     "triggers": {
         # Wake-window draw (minutes) from lie-down. lie_down picks the next wake:
         # an explicit choice clamped to [min, max] (max = cache-TTL guard, min =
@@ -162,6 +170,8 @@ _DEFAULTS: dict[str, Any] = {
         # Optional first line of the wakeup note (e.g. a nickname for the
         # note), followed by a blank line then the usual content. "" omits it.
         "title": "",
+        # Header above the external-wake (cortex.kick) reason block.
+        "kick_header": "### Woke for",
         # Trailing conversation events force-appended to the Replay block
         # (cross-session, uniform, no decay). 4 = two round-trips.
         "replay_events": 4,
@@ -199,7 +209,7 @@ _DEFAULTS: dict[str, Any] = {
 _SECTIONS = (
     "core", "paths", "knowledgec", "geofence", "health",
     "tick", "pacemaker", "gates", "triggers", "marrow",
-    "wake", "note",
+    "wake", "note", "kick",
 )
 
 
