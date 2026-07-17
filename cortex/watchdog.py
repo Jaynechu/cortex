@@ -256,7 +256,7 @@ def _free_round_note(cfg: dict) -> tuple[str, str | None]:
             # advance_baseline=False: render must NOT persist the baseline. The
             # caller advances it only after the injection is committed.
             data = note.gather(conn, cfg, now, window_sid=sid,
-                               advance_baseline=False, consume_kick=True)
+                               advance_baseline=False)
             text = note.render(cfg, now, data).strip()
             # FIX 6 + P2-B: the deferred advance must use the SAME cutoff this
             # note was built on, captured inside gather() — not a second query
@@ -362,7 +362,12 @@ def _stamp_tuck_pending():
     session is still awake, has no live wait window, and no tuck_pending yet.
     Returns True when it stamped (caller then appends the line), False otherwise
     (nothing appended). The epoch check is done by conditional_mutate's token
-    guard; these are the in-lock content invariants."""
+    guard; these are the in-lock content invariants.
+
+    Auto+manual share ONE wait quota per wake: this auto silence gate CONSUMES
+    the wait counter when it stamps (bump wait_count to at least the cap), so a
+    later manual wait() this wake is refused (menu only). No double-count when a
+    wait already ran — only bump when still under cap."""
     def _m(d: dict) -> bool:
         if not d.get("awake"):
             return False
@@ -379,6 +384,11 @@ def _stamp_tuck_pending():
             except ValueError:
                 pass
         d["tuck_pending"] = datetime.now(timezone.utc).isoformat()
+        try:
+            used = int(d.get("wait_count", 0) or 0)
+        except (TypeError, ValueError):
+            used = 0
+        d["wait_count"] = used + 1  # auto observe consumes one shared-quota slot
         return True
     return _m
 
