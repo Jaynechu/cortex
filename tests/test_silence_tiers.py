@@ -93,7 +93,7 @@ def test_chat_tuck_in_then_grace(awake_no_sentinel):
     assert wake_state.is_awake(cfg) is True
     text = "\n".join(_signal_lines(cfg))
     assert "[NEW ROUND]" in text
-    assert "21 min" in text  # real minutes since user's last message
+    assert "3 choices" not in text  # menu body no longer written to the log (covert)
     writes_after_first = text.count("[NEW ROUND]")
     assert writes_after_first == 1
     # Marker stamped -> not re-appended on the next poll.
@@ -101,6 +101,27 @@ def test_chat_tuck_in_then_grace(awake_no_sentinel):
     assert a2 is None
     assert "\n".join(_signal_lines(cfg)).count("[NEW ROUND]") == 1
     # Backdate the tuck stamp past the grace window -> auto sleep.
+    past = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+    wake_state.update(cfg, tuck_pending=past)
+    a3 = watchdog.silence_action(cfg, silent_min=23.0)
+    assert a3 and "auto sleep" in a3
+    assert wake_state.is_awake(cfg) is False
+
+
+def test_observe_to_menu_to_grace_sleep(awake_no_sentinel):
+    """Explicit two-state machine (P7): OBSERVE_ARMED (menu_delivered False) ->
+    at expiry the menu is delivered exactly once (menu_delivered True) -> grace
+    elapses -> auto sleep."""
+    cfg = awake_no_sentinel
+    wake_state.update(cfg, user_replied_this_wake=True)
+    assert wake_state.menu_delivered(cfg) is False  # observe_armed
+    a1 = watchdog.silence_action(cfg, silent_min=21.0)
+    assert a1 == "tuck-in appended"
+    assert wake_state.menu_delivered(cfg) is True    # menu_delivered
+    # Menu injected exactly once even across repeated polls.
+    assert watchdog.silence_action(cfg, silent_min=22.0) is None
+    assert "\n".join(_signal_lines(cfg)).count("[NEW ROUND]") == 1
+    # Grace elapses -> auto sleep.
     past = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
     wake_state.update(cfg, tuck_pending=past)
     a3 = watchdog.silence_action(cfg, silent_min=23.0)
@@ -204,21 +225,25 @@ def test_wait_expiry_fires_once_then_falls_through(awake_no_sentinel):
 
 # --- template render ----------------------------------------------------------
 
-def test_free_round_template_substitutes_mins_and_user(cfg):
-    """{mins} = real minutes since the user's last message; {user} = marrow
-    user_name (fallback "the user" when marrow config absent). No {n}/{cap}."""
+def test_free_round_line_is_marker_only(cfg):
+    """Default free-round line = the [NEW ROUND] marker ONLY (menu body moved to
+    marrow's covert additionalContext inject). No 3-choice menu text on screen;
+    no leftover {mins}/{user}/{n}/{cap} placeholders."""
+    line, _pending = watchdog._build_tuck_in_line(cfg, mins=17.0)
+    assert "[NEW ROUND]" in line
+    assert "3 choices" not in line  # menu body no longer written to the log
+    assert "Playbook" not in line
+    for stray in ("{mins}", "{user}", "{n}", "{cap}"):
+        assert stray not in line
+
+
+def test_free_round_template_still_substitutes_placeholders(cfg):
+    """The substitution mechanism survives for a custom template: {mins}/{user}
+    still fill (C2 just happens to use neither)."""
+    cfg["wake"]["tuck_in_text"] = "⏳ [NEW ROUND] {mins} min since {user}"
     line, _pending = watchdog._build_tuck_in_line(cfg, mins=17.0)
     assert "17 min" in line
     assert "the user" in line  # no marrow config -> fallback
-    assert "{n}" not in line and "{cap}" not in line and "{mins}" not in line
-
-
-def test_free_round_template_reads_marrow_user_name(cfg, tmp_path):
-    """{user} resolves from marrow's config.toml (sibling of the db path)."""
-    (tmp_path / "config.toml").write_text('user_name = "Nim"\n')
-    cfg["paths"]["marrow_db"] = str(tmp_path / "marrow.db")
-    line, _pending = watchdog._build_tuck_in_line(cfg, mins=17.0)
-    assert "Nim" in line and "the user" not in line
 
 
 # --- free-round note (D6: every injection carries one, wait_count gate dropped) -

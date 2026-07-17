@@ -92,27 +92,33 @@ rearm_suffix = " (ear died — rearm)"
 # say() = the ONLY place cortex takes focus: it fronts the resident window and
 # plays a system sound (name of a /System/Library/Sounds/*.aiff; "" = silent).
 say_sound = "Glass"
-wait_max_per_wake = 0       # max wait() calls per wake (0 = uncapped; night gate / 150k fuse / grace / user return backstop)
-wait_min = 16               # wait(N) clamp lower bound (minutes) — floor > silence gate (15) keeps wait "post-gate renewal"
-wait_max = 55               # wait(N) clamp upper bound (minutes) — hot cache-TTL guard
-next_wake_min = 90          # lie_down(next_wake_min=N) clamp lower bound (minutes)
-next_wake_rotate_min = 16   # rotate short-sleep clamp lower bound ("context full, back in N min")
-next_wake_max = 360         # lie_down(next_wake_min=N) clamp upper bound (minutes)
+wait_max_per_wake = 1       # one wait() per wake, then the 3-choice menu only (0 = uncapped)
+wait_min = 1                # wait(N) clamp lower bound (minutes) — short one-shot hold
+wait_max = 20               # wait(N) clamp upper bound (minutes)
+next_wake_min = 21          # lie_down(next_wake_min=N) clamp lower bound (minutes)
+next_wake_max = 240         # lie_down(next_wake_min=N) clamp upper bound (minutes)
 sentinel = true             # arm cortex.sentinel (one-shot exact-time wake) at every lie_down; false = tick-only fallback
-# Free-round marker appended to wake_signal.log at the silence gate or a wait(N)-
-# expiry. {mins} = real minutes since the user's last message; {user} = marrow
-# user_name (fallback "the user"). No-user tier gets no marker.
-tuck_in_text = "⏳ [NEW ROUND] {mins} min since {user}'s last message. Choose again: 1) play around (playbook); 2) wait(N) (16-55min); 3) lie_down(next_wake_min=N) (90-360min). Feel free to do anything. No need to wait for reply - {user} will wake you the moment she's back."
+# Marker line written to wake_signal.log when the observe window expires. MARKER
+# ONLY — the C2 menu body is NOT written here (it would show in the ear Monitor
+# event); marrow's UserPromptSubmit hook injects the menu invisibly via
+# additionalContext ([cortex].tuck_in_menu_text on the marrow side). Leading
+# "⏳ [NEW ROUND]" is the machine-line marker. {mins}/{user} optional.
+tuck_in_text = "⏳ [NEW ROUND]"
 # Markers identifying a NON-user turn (so they don't reset the silence timer and
 # downstream memory drops them). wake_signal_marker is added automatically.
 # Substring match: "[CMD" catches every ⚙️ [CMD ct-*] slash-command body.
 machine_line_markers = ["[TUCK-IN]", "[NEW ROUND]", "[NIGHT]", "[FUSE]", "[CTL]", "[CMD"]
 wait_expiry_note = true      # every free-round tuck-in (silence-gate or wait(N)-expiry) appends a freshly rendered wakeup note (diff mode: only events since the last rendered note this wake)
+# Covert-delivery markers written to wake_signal.log (bell via ear Monitor; typed only if the
+# ear is dead). Only the marker reaches the window; the body is injected invisibly by the marrow
+# hook (fuse -> [cortex].fuse_prompt_text; ctl -> [cortex].ctl_sleep_text from the mins/rotate args).
+fuse_marker = "⚙️ [FUSE]"
+ctl_sleep_marker = "⚙️ [CTL]"
 
 # Per-wake watchdog thresholds (spawned at injection, killed at lie_down).
 [wake.watchdog]
 poll_sec = 60
-silent_max_min = 15            # chat tier: user replied this wake -> at this silence, append free-round marker (no live wait_until)
+silent_max_min = 20            # chat tier: user replied this wake -> at this silence, append free-round marker (no live wait_until); same as wake.wait_max
 no_user_gate_min = 5           # no-user tier: no user reply this wake -> at this silence, proxy lie_down(auto) directly, no marker
 tuck_grace_min = 5             # after TUCK-IN, no wait/lie_down within this -> proxy lie_down(auto)
 fuse_tokens = 150000           # (c) window tokens >= this -> esc + proxy lie_down (fuse)
@@ -125,7 +131,9 @@ hard_interrupt_grace_sec = 30
 # lie_down(rotate=True). It gets this many seconds to do so itself before the
 # force path (SIGINT + proxy lie_down) fires. Hard deadline — the fuse never hangs.
 fuse_handoff_grace_sec = 300
-# fuse_handoff_prompt = ""     # override the "write handoff + lie_down" prompt text
+# FUSE prompt body now lives marrow-side ([cortex].fuse_prompt_text) — cortex writes only the
+# ⚙️ [FUSE] marker; the marrow hook injects the body covertly. The old cortex-side
+# fuse_handoff_prompt override is retired.
 
 # Context-window rotation: lie_down (and the tick fallback) flag a rotate when the
 # window grows past this, so the NEXT wake respawns a fresh window (SIGTERM claude
@@ -185,13 +193,12 @@ close_prompt = "⏳ [NIGHT] Night window is open — one full sleep now. Write y
 [gates.daily_budget]
 tokens = 1000000
 
-# External-wake (cortex.kick) reason lines rendered into the wakeup note (§Copy
-# C5). A bridge/cli poke appends one; note.py renders + clears it. {id} = outbox
-# note id; {minutes} = channel silence minutes.
-[kick]
-reason_reply = "watch: note #{id} got her reply"
-reason_timeout = "watch: note #{id} silent {minutes}min"
-reason_morning = "morning: she's up — flag cleared, day cadence"
+# Night roaming floor (minutes): lie_down(mode='night') draw + clamp under the
+# night flag; also the Night range in lie_down's tool description. P8 adds the
+# flag lifecycle keys (start / morning_start / silence_hours / cap) on top.
+[night]
+floor_min = 120
+floor_max = 360
 
 [triggers]
 # Wake-window (minutes) from lie-down. lie_down picks the next wake: an explicit
@@ -205,7 +212,6 @@ floor_max_min = 55             # wake-window draw upper bound (uniform hi / clam
 # Persona/display strings + behaviour (identity stays in config).
 [note]
 title = ""                   # first line of the wakeup note, e.g. a nickname for the note; empty hides it
-kick_header = "### Woke for"  # header above the external-wake (cortex.kick) reason block
 replay_events = 6            # trailing user/assistant events in the replay section
 replay_event_chars = 300     # per-event truncation in the replay section
 replay_exclude_channels = ["ct"]  # channels excluded from replay (ct = cortex self-talk); [] to include all
@@ -215,6 +221,6 @@ handoff_title = "碎碎念"   # title of the handoff-note section (customisable 
 replay_title = "最近对话回放"     # title of the conversation-replay section
 handoff_wake_kinds = ["rotate"]  # wake kinds that get the handoff (fresh window only)
 cadence_bin = ""             # cadence CLI for cal/rem lines; empty = packaged default path
-turn_end_text = "NOTE: Call MCP tool to wait or lie_down at the end of each turn. Wait=wait(N) [N=16-55]; sleep=lie_down(next_wake_min=N) [90-360; rotate=True unlocks ≥16]. Skip call = sleep in 5 mins. Auto timer is on during active chat - no call needed."  # one-line reminder appended at the end of every rendered note; "" omits it
+turn_end_text = "NOTE: Call MCP tool to wait or lie_down at the end of each turn. Wait=wait(N) [N={wait_min}-{wait_max}]; sleep=lie_down(next_wake_min=N) [{next_wake_min}-{next_wake_max}]. Skip call = sleep in 5 mins. Auto timer is on during active chat - no call needed."  # one-line reminder appended at the end of every rendered note; "" omits it. {wait_min}/{wait_max}/{next_wake_min}/{next_wake_max} render from the wake clamps
 # Header written into a freshly-created wishlist.md (append-only; never overwritten). Display text — customise freely.
 wishlist_header = "# Wishlist\n\n(owed treats / wants / self-rewards — append-only)\n"

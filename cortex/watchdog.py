@@ -163,13 +163,6 @@ def _verify_esc_or_hard_interrupt(cfg: dict, grace_sec: float, trigger: str) -> 
     return f"hard-interrupt:{trigger} pid={pid}"
 
 
-_DEFAULT_FUSE_PROMPT = (
-    "⚙️ [FUSE] Summarise this whole session into one section and append it to "
-    "handoff.md — follow the format and style of the preceding sections. Call "
-    "lie_down(rotate=True) when done."
-)
-
-
 def _fuse(cfg: dict, grace: float) -> None:
     """Fuse path: esc the runaway turn, prompt the session to write its handoff
     and lie_down(rotate=True), then give it a bounded grace window to do so
@@ -177,18 +170,22 @@ def _fuse(cfg: dict, grace: float) -> None:
     reaction, fall back to the force path (SIGINT esc-equivalent + proxy
     lie_down); force_slept is set only when the handoff was NOT written this
     grace phase, so the catchup marker fires exactly when the handoff is missing.
-    Hard deadline on the whole grace phase — the fuse must never hang."""
+    Hard deadline on the whole grace phase — the fuse must never hang.
+
+    Covert delivery: only the "⚙️ [FUSE]" marker reaches the window (bell via the
+    ear Monitor; typed only if the ear is dead). The full FUSE instruction body is
+    injected invisibly by the marrow hook keyed on the marker ([cortex].fuse_prompt_text)."""
     from cortex import lie_down as lie_down_mod
 
     wcfg = cfg["wake"].get("watchdog", {})
     handoff_grace = float(wcfg.get("fuse_handoff_grace_sec", 300))
-    prompt = wcfg.get("fuse_handoff_prompt") or _DEFAULT_FUSE_PROMPT
+    marker_line = str(cfg["wake"].get("fuse_marker") or "⚙️ [FUSE]").strip()
 
     window.send_esc(cfg)
-    time.sleep(1.0)  # let esc land before typing the prompt
+    time.sleep(1.0)  # let esc land before delivering the marker
     handoff = config.handoff_path(cfg)
     before_mtime = handoff.stat().st_mtime if handoff.exists() else None
-    window.inject_prompt(cfg, prompt)
+    window.deliver_covert_marker(cfg, marker_line)
 
     # Poll for the session to lie down on its own (awake marker cleared) within
     # the grace window. Hard deadline = handoff_grace from now.
@@ -256,7 +253,7 @@ def _free_round_note(cfg: dict) -> tuple[str, str | None]:
             # advance_baseline=False: render must NOT persist the baseline. The
             # caller advances it only after the injection is committed.
             data = note.gather(conn, cfg, now, window_sid=sid,
-                               advance_baseline=False, consume_kick=True)
+                               advance_baseline=False)
             text = note.render(cfg, now, data).strip()
             # FIX 6 + P2-B: the deferred advance must use the SAME cutoff this
             # note was built on, captured inside gather() — not a second query
@@ -362,7 +359,12 @@ def _stamp_tuck_pending():
     session is still awake, has no live wait window, and no tuck_pending yet.
     Returns True when it stamped (caller then appends the line), False otherwise
     (nothing appended). The epoch check is done by conditional_mutate's token
-    guard; these are the in-lock content invariants."""
+    guard; these are the in-lock content invariants.
+
+    Auto+manual share ONE wait quota per wake: this auto silence gate CONSUMES
+    the wait counter when it stamps (bump wait_count to at least the cap), so a
+    later manual wait() this wake is refused (menu only). No double-count when a
+    wait already ran — only bump when still under cap."""
     def _m(d: dict) -> bool:
         if not d.get("awake"):
             return False
@@ -379,6 +381,11 @@ def _stamp_tuck_pending():
             except ValueError:
                 pass
         d["tuck_pending"] = datetime.now(timezone.utc).isoformat()
+        try:
+            used = int(d.get("wait_count", 0) or 0)
+        except (TypeError, ValueError):
+            used = 0
+        d["wait_count"] = used + 1  # auto observe consumes one shared-quota slot
         return True
     return _m
 
@@ -447,7 +454,7 @@ def silence_action(cfg: dict, silent_min: float, *, allow_tuck: bool = True) -> 
         return None
 
     # Chat tier.
-    silent_max = float(wcfg.get("silent_max_min", 15))
+    silent_max = float(wcfg.get("silent_max_min", 20))
     grace = float(wcfg.get("tuck_grace_min", 5))
     if silent_min < silent_max:
         return None

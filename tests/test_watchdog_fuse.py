@@ -24,8 +24,10 @@ def _no_sleep(monkeypatch):
 
 def _stub_window(monkeypatch, calls):
     monkeypatch.setattr(watchdog.window, "send_esc", lambda cfg: calls.append("esc"))
-    monkeypatch.setattr(watchdog.window, "inject_prompt",
-                        lambda cfg, text: calls.append("prompt") or True)
+    # FUSE now delivers only the ⚙️ [FUSE] marker covertly (bell/typed); the body
+    # is injected marrow-side. Stub the covert delivery, capturing the marker.
+    monkeypatch.setattr(watchdog.window, "deliver_covert_marker",
+                        lambda cfg, line: calls.append(("marker", line)) or "bell")
     monkeypatch.setattr(watchdog, "_verify_esc_or_hard_interrupt",
                         lambda cfg, grace, trig: None)
 
@@ -51,7 +53,9 @@ def test_fuse_session_lies_down_itself_no_force(cfg, monkeypatch):
 
     monkeypatch.setattr(watchdog.wake_state, "load", fake_load)
     watchdog._fuse(cfg, grace=0.0)
-    assert "esc" in calls and "prompt" in calls
+    assert "esc" in calls
+    assert any(c[0] == "marker" and "[FUSE]" in c[1] for c in calls
+               if isinstance(c, tuple))  # only the marker delivered, not the body
     assert forced == []  # session lay down itself -> no proxy lie_down
 
 
@@ -72,13 +76,13 @@ def test_fuse_timeout_with_handoff_forces_without_marker(cfg, monkeypatch):
     _stub_window(monkeypatch, calls)
     forced = []
 
-    def fake_inject(c, text):
+    def fake_deliver(c, line):
         # Simulate the session writing its handoff (but never lying down).
         config.handoff_path(c).write_text("did stuff", encoding="utf-8")
-        calls.append("prompt")
-        return True
+        calls.append(("marker", line))
+        return "bell"
 
-    monkeypatch.setattr(watchdog.window, "inject_prompt", fake_inject)
+    monkeypatch.setattr(watchdog.window, "deliver_covert_marker", fake_deliver)
     monkeypatch.setattr(lie_down_mod, "lie_down",
                         lambda cfg, force_slept=None: forced.append(force_slept))
     wake_state.update(cfg, awake=True)

@@ -21,7 +21,7 @@ from cortex.pacemaker.triggers import clamp_window_minutes
 
 
 def wait(cfg: dict, minutes: float) -> dict:
-    cap = int(cfg["wake"].get("wait_max_per_wake", 2) or 0)
+    cap = int(cfg["wake"].get("wait_max_per_wake", 1) or 0)
     minutes = clamp_window_minutes(minutes, cfg)
     until = datetime.now(timezone.utc) + timedelta(minutes=minutes)
     # One atomic strict-locked mutation: verify awake + under cap, bump gen (an

@@ -53,6 +53,13 @@ def _note_cfg(cfg: dict) -> dict:
     return cfg.get("note", {}) or {}
 
 
+class _ClampDefaults(dict):
+    """format_map source that leaves unknown placeholders literal, so a custom
+    turn_end_text template never crashes on a placeholder not in the clamp set."""
+    def __missing__(self, key):
+        return "{" + key + "}"
+
+
 # Channels whose turns are cortex self-talk (wake monologues), excluded from
 # Replay so the wakeup note does not replay itself back into its own context.
 _DEFAULT_REPLAY_EXCLUDE_CHANNELS = ("ct",)
@@ -63,37 +70,6 @@ def _replay_exclude_channels(cfg: dict) -> tuple[str, ...]:
     if raw is None:
         return _DEFAULT_REPLAY_EXCLUDE_CHANNELS
     return tuple(str(c) for c in raw if str(c).strip())
-
-
-def _consume_kick_reasons(cfg: dict, ws: dict) -> list[str]:
-    """Read the pending kick reason flags (cortex.kick appended them under the
-    strict lock) and CLEAR exactly those from wake_state. Called only by the
-    delivered-note paths (consume_kick=True). Reasons that arrived between the
-    load and the clear are preserved (list-tail re-read). Best-effort: any lock
-    failure returns the loaded reasons WITHOUT clearing (they replay next note —
-    a duplicate reason line beats a lost wake signal)."""
-    reasons = ws.get("kick_reasons")
-    if not isinstance(reasons, list) or not reasons:
-        return []
-    reasons = [str(r) for r in reasons if str(r).strip()]
-    if not reasons:
-        return []
-    n = len(reasons)
-    try:
-        from cortex import wake_state
-
-        def _clear(d: dict):
-            cur = d.get("kick_reasons")
-            if isinstance(cur, list):
-                d["kick_reasons"] = cur[n:]
-                if not d["kick_reasons"]:
-                    d.pop("kick_reasons", None)
-            return None
-
-        wake_state.conditional_mutate(cfg, None, _clear)
-    except Exception:
-        pass
-    return reasons
 
 
 # --------------------------------------------------------------------------- #
@@ -435,7 +411,6 @@ def gather(
     window_sid: str | None = None,
     advance_baseline: bool = False,
     full_replay: bool = False,
-    consume_kick: bool = False,
 ) -> dict:
     """Assemble the wakeup note data dict. conn must use sqlite3.Row factory.
     `fresh`/`wake_kind` are accepted for caller compatibility; the handoff
@@ -550,15 +525,8 @@ def gather(
             not note_since_ts or rendered_cutoff > note_since_ts):
         _safe(wake_state.set_last_note_ts, cfg, rendered_cutoff)
 
-    # Kick reason flags (cortex.kick): rendered as their own note block, then
-    # cleared. Only the delivered-note paths pass consume_kick=True; render-only
-    # re-renders (full_replay mirror, marrow render_module, --print-note) leave
-    # it False so a passive re-render never drops an unseen wake reason.
-    kick_reasons = _consume_kick_reasons(cfg, ws) if consume_kick else []
-
     return {
         "replay_cutoff_ts": replay_cutoff_ts,
-        "kick_reasons": kick_reasons,
         "last_wake": last_wake,
         "last_active": last_active,
         "budget": budget,
@@ -679,11 +647,6 @@ def render(cfg: dict, now: datetime, data: dict) -> str:
 
     blocks: list[str] = ["\n".join(header)]
 
-    kick_reasons = data.get("kick_reasons") or []
-    if kick_reasons:
-        klabel = _note_cfg(cfg).get("kick_header", "### Woke for")
-        blocks.append("\n".join([klabel, *(f"- {r}" for r in kick_reasons)]))
-
     pending = data.get("pending") or []
     if pending:
         segs = [f"due {p['hm']} {p['intent']}".rstrip() for p in pending]
@@ -703,7 +666,7 @@ def render(cfg: dict, now: datetime, data: dict) -> str:
     note_text = "\n\n---\n\n".join(blocks)
     turn_end = _note_cfg(cfg).get("turn_end_text", "")
     if turn_end:
-        note_text += "\n\n" + turn_end
+        note_text += "\n\n" + turn_end.format_map(_ClampDefaults(config.wake_clamps(cfg)))
 
     title = _note_cfg(cfg).get("title", "")
     if title:

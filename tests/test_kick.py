@@ -1,15 +1,14 @@
-"""cortex.kick (P6): reason flag under flock + epoch, awake=flag-only, asleep=
-flag + floor clear + sentinel kill + one detached tick. note.py renders + clears
-the reason. All tick/sentinel spawns are stubbed — never kick the live cortex."""
+"""cortex.kick (P6, reasons retired): under flock + epoch, asleep = gen bump +
+floor clear + sentinel kill + one detached tick; awake = audit-only no-op. The
+kind lands in the wake-audit log ONLY — never in wake_state or the note. All
+tick/sentinel spawns are stubbed — never kick the live cortex."""
 from __future__ import annotations
 
 import json
-from datetime import datetime
-from zoneinfo import ZoneInfo
 
 import pytest
 
-from cortex import db, kick, note, wake_state
+from cortex import kick, wake_state
 
 
 @pytest.fixture
@@ -26,12 +25,6 @@ def cfg(tmp_path):
             "watchdog_pidfile": str(home / "state" / "watchdog.pid"),
             "wake_audit_log": str(home / "state" / "wake_audit.log"),
         },
-        "kick": {
-            "reason_reply": "watch: note #{id} got her reply",
-            "reason_timeout": "watch: note #{id} silent {minutes}min",
-            "reason_morning": "morning: she's up — flag cleared, day cadence",
-        },
-        "note": {"kick_header": "### Woke for"},
     }
 
 
@@ -47,25 +40,30 @@ def _ws(cfg) -> dict:
     return json.loads(wake_state.wake_state_path(cfg).read_text())
 
 
-def test_kick_asleep_flags_and_ticks(cfg, _stub_spawn):
+def _audit(cfg) -> str:
+    from cortex import config
+    return config.wake_audit_log_path(cfg).read_text()
+
+
+def test_kick_asleep_ticks_no_reason(cfg, _stub_spawn):
     wake_state.update(cfg, awake=False, next_wake_at="2026-07-17T09:00:00",
                       sentinel_pid=999999)
     r = kick.kick(cfg, "reply", id=7)
     assert r["ok"] and r["ticked"] and not r["awake"]
     assert len(_stub_spawn) == 1  # exactly one tick spawned
     d = _ws(cfg)
-    assert d["kick_reasons"] == ["watch: note #7 got her reply"]
+    assert "kick_reasons" not in d          # reasons retired
     assert "next_wake_at" not in d          # ledger cleared
     assert "sentinel_pid" not in d          # sentinel released
 
 
-def test_kick_awake_flag_only_no_tick(cfg, _stub_spawn):
+def test_kick_awake_audit_only_no_tick(cfg, _stub_spawn):
     wake_state.update(cfg, awake=True, next_wake_at="2026-07-17T09:00:00")
     r = kick.kick(cfg, "morning")
     assert r["ok"] and r["awake"] and not r["ticked"]
     assert _stub_spawn == []                 # NO tick while awake
     d = _ws(cfg)
-    assert d["kick_reasons"] == ["morning: she's up — flag cleared, day cadence"]
+    assert "kick_reasons" not in d           # no reason written
     assert d["next_wake_at"] == "2026-07-17T09:00:00"  # ledger untouched
 
 
@@ -81,46 +79,10 @@ def test_kick_awake_does_not_bump_gen(cfg, _stub_spawn):
     assert _ws(cfg)["gen"] == 5              # awake: no epoch change
 
 
-def test_timeout_reason_renders_fields(cfg, _stub_spawn):
+def test_kind_and_fields_recorded_in_audit_only(cfg, _stub_spawn):
     wake_state.update(cfg, awake=False)
     kick.kick(cfg, "timeout", id=9, minutes=45)
-    assert _ws(cfg)["kick_reasons"] == ["watch: note #9 silent 45min"]
-
-
-def test_reason_cap(cfg, _stub_spawn):
-    wake_state.update(cfg, awake=True)
-    for i in range(12):
-        kick.kick(cfg, "reply", id=i)
-    assert len(_ws(cfg)["kick_reasons"]) == kick._MAX_REASONS
-
-
-def test_note_renders_and_clears_kick_reasons(cfg, marrow_conn_for):
-    conn = marrow_conn_for
-    wake_state.update(cfg, awake=True,
-                      kick_reasons=["watch: note #7 got her reply"])
-    now = datetime.now(ZoneInfo("Australia/Melbourne"))
-    data = note.gather(conn, cfg, now, consume_kick=True)
-    assert data["kick_reasons"] == ["watch: note #7 got her reply"]
-    text = note.render(cfg, now, data)
-    assert "### Woke for" in text
-    assert "watch: note #7 got her reply" in text
-    # consumed: a second delivered render sees nothing
+    audit = _audit(cfg)
+    assert "kick" in audit and "timeout" in audit
+    assert "id=9" in audit and "minutes=45" in audit
     assert "kick_reasons" not in _ws(cfg)
-    data2 = note.gather(conn, cfg, now, consume_kick=True)
-    assert data2["kick_reasons"] == []
-
-
-def test_note_render_only_does_not_clear(cfg, marrow_conn_for):
-    conn = marrow_conn_for
-    wake_state.update(cfg, awake=True, kick_reasons=["morning: she's up"])
-    now = datetime.now(ZoneInfo("Australia/Melbourne"))
-    data = note.gather(conn, cfg, now, consume_kick=False)  # render-only
-    assert data["kick_reasons"] == []                       # not surfaced
-    assert _ws(cfg)["kick_reasons"] == ["morning: she's up"]  # NOT cleared
-
-
-@pytest.fixture
-def marrow_conn_for(cfg):
-    conn = db.connect_path(__import__("pathlib").Path(cfg["paths"]["marrow_db"]))
-    yield conn
-    conn.close()
