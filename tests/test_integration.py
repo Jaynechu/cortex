@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from cortex import config, db
-from cortex.pacemaker import gates, integration
+from cortex.pacemaker import integration
 from cortex.pacemaker.core import PacemakerState
 
 MEL = ZoneInfo("Australia/Melbourne")
@@ -259,15 +259,41 @@ def test_daily_budget_finished_window_final_over_cap_gates(conn, cfg):
     assert any(g.name == "daily_budget" for g in decision["gated_by"])
 
 
-def test_night_mode_gates_floor_wake(conn, cfg):
-    now = datetime(2026, 7, 4, 2, 0, tzinfo=MEL)  # inside default 23:00-06:00 window
-    night_key = gates.night_key(cfg, now)
+def test_night_cap_gates_floor_wake(conn, cfg, tmp_path):
+    # Night FLAG set + cap reached -> floor wake gated by night-cap.
+    from cortex import wake_state
+    home = tmp_path / "cortex"
+    (home / "state").mkdir(parents=True)
+    cfg["paths"]["cortex_home"] = str(home)
+    cfg["paths"]["wake_state_file"] = str(home / "state" / "wake_state.json")
+    cfg["night"]["cap"] = 1
+    wake_state.update(cfg, mode="night")
+
+    now = datetime(2026, 7, 4, 2, 0, tzinfo=MEL)
     state = PacemakerState(
         next_floor_due_at=now - timedelta(minutes=1),  # force a floor trigger
-        night_cap_key=night_key,
-        night_wake_count=0,  # cap is 0 -> any self-wake is silenced at night
+        night_cap_key="night",
+        night_wake_count=1,  # at cap 1 -> silenced
     )
     integration.save_state(conn, state)
     decision = integration.run_tick(conn, cfg, now=now, rng=random.Random(1))
     assert decision["wake"] is False
-    assert any(g.name == "night-mode" for g in decision["gated_by"])
+    assert any(g.name == "night-cap" for g in decision["gated_by"])
+
+
+def test_night_flag_drives_floor_band(conn, cfg, tmp_path):
+    # With the flag set, a floor redraw lands in the 120-360 roaming band.
+    from cortex import wake_state
+    home = tmp_path / "cortex"
+    (home / "state").mkdir(parents=True)
+    cfg["paths"]["cortex_home"] = str(home)
+    cfg["paths"]["wake_state_file"] = str(home / "state" / "wake_state.json")
+    wake_state.update(cfg, mode="night")
+
+    now = datetime(2026, 7, 4, 2, 0, tzinfo=MEL)
+    integration.save_state(conn, PacemakerState(
+        next_floor_due_at=now - timedelta(minutes=1)))
+    integration.run_tick(conn, cfg, now=now, rng=random.Random(1))
+    loaded = integration.load_state(conn)
+    delta_min = (loaded.next_floor_due_at - now).total_seconds() / 60.0
+    assert 120 <= delta_min <= 360

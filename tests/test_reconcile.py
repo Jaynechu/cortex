@@ -1,6 +1,6 @@
 """Ledger + tick reconcile + pause gating (schedule reliability fix).
 
-Covers: next_wake_at write/clear, night clamp, the reconcile decision matrix
+Covers: next_wake_at write/clear, no night clamp (P8), the reconcile decision matrix
 (alive-never-touch / rotated-vs-resume / accidental-close / future-hold), pause
 gating, per-session _window_alive, and that the tick has no dangling catchup
 import. No iTerm/claude here — all machine-touching calls are stubbed."""
@@ -72,49 +72,45 @@ def test_lie_down_no_rotate_leaves_retired_sid_untouched(cfg):
     assert wake_state.get_retired_sid(cfg) is None
 
 
-# --- night clamp --------------------------------------------------------------
+# --- no night clamp (P8: gate-end clamp retired) ------------------------------
 
-def test_night_clamp_pushes_to_gate_end(cfg):
+def test_arm_sentinel_no_night_clamp(cfg):
+    """P8: the sentinel gate-end clamp is gone — a due time that once fell 'inside
+    the old window' now arms at its REAL time (else the 120-360 roaming band would
+    collapse to the gate end)."""
     tz = _tz(cfg)
-    cfg["gates"]["night"] = {"start": "23:00", "end": "08:00", "cap": 0}
-    mid_night = datetime(2026, 7, 13, 2, 30, tzinfo=tz)  # inside the gate
-    clamped = lie_down._clamp_to_night_end(cfg, mid_night)
-    assert clamped.hour == 8 and clamped.minute == 0
-    assert clamped.date() == mid_night.date()  # same morning
-
-
-def test_night_clamp_leaves_daytime_untouched(cfg):
-    tz = _tz(cfg)
-    cfg["gates"]["night"] = {"start": "23:00", "end": "08:00", "cap": 0}
-    noon = datetime(2026, 7, 13, 12, 0, tzinfo=tz)
-    assert lie_down._clamp_to_night_end(cfg, noon) == noon
-
-
-def test_arm_sentinel_returns_effective_clamped_time(cfg):
-    """P2-3: _arm_sentinel must return the EFFECTIVE (post-night-clamp) time —
-    the ledger, sentinel and lie_down()'s reported next_wake must all agree
-    (never report the pre-clamp time, e.g. 02:00, when 08:00 was armed)."""
-    tz = _tz(cfg)
-    cfg["gates"]["night"] = {"start": "23:00", "end": "08:00", "cap": 0}
     cfg["wake"]["sentinel"] = False  # no detached process in tests
-    mid_night = datetime(2026, 7, 13, 2, 0, tzinfo=tz)  # inside the gate
+    mid_night = datetime(2026, 7, 13, 2, 0, tzinfo=tz)
     effective = lie_down._arm_sentinel(cfg, mid_night)
-    assert effective.hour == 8 and effective.minute == 0
+    assert effective == mid_night  # unchanged, no clamp
     ledger = wake_state.get_next_wake_at(cfg)
-    assert ledger is not None
-    assert "08:00" in ledger  # ledger agrees with the returned effective time
+    assert ledger is not None and "02:00" in ledger
 
 
-def test_lie_down_reports_clamped_next_wake(cfg):
-    """lie_down()'s reported next_wake must be the post-clamp HH:MM, matching
-    what _arm_sentinel actually wrote to the ledger — regardless of whether the
-    pre-clamp floor lands inside or outside the night gate."""
-    cfg["gates"]["night"] = {"start": "23:00", "end": "08:00", "cap": 0}
+def test_lie_down_reports_real_next_wake(cfg):
+    """lie_down()'s reported next_wake matches the ledger exactly (no clamp)."""
     wake_state.set_awake(cfg, 1, None)
     r = lie_down.lie_down(cfg, next_wake_min=20)
     ledger = wake_state.get_next_wake_at(cfg)
     assert ledger is not None and r["next_wake"] is not None
     assert r["next_wake"] in ledger  # HH:MM substring of the ISO ledger
+
+
+def test_lie_down_night_mode_sets_flag_and_night_band(cfg):
+    """lie_down(mode='night') sets the persistent flag and clamps N to the night
+    band [120, 360]."""
+    wake_state.set_awake(cfg, 1, None)
+    r = lie_down.lie_down(cfg, next_wake_min=10, mode="night")  # 10 < 120 -> clamps up
+    assert r["mode"] == "night"
+    assert r["rotated"] is True  # night forces rotate
+    assert wake_state.is_night_mode(cfg) is True
+    ledger = wake_state.get_next_wake_at(cfg)
+    from datetime import datetime as _dt
+    from zoneinfo import ZoneInfo
+    due = _dt.fromisoformat(ledger)
+    tz = ZoneInfo(cfg["core"]["timezone"])
+    delta_min = (due - _dt.now(tz)).total_seconds() / 60.0
+    assert 119 <= delta_min <= 361  # ~120 (clamped up from 10)
 
 
 # --- reconcile decision matrix ------------------------------------------------
@@ -254,11 +250,21 @@ def test_fire_dead_window_dry_run_consumes_ledger(cfg):
     assert new_due != stale_due.isoformat()
 
 
-def test_fire_dead_window_night_gated_holds_ledger(cfg):
-    """P1-B: a due-ledger fire that lands inside the night gate must HOLD
-    (gates.run_gates disallows) and leave next_wake_at UN-consumed, so
-    reconcile retries every tick and fires naturally once the gate opens."""
-    cfg["gates"]["night"] = {"start": "00:00", "end": "23:59", "cap": 0}  # always night
+def test_fire_dead_window_night_cap_gated_holds_ledger(cfg):
+    """P8: a due-ledger fire while the night flag is set AND the per-night cap is
+    exhausted must HOLD (night-cap gate disallows) and leave next_wake_at
+    UN-consumed, so reconcile retries once the flag clears / a new night starts."""
+    cfg["night"]["cap"] = 1
+    wake_state.update(cfg, mode="night")
+    # Persist a pacemaker state already at cap for this night.
+    conn0 = db.connect(cfg)
+    try:
+        from cortex.pacemaker import integration
+        from cortex.pacemaker.core import PacemakerState
+        integration.save_state(conn0, PacemakerState(
+            night_cap_key="night", night_wake_count=1))
+    finally:
+        conn0.close()
     now = datetime.now(_tz(cfg))
     stale_due = now - timedelta(minutes=1)
     wake_state.set_next_wake_at(cfg, stale_due.isoformat())
@@ -300,15 +306,15 @@ def test_fire_dead_window_daily_budget_gated_holds_ledger(cfg):
     assert wake_state.get_next_wake_at(cfg) == stale_due.isoformat()  # untouched
 
 
-def test_main_pause_short_circuits_before_night_close(cfg, monkeypatch):
-    """P1-3: paused (DND) must hold night-close's wrap-up injection too — the
-    pause check must run before _night_close, not just inside _reconcile."""
+def test_main_pause_short_circuits_before_reconcile(cfg, monkeypatch):
+    """Paused (DND) holds everything: main() returns 0 before running reconcile /
+    the tick, so no wake path fires."""
     monkeypatch.setattr(pacemaker_tick.config, "load", lambda: cfg)
     wake_state.set_paused(cfg, True)
 
     def _boom(*a, **k):
-        raise AssertionError("_night_close must not run while paused")
-    monkeypatch.setattr(pacemaker_tick, "_night_close", _boom)
+        raise AssertionError("_reconcile must not run while paused")
+    monkeypatch.setattr(pacemaker_tick, "_reconcile", _boom)
     assert pacemaker_tick.main() == 0
 
 

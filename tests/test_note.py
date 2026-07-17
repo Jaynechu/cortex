@@ -65,6 +65,25 @@ def test_render_full_note(cfg):
     assert "Cal:" not in text and "Rem:" not in text
 
 
+def test_render_night_activity_line(cfg):
+    # C4: night flag set -> the all-channel Last-activity line renders.
+    data = {
+        "night_mode": True,
+        "last_activity_any": {"channel": "tg", "hm": "23:40", "silent_h": 2.3},
+    }
+    text = note.render(cfg, NOW, data)
+    assert "Last activity: tg 23:40 (2.3h silent)" in text
+
+
+def test_render_night_activity_omitted_when_day(cfg):
+    # No flag -> C4 line never renders even if the datum is present.
+    data = {
+        "night_mode": False,
+        "last_activity_any": {"channel": "tg", "hm": "23:40", "silent_h": 2.3},
+    }
+    assert "Last activity:" not in note.render(cfg, NOW, data)
+
+
 def test_render_omits_absent_lines(cfg):
     text = note.render(cfg, NOW, {})
     assert "Wake:" not in text  # reason line retired
