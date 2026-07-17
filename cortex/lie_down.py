@@ -87,10 +87,11 @@ def _record_tokens(conn, cfg: dict, state: dict, force_slept: str | None) -> int
 def lie_down(cfg: dict, force_slept: str | None = None, rotate: bool = False,
              next_wake_min: float | None = None) -> dict:
     """End the current wake. `next_wake_min` picks the next internal wake:
-    an explicit minutes-from-now (clamped to [next_wake_min, next_wake_max]; a
-    rotate short-sleep lowers the floor to next_wake_rotate_min), or None = a
-    uniform "dice" draw within the floor window (proxy paths: watchdog auto, stale
-    reap, fuse — session-facing dice retired, N required at the MCP/CLI layer)."""
+    an explicit minutes-from-now (clamped to [next_wake_min, next_wake_max]), or
+    None = a uniform "dice" draw within the floor window (proxy paths: watchdog
+    auto, stale reap, fuse — session-facing dice retired, N required at the
+    MCP/CLI layer). `rotate` respawns a fresh window next wake; it no longer
+    lowers the clamp floor."""
     from cortex.pacemaker.triggers import clamp_next_wake_minutes
 
     if next_wake_min is not None:
@@ -306,8 +307,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="respawn a fresh window on the next wake")
     parser.add_argument("--next-wake-min", type=float, required=True,
                         help="minutes until the next internal wake (required, "
-                             "clamped to [next_wake_min, next_wake_max]; "
-                             "--rotate lowers the floor to next_wake_rotate_min)")
+                             "clamped to [next_wake_min, next_wake_max])")
     args = parser.parse_args(argv)
     cfg = config.load()
     result = lie_down(cfg, force_slept=args.force_slept, rotate=args.rotate,

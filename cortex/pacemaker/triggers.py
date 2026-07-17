@@ -101,19 +101,19 @@ def clamp_window_minutes(minutes: float, config: dict) -> float:
     from the floor draw window (triggers.floor_*)."""
     wcfg = config.get("wake", {})
     lo = wcfg.get("wait_min", 1)
-    hi = wcfg.get("wait_max", 55)
+    hi = wcfg.get("wait_max", 20)
     return max(lo, min(hi, minutes))
 
 
 def clamp_next_wake_minutes(minutes: float, config: dict, rotate: bool = False) -> float:
     """Clamp a lie_down(next_wake_min=N) choice to [next_wake_min, next_wake_max].
-    Normal floor = wake.next_wake_min; a rotate short-sleep ("context full, back in
-    N min") lowers the floor to wake.next_wake_rotate_min. The session-facing wake
-    window is wider than the floor draw (dice retired for the session; proxy paths
-    pass None and skip this clamp)."""
+    The `rotate` flag no longer lowers the floor — the day floor (next_wake_min) is
+    already low enough. It is kept in the signature because lie_down passes it and
+    rotate remains a real (window-respawn) decision. Proxy paths pass None and skip
+    this clamp."""
     wcfg = config.get("wake", {})
-    hi = wcfg.get("next_wake_max", 360)
-    lo = wcfg.get("next_wake_rotate_min", 16) if rotate else wcfg.get("next_wake_min", 90)
+    hi = wcfg.get("next_wake_max", 240)
+    lo = wcfg.get("next_wake_min", 21)
     return max(lo, min(hi, minutes))
 
 

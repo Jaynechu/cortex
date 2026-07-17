@@ -362,6 +362,19 @@ def claim_lie_down(cfg: dict, force_slept: str | None = None) -> dict | None:
     return snapshot
 
 
+# Observe/menu two-state machine (P7). The persisted `tuck_pending` field is the
+# state carrier: absent/None = OBSERVE_ARMED (the auto silence gate or a declared
+# wait is running, no menu shown yet); a stamped ISO ts = MENU_DELIVERED (the
+# 3-choice menu was injected once at expiry, grace timer runs from that ts). The
+# field name is kept for the epoch-guarded mutators + marrow's user-wake reset;
+# these accessors name the states at the API surface.
+
+def menu_delivered(cfg: dict) -> bool:
+    """True once the expiry menu (C2) has been injected this wake (state =
+    MENU_DELIVERED). False = OBSERVE_ARMED (still observing / holding a wait)."""
+    return load(cfg).get("tuck_pending") is not None
+
+
 def user_replied_this_wake(cfg: dict) -> bool:
     """True once a real user message landed in the current wake (set by the
     marrow UserPromptSubmit hook). Drives the chat vs no-user silence tier."""

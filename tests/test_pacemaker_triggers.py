@@ -15,11 +15,10 @@ def base_config():
             "floor_max_min": 55,
         },
         "wake": {
-            "wait_min": 16,
-            "wait_max": 55,
-            "next_wake_min": 90,
-            "next_wake_rotate_min": 16,
-            "next_wake_max": 360,
+            "wait_min": 1,
+            "wait_max": 20,
+            "next_wake_min": 21,
+            "next_wake_max": 240,
         },
     }
 
@@ -135,22 +134,23 @@ def test_clamp_window_minutes_uses_wait_bounds():
     # wait(N) clamp now reads [wake.wait_min, wake.wait_max], decoupled from
     # the floor draw window.
     config = base_config()
-    assert clamp_window_minutes(30, config) == 30
-    assert clamp_window_minutes(0, config) == 16   # below wait_min -> 16
-    assert clamp_window_minutes(90, config) == 55
+    assert clamp_window_minutes(10, config) == 10
+    assert clamp_window_minutes(0, config) == 1    # below wait_min -> 1
+    assert clamp_window_minutes(90, config) == 20  # above wait_max -> 20
 
 
 def test_clamp_next_wake_minutes_bounds():
-    # Normal clamp = [next_wake_min (90), next_wake_max (360)].
+    # Normal clamp = [next_wake_min (21), next_wake_max (240)].
     config = base_config()
     assert clamp_next_wake_minutes(120, config) == 120
-    assert clamp_next_wake_minutes(20, config) == 90        # below floor -> 90
-    assert clamp_next_wake_minutes(999, config) == 360      # above ceiling -> 360
+    assert clamp_next_wake_minutes(10, config) == 21        # below floor -> 21
+    assert clamp_next_wake_minutes(999, config) == 240      # above ceiling -> 240
 
 
-def test_clamp_next_wake_minutes_rotate_lowers_floor():
-    # rotate=True short-sleep floor = next_wake_rotate_min (16); ceiling unchanged.
+def test_clamp_next_wake_minutes_rotate_no_longer_lowers_floor():
+    # rotate=True no longer lowers the floor: the day floor (next_wake_min) is
+    # already low enough. rotate uses the SAME [next_wake_min, next_wake_max].
     config = base_config()
-    assert clamp_next_wake_minutes(20, config, rotate=True) == 20    # >=16 kept
-    assert clamp_next_wake_minutes(5, config, rotate=True) == 16     # below floor
-    assert clamp_next_wake_minutes(999, config, rotate=True) == 360
+    assert clamp_next_wake_minutes(30, config, rotate=True) == 30    # in-range kept
+    assert clamp_next_wake_minutes(10, config, rotate=True) == 21    # below floor -> 21
+    assert clamp_next_wake_minutes(999, config, rotate=True) == 240

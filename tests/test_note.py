@@ -77,11 +77,12 @@ def test_render_omits_absent_lines(cfg):
 
 
 def test_render_turn_end_line_appears_every_render(cfg):
+    # Clamp numbers render from config (wait 1-20, next_wake 21-240) — no hardcode.
     text = note.render(cfg, NOW, {})
     assert text.rstrip().endswith(
         "NOTE: Call MCP tool to wait or lie_down at the end of each turn. "
-        "Wait=wait(N) [N=16-55]; sleep=lie_down(next_wake_min=N) "
-        "[90-360; rotate=True unlocks ≥16]. "
+        "Wait=wait(N) [N=1-20]; sleep=lie_down(next_wake_min=N) "
+        "[21-240]. "
         "Skip call = sleep in 5 mins. Auto timer is on during active chat "
         "- no call needed.")
 

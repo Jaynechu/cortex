@@ -92,17 +92,16 @@ rearm_suffix = " (ear died — rearm)"
 # say() = the ONLY place cortex takes focus: it fronts the resident window and
 # plays a system sound (name of a /System/Library/Sounds/*.aiff; "" = silent).
 say_sound = "Glass"
-wait_max_per_wake = 0       # max wait() calls per wake (0 = uncapped; night gate / 150k fuse / grace / user return backstop)
-wait_min = 16               # wait(N) clamp lower bound (minutes) — floor > silence gate (15) keeps wait "post-gate renewal"
-wait_max = 55               # wait(N) clamp upper bound (minutes) — hot cache-TTL guard
-next_wake_min = 90          # lie_down(next_wake_min=N) clamp lower bound (minutes)
-next_wake_rotate_min = 16   # rotate short-sleep clamp lower bound ("context full, back in N min")
-next_wake_max = 360         # lie_down(next_wake_min=N) clamp upper bound (minutes)
+wait_max_per_wake = 1       # one wait() per wake, then the 3-choice menu only (0 = uncapped)
+wait_min = 1                # wait(N) clamp lower bound (minutes) — short one-shot hold
+wait_max = 20               # wait(N) clamp upper bound (minutes)
+next_wake_min = 21          # lie_down(next_wake_min=N) clamp lower bound (minutes)
+next_wake_max = 240         # lie_down(next_wake_min=N) clamp upper bound (minutes)
 sentinel = true             # arm cortex.sentinel (one-shot exact-time wake) at every lie_down; false = tick-only fallback
-# Free-round marker appended to wake_signal.log at the silence gate or a wait(N)-
-# expiry. {mins} = real minutes since the user's last message; {user} = marrow
-# user_name (fallback "the user"). No-user tier gets no marker.
-tuck_in_text = "⏳ [NEW ROUND] {mins} min since {user}'s last message. Choose again: 1) play around (playbook); 2) wait(N) (16-55min); 3) lie_down(next_wake_min=N) (90-360min). Feel free to do anything. No need to wait for reply - {user} will wake you the moment she's back."
+# Menu injected once when the observe window (auto silence gate or a declared wait)
+# expires — the 3-choice free round (C2). Leading "⏳ [NEW ROUND]" is the machine-
+# line marker; the body is user-final C2. {mins}/{user} optional (no-op in C2).
+tuck_in_text = "⏳ [NEW ROUND] No need to wait in silence — 3 choices: 1) talk to her in session (second person) or msg another session  2) do your own things — see Playbook  3) lie_down..."
 # Markers identifying a NON-user turn (so they don't reset the silence timer and
 # downstream memory drops them). wake_signal_marker is added automatically.
 # Substring match: "[CMD" catches every ⚙️ [CMD ct-*] slash-command body.
@@ -185,6 +184,13 @@ close_prompt = "⏳ [NIGHT] Night window is open — one full sleep now. Write y
 [gates.daily_budget]
 tokens = 1000000
 
+# Night roaming floor (minutes): lie_down(mode='night') draw + clamp under the
+# night flag; also the Night range in lie_down's tool description. P8 adds the
+# flag lifecycle keys (start / morning_start / silence_hours / cap) on top.
+[night]
+floor_min = 120
+floor_max = 360
+
 # External-wake (cortex.kick) reason lines rendered into the wakeup note (§Copy
 # C5). A bridge/cli poke appends one; note.py renders + clears it. {id} = outbox
 # note id; {minutes} = channel silence minutes.
@@ -215,6 +221,6 @@ handoff_title = "碎碎念"   # title of the handoff-note section (customisable 
 replay_title = "最近对话回放"     # title of the conversation-replay section
 handoff_wake_kinds = ["rotate"]  # wake kinds that get the handoff (fresh window only)
 cadence_bin = ""             # cadence CLI for cal/rem lines; empty = packaged default path
-turn_end_text = "NOTE: Call MCP tool to wait or lie_down at the end of each turn. Wait=wait(N) [N=16-55]; sleep=lie_down(next_wake_min=N) [90-360; rotate=True unlocks ≥16]. Skip call = sleep in 5 mins. Auto timer is on during active chat - no call needed."  # one-line reminder appended at the end of every rendered note; "" omits it
+turn_end_text = "NOTE: Call MCP tool to wait or lie_down at the end of each turn. Wait=wait(N) [N={wait_min}-{wait_max}]; sleep=lie_down(next_wake_min=N) [{next_wake_min}-{next_wake_max}]. Skip call = sleep in 5 mins. Auto timer is on during active chat - no call needed."  # one-line reminder appended at the end of every rendered note; "" omits it. {wait_min}/{wait_max}/{next_wake_min}/{next_wake_max} render from the wake clamps
 # Header written into a freshly-created wishlist.md (append-only; never overwritten). Display text — customise freely.
 wishlist_header = "# Wishlist\n\n(owed treats / wants / self-rewards — append-only)\n"

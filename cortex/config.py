@@ -67,30 +67,28 @@ _DEFAULTS: dict[str, Any] = {
         "rearm_suffix": " (ear died — rearm)",
         "say_sound": "Glass",
         # Max wait() calls allowed per wake (reset on wake start / lie_down).
-        # 0 = uncapped (permanent residency; night gate / 150k fuse / grace
-        # auto-lie / user return are the backstops).
-        "wait_max_per_wake": 0,
+        # 1 = one wait per wake, then the 3-choice menu only. 0 = uncapped.
+        "wait_max_per_wake": 1,
         # wait() clamp bounds (minutes). Own bounds, decoupled from the floor
-        # draw window (triggers.floor_*): wait guards the hot cache TTL. Floor 16 >
-        # silence gate (15) keeps wait strictly "post-gate renewal".
-        "wait_min": 16,
-        "wait_max": 55,
-        # lie_down(next_wake_min=N) clamp (minutes): [next_wake_min, next_wake_max]
-        # normally; a rotate short-sleep lowers the floor to next_wake_rotate_min.
-        "next_wake_min": 90,
-        "next_wake_rotate_min": 16,
-        "next_wake_max": 360,
+        # draw window (triggers.floor_*): a short one-shot hold on the hot cache.
+        "wait_min": 1,
+        "wait_max": 20,
+        # lie_down(next_wake_min=N) clamp (minutes): [next_wake_min, next_wake_max].
+        "next_wake_min": 21,
+        "next_wake_max": 240,
         # Exact-time wake: arm cortex.sentinel (one-shot detached sleep-then-tick)
         # at every lie_down. false = tick-only (launchd 5-min fallback).
         "sentinel": True,
-        # Free-round marker appended to wake_signal.log at the silence gate or a
-        # wait(N)-expiry. {mins} = real minutes since the user's last message;
-        # {user} = marrow user_name (fallback "the user").
+        # Menu injected once when the observe window (auto silence gate or a
+        # declared wait) expires — the 3-choice free round (C2). The leading
+        # "⏳ [NEW ROUND]" is the machine-line marker (tuck_in_marker family) the
+        # ear/hook needs so the line never resets the silence timer; the body is
+        # user-final C2 verbatim. {mins}/{user} kept as optional placeholders (no
+        # placeholder in C2 = a harmless no-op substitution).
         "tuck_in_text":
-            "⏳ [NEW ROUND] {mins} min since {user}'s last message. Choose again: "
-            "1) play around (playbook); 2) wait(N) (16-55min); "
-            "3) lie_down(next_wake_min=N) (90-360min). Feel free to do anything. "
-            "No need to wait for reply - {user} will wake you the moment she's back.",
+            "⏳ [NEW ROUND] No need to wait in silence — 3 choices: "
+            "1) talk to her in session (second person) or msg another session  "
+            "2) do your own things — see Playbook  3) lie_down...",
         # Markers that identify a NON-user turn (wake bell / free-round / night /
         # fuse / ctl / slash-command line), so they never reset the silence timer
         # and downstream memory drops them. wake_signal_marker is added
@@ -114,6 +112,10 @@ _DEFAULTS: dict[str, Any] = {
         # subprocess kill = this + margin. Must match marrow's own default.
         "call_timeout_s": 600,
     },
+    # Night roaming floor (minutes) — lie_down(mode='night') draw + clamp under
+    # the night flag. P8 owns the flag lifecycle; only floor_min/floor_max are
+    # read here so lie_down's tool description can render the Night range.
+    "night": {"floor_min": 120, "floor_max": 360},
     "knowledgec": {"stream_name": "/app/usage"},
     "knowledgec.categories": {"default": "uncategorized"},
     "geofence": {"enabled": False},
@@ -192,11 +194,12 @@ _DEFAULTS: dict[str, Any] = {
             "Previous window died without a handoff — recover context from its "
             "transcript, then write the handoff.",
         # One-line turn-end reminder appended at the very end of every rendered
-        # note. "" omits it.
+        # note. "" omits it. {wait_min}/{wait_max}/{next_wake_min}/{next_wake_max}
+        # render from the wake clamps at note time (never hardcoded).
         "turn_end_text":
             "NOTE: Call MCP tool to wait or lie_down at the end of each turn. "
-            "Wait=wait(N) [N=16-55]; sleep=lie_down(next_wake_min=N) "
-            "[90-360; rotate=True unlocks ≥16]. "
+            "Wait=wait(N) [N={wait_min}-{wait_max}]; "
+            "sleep=lie_down(next_wake_min=N) [{next_wake_min}-{next_wake_max}]. "
             "Skip call = sleep in 5 mins. Auto timer is on during active chat "
             "- no call needed.",
         # Header written into a freshly-created wishlist.md (append-only file,
@@ -209,8 +212,23 @@ _DEFAULTS: dict[str, Any] = {
 _SECTIONS = (
     "core", "paths", "knowledgec", "geofence", "health",
     "tick", "pacemaker", "gates", "triggers", "marrow",
-    "wake", "note", "kick",
+    "wake", "note", "kick", "night",
 )
+
+
+def wake_clamps(cfg: dict) -> dict[str, int]:
+    """The four wake-clamp numbers rendered into note/tool text (never hardcoded).
+    Day lie_down bounds from [wake]; night bounds from [night].floor_*."""
+    w = cfg.get("wake", {})
+    n = cfg.get("night", {})
+    return {
+        "wait_min": int(w.get("wait_min", 1)),
+        "wait_max": int(w.get("wait_max", 20)),
+        "next_wake_min": int(w.get("next_wake_min", 21)),
+        "next_wake_max": int(w.get("next_wake_max", 240)),
+        "night_min": int(n.get("floor_min", 120)),
+        "night_max": int(n.get("floor_max", 360)),
+    }
 
 
 def _config_path() -> Path:

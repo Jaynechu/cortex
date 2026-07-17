@@ -53,6 +53,13 @@ def _note_cfg(cfg: dict) -> dict:
     return cfg.get("note", {}) or {}
 
 
+class _ClampDefaults(dict):
+    """format_map source that leaves unknown placeholders literal, so a custom
+    turn_end_text template never crashes on a placeholder not in the clamp set."""
+    def __missing__(self, key):
+        return "{" + key + "}"
+
+
 # Channels whose turns are cortex self-talk (wake monologues), excluded from
 # Replay so the wakeup note does not replay itself back into its own context.
 _DEFAULT_REPLAY_EXCLUDE_CHANNELS = ("ct",)
@@ -703,7 +710,7 @@ def render(cfg: dict, now: datetime, data: dict) -> str:
     note_text = "\n\n---\n\n".join(blocks)
     turn_end = _note_cfg(cfg).get("turn_end_text", "")
     if turn_end:
-        note_text += "\n\n" + turn_end
+        note_text += "\n\n" + turn_end.format_map(_ClampDefaults(config.wake_clamps(cfg)))
 
     title = _note_cfg(cfg).get("title", "")
     if title:
