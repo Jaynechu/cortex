@@ -1,9 +1,10 @@
-"""Two-tier silence + awake gate tests.
+"""Unified silence + awake gate tests.
 
-Chat tier (user replied this wake): silent >= silent_max -> TUCK-IN marker, then
-tuck_grace -> auto sleep. No-user tier: silent >= no_user_gate -> auto sleep, no
-marker. A live wait_until holds everything. The awake gate never emits a wake;
-the late-sentinel race (user speaks then sentinel fires) is silent.
+One idle rule regardless of user presence: silent >= silent_max -> TUCK-IN
+marker, then tuck_grace -> auto sleep. No-user wakes time from awake_since
+(silent_min itself stays 0.0 with no user message). A live wait_until holds
+everything. The awake gate never emits a wake; the late-sentinel race (user
+speaks then sentinel fires) is silent.
 """
 from __future__ import annotations
 
@@ -48,37 +49,44 @@ def _signal_lines(cfg):
     return p.read_text().splitlines() if p.exists() else []
 
 
-# --- no-user tier -------------------------------------------------------------
+# --- no-user wake (same idle bar, timed from awake_since) ---------------------
 
-def test_no_user_short_gate_auto_sleeps(awake_no_sentinel):
+def test_no_user_wake_idles_to_tuck_in_then_grace(awake_no_sentinel):
     cfg = awake_no_sentinel
-    # No user reply this wake; the no-user tier times from awake_since (FIX 1),
-    # not silent_min. Backdate the wake past no_user_gate_min (5) -> auto sleep.
-    past = (datetime.now(timezone.utc) - timedelta(minutes=6)).isoformat()
+    # No user reply this wake; the gate times from awake_since (FIX 1), not
+    # silent_min. Backdate the wake past silent_max_min (20) -> tuck-in marker.
+    past = (datetime.now(timezone.utc) - timedelta(minutes=21)).isoformat()
     wake_state.update(cfg, awake_since=past)
-    action = watchdog.silence_action(cfg, silent_min=0.0)
-    assert action and "auto sleep" in action
+    a1 = watchdog.silence_action(cfg, silent_min=0.0)
+    assert a1 == "tuck-in appended"
+    assert wake_state.is_awake(cfg) is True
+    text = "\n".join(_signal_lines(cfg))
+    assert "[NEW ROUND]" in text
+    # Grace elapses -> auto sleep, same bar as the chat tier.
+    grace_past = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+    wake_state.update(cfg, tuck_pending=grace_past)
+    a2 = watchdog.silence_action(cfg, silent_min=0.0)
+    assert a2 and "auto sleep" in a2
     assert wake_state.is_awake(cfg) is False
-    assert _signal_lines(cfg) == []  # no marker on the no-user path
 
 
 def test_no_user_gate_elapses_on_fresh_wake_with_zero_silent_min(awake_no_sentinel):
     """FIX 1 regression: a fresh wake where the user NEVER speaks has no user
-    message ts -> user_silent_min() is None -> silent_min=0.0. The old gate timed
-    from that 0.0 and never elapsed (safety net dead). Now it times from
-    awake_since, so an elapsed-but-never-spoken wake still auto-sleeps."""
+    message ts -> user_silent_min() is None -> silent_min=0.0. The gate times
+    from awake_since instead, so an elapsed-but-never-spoken wake still reaches
+    the tuck-in (same bar as the chat tier, silent_max_min)."""
     cfg = awake_no_sentinel
-    past = (datetime.now(timezone.utc) - timedelta(minutes=7)).isoformat()
+    past = (datetime.now(timezone.utc) - timedelta(minutes=21)).isoformat()
     wake_state.update(cfg, awake_since=past)  # user_replied_this_wake stays False
     action = watchdog.silence_action(cfg, silent_min=0.0)  # no user turn -> 0.0
-    assert action and "auto sleep" in action
-    assert wake_state.is_awake(cfg) is False
+    assert action == "tuck-in appended"
+    assert wake_state.is_awake(cfg) is True
 
 
-def test_no_user_under_gate_holds(awake_no_sentinel):
+def test_no_user_under_bar_holds(awake_no_sentinel):
     cfg = awake_no_sentinel
-    # awake_since is ~now (set_awake) -> elapsed < no_user_gate_min -> hold.
-    assert watchdog.silence_action(cfg, silent_min=3.0) is None
+    # awake_since is ~now (set_awake) -> elapsed < silent_max_min -> hold.
+    assert watchdog.silence_action(cfg, silent_min=0.0) is None
     assert wake_state.is_awake(cfg) is True
 
 

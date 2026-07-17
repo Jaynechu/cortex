@@ -72,11 +72,11 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
 - Per-wake detached subprocess spawned at set_awake; pidfile self-guarded (unlinks only own pid, watchdog.py:29-40,169-181).
 - Poll 60s: retires when awake cleared externally; publishes occupancy via store_window_tokens each poll.
 - Fuse: window_tokens>=fuse_tokens (150k) → _fuse then exit; else silence_action (watchdog.py:202-232).
-- silence_action (watchdog.py:151-199, shared by watchdog.run + _handle_awake): two-tier, live wait_until (cortex.wait) holds both.
-- No-user tier → no_user_gate_min (5) silent proxy lie_down.
-- Chat tier → silent_max_min (15) tuck_in_text marker once (stamps tuck_pending), then tuck_grace_min (5) more → proxy lie_down.
-- Wait-expiry tier → wait(N) deadline past: epoch-guarded free-round injection immediately, bypasses silent_min (watchdog.py:194-289).
-- Every free-round injection (both tiers) prepends a diff-mode wakeup note ABOVE the 3-choice marker (intel-before-choice; marker is the final line so the block stays machine-tagged; D6, wait_expiry_note toggle, watchdog.py:133-178).
+- silence_action (watchdog.py:417-509, shared by watchdog.run + _handle_awake): one idle bar regardless of user presence, live wait_until (cortex.wait) holds it.
+- No-user wake → silent_min timed from awake_since (no user-message ts to derive it from), same bar as below.
+- silent_max_min (20) → tuck_in_text marker once (stamps tuck_pending), then tuck_grace_min (5) more → proxy lie_down.
+- Wait-expiry branch → wait(N) deadline past: epoch-guarded free-round injection immediately, bypasses silent_min (watchdog.py:355-461).
+- Every free-round injection prepends a diff-mode wakeup note ABOVE the 3-choice marker (intel-before-choice; marker is the final line so the block stays machine-tagged; D6, wait_expiry_note toggle, watchdog.py:227-303).
 - watchdog._log = timestamped heartbeat to watchdog.log (start/retire/fuse/silence_action) — proves the dedicated watchdog is live vs riding only the tick backup (watchdog.py:336-345).
 - force_slept="auto" = routine silence marker (note.py neutral, no catchup line), distinct from "timeout" (retired) and real incidents (fuse/stale).
 - _fuse: esc → inject fuse_handoff_prompt (summarize + handoff + lie_down(rotate=True)) → poll awake 300s grace; proxy-lie_down only if session didn't; catchup only when handoff unwritten (watchdog.py:76-109).

@@ -20,12 +20,12 @@ from cortex.wake import run_wake
 
 def _handle_awake(conn, cfg: dict, st: dict, snap_gen: int | None = None) -> str:
     """A wake is in progress -> the awake gate: NEVER emit a wake signal while
-    awake (the alarm stops once up). Instead run the two-tier silence checks as
-    a watchdog backup, so a dead/rebooted watchdog is not a blind spot. The tick
-    fires every ~5 min, so the chat-tier grace is approximated to a whole-tick
-    granularity (the marker is stamped one tick, the auto sleep fires the next
-    tick once grace has elapsed). Falls back to the stale reap only when the
-    silence tier held (e.g. a live wait_until) yet the transcript is long idle.
+    awake (the alarm stops once up). Instead run the silence check as a watchdog
+    backup, so a dead/rebooted watchdog is not a blind spot. The tick fires every
+    ~5 min, so the grace is approximated to a whole-tick granularity (the marker
+    is stamped one tick, the auto sleep fires the next tick once grace has
+    elapsed). Falls back to the stale reap only when the silence check held (e.g.
+    a live wait_until) yet the transcript is long idle.
 
     `snap_gen` = the gen captured in the tick's opening snapshot. Before any
     consequential reap, re-validate it against the live epoch: a lie_down / user

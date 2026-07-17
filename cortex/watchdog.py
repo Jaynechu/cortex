@@ -415,16 +415,14 @@ def _stamp_tuck_pending():
 
 
 def silence_action(cfg: dict, silent_min: float, *, allow_tuck: bool = True) -> str | None:
-    """Two-tier silence decision, shared by the watchdog and the tick awake gate.
-
-    Chat tier (user replied this wake): at silent_max_min, with no live
-    wait_until, append the TUCK-IN marker once (tuck_pending stamped so it isn't
-    re-appended); after tuck_grace_min more with no wait/lie_down -> proxy
-    lie_down(auto).
-    No-user tier (no reply this wake): at no_user_gate_min, no live wait_until
-    -> proxy lie_down(auto) immediately, no marker.
-    A live wait_until holds everything. Returns an action label for logging, or
-    None (keep waiting / handled without sleeping)."""
+    """One idle rule regardless of user presence, shared by the watchdog and the
+    tick awake gate: at silent_max_min, with no live wait_until, append the
+    TUCK-IN marker once (tuck_pending stamped so it isn't re-appended); after
+    tuck_grace_min more with no wait/lie_down -> proxy lie_down(auto). When the
+    user never spoke this wake, `silent_min` (derived from a user-message ts
+    that doesn't exist) is timed from awake_since instead, so the gate still
+    elapses. A live wait_until holds everything. Returns an action label for
+    logging, or None (keep waiting / handled without sleeping)."""
     from cortex import lie_down as lie_down_mod
 
     wcfg = cfg["wake"].get("watchdog", {})
@@ -463,22 +461,13 @@ def silence_action(cfg: dict, silent_min: float, *, allow_tuck: bool = True) -> 
         return "wait-expiry free-round appended"
 
     if not wake_state.user_replied_this_wake(cfg):
-        # Accident safety net only (not a daily-flow step): fires when the user
-        # never spoke this wake. Time it from awake_since (elapsed since wake) —
-        # NOT from silent_min, which is derived from a user-message ts that on a
-        # never-spoken wake is None -> 0.0 and would never elapse. Semantics
-        # unchanged otherwise: proxy auto lie_down (arms next alarm via dice), no
-        # marker.
-        gate = float(wcfg.get("no_user_gate_min", 5))
+        # No user message this wake -> silent_min (derived from a user-message ts)
+        # is 0.0 and would never elapse. Time from awake_since instead so the
+        # same idle bar below still applies.
         elapsed = wake_state.awake_since_min(cfg)
-        if elapsed is None:
-            elapsed = silent_min  # no awake_since -> fall back to prior behaviour
-        if elapsed >= gate:
-            lie_down_mod.lie_down(cfg, force_slept="auto")
-            return "no-user gate -> auto sleep"
-        return None
+        if elapsed is not None:
+            silent_min = elapsed
 
-    # Chat tier.
     silent_max = float(wcfg.get("silent_max_min", 20))
     grace = float(wcfg.get("tuck_grace_min", 5))
     if silent_min < silent_max:
@@ -566,7 +555,7 @@ def run(cfg: dict) -> int:
             _log(f"fuse: tokens={tokens} >= {fuse}")
             _fuse(cfg, grace)
             return 0
-        # Two-tier silence: chat (tuck-in then grace) / no-user (short gate).
+        # Idle gate (tuck-in then grace), same bar regardless of user presence.
         # A proxy sleep here is force_slept="auto" (routine, not an incident).
         action = silence_action(cfg, silent_min)
         if action:
