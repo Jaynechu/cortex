@@ -294,7 +294,8 @@ def test_render_turn_end_line_appears_every_render(cfg):
     # Clamp numbers render from config (wait 1-20, next_wake 21-240, idle 20) — no hardcode.
     text = note.render(cfg, NOW, {})
     assert text.rstrip().endswith(
-        "NOTE: End activity with wait(N) or lie_down. Neither called = "
+        "NOTE: No need to wait during the chat. End activity with wait(N) "
+        "or lie_down. Neither called = "
         "20 min idle, then the 3-choice menu. Her message resets all timers. "
         "No consecutive waits. wait(N) [1-20]; "
         "lie_down(next_wake_min=N) [21-240].")

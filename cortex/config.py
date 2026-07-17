@@ -206,9 +206,10 @@ _DEFAULTS: dict[str, Any] = {
         # {silent_max_min} render from the wake clamps at note time (never
         # hardcoded).
         "turn_end_text":
-            "NOTE: End activity with wait(N) or lie_down. Neither called = "
-            "{silent_max_min} min idle, then the 3-choice menu. Her message "
-            "resets all timers. No consecutive waits. "
+            "NOTE: No need to wait during the chat. End activity with wait(N) "
+            "or lie_down. Neither called = {silent_max_min} min idle, then "
+            "the 3-choice menu. Her message resets all timers. "
+            "No consecutive waits. "
             "wait(N) [{wait_min}-{wait_max}]; "
             "lie_down(next_wake_min=N) [{next_wake_min}-{next_wake_max}].",
         # Header written into a freshly-created wishlist.md (append-only file,
