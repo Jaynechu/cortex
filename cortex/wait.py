@@ -21,20 +21,17 @@ from cortex.pacemaker.triggers import clamp_window_minutes
 
 
 def wait(cfg: dict, minutes: float) -> dict:
-    cap = int(cfg["wake"].get("wait_max_per_wake", 1) or 0)
     minutes = clamp_window_minutes(minutes, cfg)
     until = datetime.now(timezone.utc) + timedelta(minutes=minutes)
-    # One atomic strict-locked mutation: verify awake + under cap, bump gen (an
-    # accepted wait re-arms the silence window = a new cancellation epoch), set
-    # silence_wait_until, increment wait_count, clear tuck_pending — no separate
-    # set_wait_until / wait_count writes that a concurrent actor could tear.
-    res = wake_state.commit_wait(cfg, until.isoformat(), cap)
+    # One atomic strict-locked mutation: verify awake + wait quota not spent this
+    # round (F5: no consecutive empty waits — any activity clears the flag first),
+    # bump gen (an accepted wait re-arms the silence window = a new cancellation
+    # epoch), set silence_wait_until, mark wait_spent, clear tuck_pending.
+    res = wake_state.commit_wait(cfg, until.isoformat())
     if not res.get("ok"):
-        used = res.get("wait_count", 0)
-        return {"ok": False, "refused": True, "wait_count": used, "cap": cap,
-                "reason": f"Wait cap reached ({used}/{cap}) - lie_down now."}
-    return {"ok": True, "minutes": minutes, "until": until.isoformat(),
-            "wait_count": res.get("wait_count"), "cap": cap}
+        return {"ok": False, "refused": True, "reason":
+                "No consecutive waits - act (any tool) then wait, or lie_down."}
+    return {"ok": True, "minutes": minutes, "until": until.isoformat()}
 
 
 def main(argv: list[str] | None = None) -> int:

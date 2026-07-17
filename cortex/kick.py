@@ -188,6 +188,10 @@ def kick(cfg: dict, kind: str, **fields) -> dict:
             if morning and d.pop("mode", None) is not None:
                 flag_cleared = True
             if was_awake:
+                # F5: a kick is an external trigger -> restore the round's wait
+                # quota so the carrier/interrupt round may wait again if it ends
+                # empty (in the same lock as the reason append).
+                d.pop("wait_spent", None)
                 if ear_ride and d.pop("silence_wait_until", None) is not None:
                     wait_cleared = True
                 elif not live_wait:

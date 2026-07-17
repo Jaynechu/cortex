@@ -177,6 +177,15 @@ def test_awake_reply_clears_wait_and_signals(cfg, _stub_spawn):
     assert 'Msg #7 replied: "miss you"' in _signal(cfg)
 
 
+def test_awake_kick_restores_wait_quota(cfg, _stub_spawn):
+    # F5: a kick is an external trigger -> the carrier round restores the wait
+    # quota (clears wait_spent) so the round may wait again if it ends empty.
+    wake_state.update(cfg, awake=True, wait_spent=True)
+    r = kick.kick(cfg, "note", id=9)
+    assert r["awake"] is True
+    assert "wait_spent" not in _ws(cfg)
+
+
 def test_awake_morning_live_wait_queues_no_carrier(cfg, _stub_spawn):
     # Morning is not an interrupt kind: with a LIVE wait it clears the flag,
     # leaves the wait intact, queues the reason and opens NO carrier (the wait's

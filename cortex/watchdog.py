@@ -385,10 +385,9 @@ def _stamp_tuck_pending():
     (nothing appended). The epoch check is done by conditional_mutate's token
     guard; these are the in-lock content invariants.
 
-    Auto+manual share ONE wait quota per wake: this auto silence gate CONSUMES
-    the wait counter when it stamps (bump wait_count to at least the cap), so a
-    later manual wait() this wake is refused (menu only). No double-count when a
-    wait already ran — only bump when still under cap."""
+    Auto observe consumes the round's wait quota (F5): stamping the tuck-in also
+    sets wait_spent, so a later manual wait() this round is refused (menu only)
+    until some activity restores the quota. Idempotent — already-set stays set."""
     def _m(d: dict) -> bool:
         if not d.get("awake"):
             return False
@@ -405,11 +404,7 @@ def _stamp_tuck_pending():
             except ValueError:
                 pass
         d["tuck_pending"] = datetime.now(timezone.utc).isoformat()
-        try:
-            used = int(d.get("wait_count", 0) or 0)
-        except (TypeError, ValueError):
-            used = 0
-        d["wait_count"] = used + 1  # auto observe consumes one shared-quota slot
+        d["wait_spent"] = True  # auto observe consumes the round's wait quota
         return True
     return _m
 

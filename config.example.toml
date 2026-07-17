@@ -92,7 +92,6 @@ rearm_suffix = " (ear died — rearm)"
 # say() = the ONLY place cortex takes focus: it fronts the resident window and
 # plays a system sound (name of a /System/Library/Sounds/*.aiff; "" = silent).
 say_sound = "Glass"
-wait_max_per_wake = 1       # one wait() per wake, then the 3-choice menu only (0 = uncapped)
 wait_min = 1                # wait(N) clamp lower bound (minutes) — short one-shot hold
 wait_max = 20               # wait(N) clamp upper bound (minutes)
 next_wake_min = 21          # lie_down(next_wake_min=N) clamp lower bound (minutes)

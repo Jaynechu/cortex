@@ -66,9 +66,6 @@ _DEFAULTS: dict[str, Any] = {
         "wake_signal_marker": "[CORTEX-WAKE]",
         "rearm_suffix": " (ear died — rearm)",
         "say_sound": "Glass",
-        # Max wait() calls allowed per wake (reset on wake start / lie_down).
-        # 1 = one wait per wake, then the 3-choice menu only. 0 = uncapped.
-        "wait_max_per_wake": 1,
         # wait() clamp bounds (minutes). Own bounds, decoupled from the floor
         # draw window (triggers.floor_*): a short one-shot hold on the hot cache.
         "wait_min": 1,

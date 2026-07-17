@@ -176,7 +176,7 @@ def test_wait_expiry_fresh_epoch_injects_immediately(awake_no_sentinel):
     and tuck_pending stamped so the grace auto-lie arms."""
     cfg = awake_no_sentinel
     wake_state.update(cfg, user_replied_this_wake=True)
-    wake_state.update(cfg, wait_count=1)  # a wait() was declared this wake
+    wake_state.update(cfg, wait_spent=True)  # a wait() was declared this wake
     past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
     wake_state.set_wait_until(cfg, past)
     action = watchdog.silence_action(cfg, silent_min=0.0)  # gate bypassed
@@ -195,7 +195,7 @@ def test_wait_expiry_stale_epoch_injects_nothing(awake_no_sentinel):
     is stale -> conditional_mutate raises -> nothing injected, no stamp."""
     cfg = awake_no_sentinel
     wake_state.update(cfg, user_replied_this_wake=True)
-    wake_state.update(cfg, wait_count=1)
+    wake_state.update(cfg, wait_spent=True)
     past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
     wake_state.set_wait_until(cfg, past)
 
@@ -220,7 +220,7 @@ def test_wait_expiry_fires_once_then_falls_through(awake_no_sentinel):
     sees a wait-expiry (the wait is gone) — it re-enters the normal chat tier."""
     cfg = awake_no_sentinel
     wake_state.update(cfg, user_replied_this_wake=True)
-    wake_state.update(cfg, wait_count=1)
+    wake_state.update(cfg, wait_spent=True)
     past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
     wake_state.set_wait_until(cfg, past)
     assert watchdog.silence_action(cfg, silent_min=0.0) == \
@@ -254,14 +254,14 @@ def test_free_round_template_still_substitutes_placeholders(cfg):
     assert "the user" in line  # no marrow config -> fallback
 
 
-# --- free-round note (D6: every injection carries one, wait_count gate dropped) -
+# --- free-round note (D6: every injection carries one, wait gate dropped) ------
 
 def test_wait_expiry_tuck_in_carries_fresh_note(awake_no_sentinel):
     """A wait(N) was declared this wake and has expired -> the TUCK-IN marker is
     followed by a freshly rendered note (a `Now:` line)."""
     cfg = awake_no_sentinel
     wake_state.update(cfg, user_replied_this_wake=True)
-    wake_state.update(cfg, wait_count=1)  # a wait() was declared -> expiry, not plain
+    wake_state.update(cfg, wait_spent=True)  # a wait() was declared -> expiry, not plain
     a1 = watchdog.silence_action(cfg, silent_min=21.0)
     assert a1 == "tuck-in appended"
     text = "\n".join(_signal_lines(cfg))
@@ -270,10 +270,10 @@ def test_wait_expiry_tuck_in_carries_fresh_note(awake_no_sentinel):
 
 
 def test_plain_silence_gate_tuck_in_also_carries_note(awake_no_sentinel):
-    """D6: the silence-gate tuck-in (no wait declared this wake, wait_count stays
-    0) ALSO carries a freshly rendered note now — the wait_count>0 gate is gone."""
+    """D6: the silence-gate tuck-in (no wait declared this wake) ALSO carries a
+    freshly rendered note now — the old wait-declared gate is gone."""
     cfg = awake_no_sentinel
-    wake_state.update(cfg, user_replied_this_wake=True)  # wait_count stays 0
+    wake_state.update(cfg, user_replied_this_wake=True)  # no wait declared
     watchdog.silence_action(cfg, silent_min=21.0)
     text = "\n".join(_signal_lines(cfg))
     assert "[NEW ROUND]" in text
@@ -351,7 +351,7 @@ def test_two_consecutive_injections_second_diffs_against_first(awake_no_sentinel
     conn.close()
 
     # Round 1: wait-expiry free-round injection (fresh baseline note).
-    wake_state.update(cfg, wait_count=1)
+    wake_state.update(cfg, wait_spent=True)
     past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
     wake_state.set_wait_until(cfg, past)
     a1 = watchdog.silence_action(cfg, silent_min=0.0)
@@ -367,8 +367,10 @@ def test_two_consecutive_injections_second_diffs_against_first(awake_no_sentinel
     conn.commit()
     conn.close()
 
-    # Round 2: another wait() + expiry -> second free-round injection.
-    wake_state.commit_wait(cfg, past, cap=0)
+    # Round 2: activity between rounds restored the quota (F5) -> another wait()
+    # + expiry -> second free-round injection.
+    wake_state.restore_wait_quota(cfg)
+    wake_state.commit_wait(cfg, past)
     a2 = watchdog.silence_action(cfg, silent_min=0.0)
     assert a2 == "wait-expiry free-round appended"
     joined = "\n".join(_signal_lines(cfg))
@@ -387,7 +389,7 @@ def test_stale_epoch_wait_expiry_does_not_advance_baseline(awake_no_sentinel, mo
     epoch) the injection is dropped, so its replay events must stay replayable
     next round — last_note_ts unchanged, nothing written to wake_signal.log."""
     cfg = awake_no_sentinel
-    wake_state.update(cfg, user_replied_this_wake=True, wait_count=1)
+    wake_state.update(cfg, user_replied_this_wake=True, wait_spent=True)
     conn = db.connect(cfg)
     conn.execute(
         "CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, "
@@ -454,7 +456,7 @@ def test_free_round_visible_round_claims_ct_note_with_audit(awake_no_sentinel):
     stamps the audit columns (claimed_by / claimed_at)."""
     cfg = awake_no_sentinel
     _make_outbox(cfg, body="睡了吗")
-    wake_state.update(cfg, user_replied_this_wake=True, wait_count=1)
+    wake_state.update(cfg, user_replied_this_wake=True, wait_spent=True)
     past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
     wake_state.set_wait_until(cfg, past)
     assert watchdog.silence_action(cfg, silent_min=0.0) == \
@@ -472,7 +474,7 @@ def test_free_round_stale_epoch_does_not_claim_ct_note(awake_no_sentinel, monkey
     pending — the original death (claim then swallow) is closed."""
     cfg = awake_no_sentinel
     _make_outbox(cfg)
-    wake_state.update(cfg, user_replied_this_wake=True, wait_count=1)
+    wake_state.update(cfg, user_replied_this_wake=True, wait_spent=True)
     past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
     wake_state.set_wait_until(cfg, past)
 

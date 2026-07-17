@@ -18,7 +18,7 @@ def cfg(tmp_path):
 
 
 def test_save_is_atomic_no_tmp_left(cfg):
-    wake_state.update(cfg, awake=True, wait_count=3)
+    wake_state.update(cfg, awake=True, wait_spent=True)
     p = wake_state.wake_state_path(cfg)
     assert p.exists()
     # No stray temp files from the atomic replace.
@@ -69,9 +69,9 @@ def test_commit_wait_writes_audit_line(cfg):
     """An accepted wait bumps gen (a new cancellation epoch) — it must leave a
     commit_wait audit line (old->new gen) so the bump is visible in forensics,
     mirroring lie_down_claim. A refused wait writes nothing."""
-    wake_state.set_awake(cfg, 1, None)  # awake, gen bumped, wait_count 0
+    wake_state.set_awake(cfg, 1, None)  # awake, gen bumped, wait_spent False
     gen_before = wake_state.current_epoch(cfg)[0]
-    res = wake_state.commit_wait(cfg, "2099-01-01T00:00:00+00:00", cap=0)
+    res = wake_state.commit_wait(cfg, "2099-01-01T00:00:00+00:00")
     assert res["ok"] is True
     lines = wake_state.config.wake_audit_log_path(cfg).read_text().splitlines()
     commits = [ln for ln in lines if "\tcommit_wait\t" in ln]
@@ -82,7 +82,7 @@ def test_commit_wait_writes_audit_line(cfg):
 def test_commit_wait_refused_writes_no_audit(cfg):
     """A refused wait (not awake) does not bump gen -> no commit_wait audit line."""
     wake_state.update(cfg, awake=None)  # not awake
-    res = wake_state.commit_wait(cfg, "2099-01-01T00:00:00+00:00", cap=0)
+    res = wake_state.commit_wait(cfg, "2099-01-01T00:00:00+00:00")
     assert res["ok"] is False
     p = wake_state.config.wake_audit_log_path(cfg)
     lines = p.read_text().splitlines() if p.exists() else []
