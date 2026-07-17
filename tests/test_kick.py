@@ -6,10 +6,15 @@ spawns are stubbed — never kick the live cortex."""
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
 from cortex import kick, wake_state
+
+
+def _future_iso(minutes: int = 30) -> str:
+    return (datetime.now(timezone.utc) + timedelta(minutes=minutes)).isoformat()
 
 
 @pytest.fixture
@@ -72,10 +77,11 @@ def test_kick_asleep_ticks_and_writes_reason(cfg, _stub_spawn):
 
 
 def test_kick_awake_interrupt_signals_not_queued(cfg, _stub_spawn):
-    # P12: a reply/timeout kick reaching an AWAKE cortex rides the ear
-    # (wake_signal.log) instead of queuing in kick_reasons (a queued reason would
-    # duplicate at the next note render) — and never ticks.
-    wake_state.update(cfg, awake=True, next_wake_at="2026-07-17T09:00:00")
+    # P12/C2: a reply/timeout kick reaching an AWAKE cortex with a LIVE wait rides
+    # the ear (wake_signal.log) instead of queuing in kick_reasons (a queued
+    # reason would duplicate at the next note render) — and never ticks.
+    wake_state.update(cfg, awake=True, next_wake_at="2026-07-17T09:00:00",
+                      silence_wait_until=_future_iso())
     r = kick.kick(cfg, "timeout", id=4, minutes=30)
     assert r["ok"] and r["awake"] and not r["ticked"]
     assert r["signalled"] is True
@@ -130,13 +136,13 @@ def test_morning_kick_clears_flag_asleep(cfg, _stub_spawn):
 
 def test_morning_kick_clears_flag_awake(cfg, _stub_spawn):
     # Morning clears the flag even while awake (flag clear is separate from the
-    # awake audit-only no-op for wake machinery).
+    # wake machinery). With no live wait it also opens an F3 carrier round.
     wake_state.update(cfg, awake=True, mode="night")
     r = kick.kick(cfg, "morning")
     assert r["awake"] is True and r["ticked"] is False
     assert r["flag_cleared"] is True
     assert "mode" not in _ws(cfg)
-    assert _stub_spawn == []  # no tick while awake
+    assert r["round_opened"] is True          # F3 carrier (no live wait)
 
 
 def test_midnight_reply_kick_keeps_flag(cfg, _stub_spawn):
@@ -157,34 +163,33 @@ def test_morning_kick_no_flag_is_noop(cfg, _stub_spawn):
 # --- P12: watch awake-interrupt (clear wait + ride the ear) ------------------
 
 def test_awake_reply_clears_wait_and_signals(cfg, _stub_spawn):
-    # Her reply voids the wait premise: an awake reply kick clears
-    # silence_wait_until in the SAME lock and pushes the reason down the ear.
-    wake_state.update(cfg, awake=True, silence_wait_until="2026-07-17T09:00:00")
+    # C2 (P12, untouched by F3): awake reply kick with a LIVE wait voids the wait
+    # premise — clears silence_wait_until in the SAME lock and rides the ear.
+    wake_state.update(cfg, awake=True, silence_wait_until=_future_iso())
     r = kick.kick(cfg, "reply", id=7, text="miss you")
     assert r["awake"] and r["wait_cleared"] is True and r["signalled"] is True
+    assert r["round_opened"] is False                 # C2: no carrier round
+    assert _stub_spawn == []                           # C2: no tick
     d = _ws(cfg)
     assert "silence_wait_until" not in d               # wait voided
     assert "kick_reasons" not in d                     # not queued
     assert 'Msg #7 replied: "miss you"' in _signal(cfg)
 
 
-def test_awake_interrupt_no_wait_still_signals(cfg, _stub_spawn):
-    # No live wait to clear, but the reason still rides the ear (wait_cleared
-    # False, signalled True).
-    wake_state.update(cfg, awake=True)
-    r = kick.kick(cfg, "timeout", id=4, minutes=30)
-    assert r["wait_cleared"] is False and r["signalled"] is True
-
-
-def test_awake_morning_does_not_touch_wait_or_signal(cfg, _stub_spawn):
-    # Morning is not an interrupt kind: it clears the flag but leaves the wait
-    # and never writes the ear (its reason rides the normal wake note).
-    wake_state.update(cfg, awake=True, mode="night",
-                      silence_wait_until="2026-07-17T09:00:00")
+def test_awake_morning_live_wait_queues_no_carrier(cfg, _stub_spawn):
+    # Morning is not an interrupt kind: with a LIVE wait it clears the flag,
+    # leaves the wait intact, queues the reason and opens NO carrier (the wait's
+    # own expiry free-round surfaces it) — never writes the ear.
+    until = _future_iso()
+    wake_state.update(cfg, awake=True, mode="night", silence_wait_until=until)
     r = kick.kick(cfg, "morning")
     assert r["flag_cleared"] is True
-    assert r.get("wait_cleared") is False and r.get("signalled") is False
-    assert _ws(cfg)["silence_wait_until"] == "2026-07-17T09:00:00"
+    assert r["wait_cleared"] is False and r["signalled"] is False
+    assert r["round_opened"] is False
+    assert _stub_spawn == []
+    d = _ws(cfg)
+    assert d["silence_wait_until"] == until            # wait untouched
+    assert d["kick_reasons"] == ["She's up — day mode"]
     assert _signal(cfg) == ""
 
 
@@ -197,3 +202,66 @@ def test_asleep_interrupt_queues_not_signals(cfg, _stub_spawn):
     d = _ws(cfg)
     assert d["kick_reasons"] == ['Msg #3 replied: "hi"']
     assert _signal(cfg) == ""                 # ear NOT written on the asleep path
+
+
+# --- F3: awake + NO live wait -> carrier free-round for ALL kinds ------------
+
+def _assert_carrier(cfg, r, _stub_spawn, expect_reason):
+    # Common assertions for an awake + no-live-wait carrier kick: no ear, queues
+    # the reason, stamps an EXPIRED wait, spawns one tick (the tick's wait-expiry
+    # free-round is the carrier round), never bumps gen.
+    assert r["awake"] is True and r["ticked"] is False
+    assert r["round_opened"] is True
+    assert r["signalled"] is False and r["wait_cleared"] is False
+    assert len(_stub_spawn) == 1                        # exactly one tick
+    d = _ws(cfg)
+    assert d["kick_reasons"] == [expect_reason]         # reason queued for render
+    assert _signal(cfg) == ""                           # ear NOT written
+    until = datetime.fromisoformat(d["silence_wait_until"])
+    if until.tzinfo is None:
+        until = until.replace(tzinfo=timezone.utc)
+    assert until <= datetime.now(timezone.utc)          # expired -> fires now
+
+
+def test_awake_reply_no_wait_opens_carrier(cfg, _stub_spawn):
+    wake_state.update(cfg, awake=True, gen=5, state_id="ef01")
+    r = kick.kick(cfg, "reply", id=7, text="miss you")
+    _assert_carrier(cfg, r, _stub_spawn, 'Msg #7 replied: "miss you"')
+    assert _ws(cfg)["gen"] == 5                          # awake: epoch untouched
+
+
+def test_awake_timeout_no_wait_opens_carrier(cfg, _stub_spawn):
+    wake_state.update(cfg, awake=True)
+    r = kick.kick(cfg, "timeout", id=4, minutes=30)
+    _assert_carrier(cfg, r, _stub_spawn, "Msg #4 no reply in 30min")
+
+
+def test_awake_morning_no_wait_opens_carrier(cfg, _stub_spawn):
+    # The dead-zone F3 fixes: morning-awake used to only queue a reason no round
+    # ever rendered. Now it opens a carrier round; the night flag still clears.
+    wake_state.update(cfg, awake=True, mode="night")
+    r = kick.kick(cfg, "morning")
+    _assert_carrier(cfg, r, _stub_spawn, "She's up — day mode")
+    assert r["flag_cleared"] is True
+    assert "mode" not in _ws(cfg)                        # day cadence resumes
+
+
+def test_awake_timeout_live_wait_rides_ear_no_carrier(cfg, _stub_spawn):
+    # C2 sibling: interrupt + LIVE wait clears the wait and rides the ear, never
+    # opens a carrier round.
+    wake_state.update(cfg, awake=True, silence_wait_until=_future_iso())
+    r = kick.kick(cfg, "timeout", id=4, minutes=30)
+    assert r["signalled"] is True and r["wait_cleared"] is True
+    assert r["round_opened"] is False
+    assert _stub_spawn == []
+    assert "kick_reasons" not in _ws(cfg)
+    assert "Msg #4 no reply in 30min" in _signal(cfg)
+
+
+def test_awake_morning_no_wait_no_flag_still_carrier(cfg, _stub_spawn):
+    # Morning-awake with no night flag and no live wait: no flag to clear, but
+    # the reason still gets a carrier round.
+    wake_state.update(cfg, awake=True)
+    r = kick.kick(cfg, "morning")
+    _assert_carrier(cfg, r, _stub_spawn, "She's up — day mode")
+    assert r["flag_cleared"] is False
