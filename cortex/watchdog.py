@@ -252,8 +252,13 @@ def _free_round_note(cfg: dict) -> tuple[str, str | None]:
         try:
             # advance_baseline=False: render must NOT persist the baseline. The
             # caller advances it only after the injection is committed.
+            # claim_ct_notes=False (F9): a ct note must NOT be claimed at render
+            # time — the render can run on a tick whose ear write is later dropped
+            # (stale epoch) and would silently swallow the note. The caller claims
+            # ct notes separately AFTER the ear write commits.
             data = note.gather(conn, cfg, now, window_sid=sid,
-                               advance_baseline=False, consume_kick=True)
+                               advance_baseline=False, consume_kick=True,
+                               claim_ct_notes=False)
             text = note.render(cfg, now, data).strip()
             # FIX 6 + P2-B: the deferred advance must use the SAME cutoff this
             # note was built on, captured inside gather() — not a second query
@@ -325,6 +330,25 @@ def _write_tuck_in_line(cfg: dict, line: str) -> None:
         with open(p, "a") as f:
             f.write(line + "\n")
     except OSError:
+        pass
+
+
+def _deliver_ct_notes_to_ear(cfg: dict) -> None:
+    """F9: after a free-round line has committed + been written to the ear, claim
+    any pending ct notes and append them to the ear too — a real visible round is
+    now guaranteed to surface them. Stamps claimed_by='cortex.free_round'. Done
+    OUTSIDE the render (which passed claim_ct_notes=False) so an off-screen tick
+    whose ear write was dropped never claims a note. Best-effort: never raises."""
+    try:
+        from cortex import db, note
+        conn = db.connect(cfg)
+        try:
+            text = note.claim_ct_notes_text(cfg, conn, "cortex.free_round")
+        finally:
+            conn.close()
+        if text:
+            _write_tuck_in_line(cfg, text)
+    except Exception:
         pass
 
 
@@ -435,6 +459,7 @@ def silence_action(cfg: dict, silent_min: float, *, allow_tuck: bool = True) -> 
         if allow_tuck:
             _write_tuck_in_line(cfg, line)
             _advance_note_baseline(cfg, pending_ts)  # FIX 6: only after commit+write
+            _deliver_ct_notes_to_ear(cfg)  # F9: claim ct notes now the round surfaces
         return "wait-expiry free-round appended"
 
     if not wake_state.user_replied_this_wake(cfg):
@@ -478,6 +503,7 @@ def silence_action(cfg: dict, silent_min: float, *, allow_tuck: bool = True) -> 
         if allow_tuck:
             _write_tuck_in_line(cfg, line)
             _advance_note_baseline(cfg, pending_ts)  # FIX 6: only after commit+write
+            _deliver_ct_notes_to_ear(cfg)  # F9: claim ct notes now the round surfaces
         return "tuck-in appended"
     # Marker already sent; wait out the grace window (measured from the marker).
     try:

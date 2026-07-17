@@ -166,6 +166,7 @@ _DEFAULTS: dict[str, Any] = {
         "reason_reply": 'Msg #{id} replied: "{text}"',
         "reason_timeout": "Msg #{id} no reply in {minutes}min",
         "reason_morning": "She's up — day mode",
+        "reason_note": "New note #{id}",
         # Cap the pending-flag list so a stuck bridge can't grow it unbounded.
         "max_reasons": 8,
     },

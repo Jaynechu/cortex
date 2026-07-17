@@ -169,12 +169,15 @@ def _render_ct_note(cfg: dict, row: sqlite3.Row) -> str:
     return str(row["body"] or "")
 
 
-def _consume_ct_notes(cfg: dict, conn: sqlite3.Connection) -> list[str]:
+def _consume_ct_notes(cfg: dict, conn: sqlite3.Connection,
+                      claimed_by: str = "cortex.note") -> list[str]:
     """Claim + render pending outbox notes targeting the cortex window (target='ct').
     At-most-once via the SAME atomic claim marrow's hook uses (UPDATE ... WHERE
     status='pending', guarded on rowcount) so a row taken by the hook path is never
-    re-delivered here and vice-versa. Called only from delivered-note paths
-    (consume_kick=True); render-only re-renders never claim. Best-effort."""
+    re-delivered here and vice-versa. Called only from VISIBLE-round paths (the
+    wake-bell payload, or the free-round AFTER its ear write commits) — never a
+    passive re-render or an off-screen tick. `claimed_by` stamps the audit column
+    so one query answers which path consumed a row. Best-effort."""
     if conn is None:
         return []
     try:
@@ -190,9 +193,10 @@ def _consume_ct_notes(cfg: dict, conn: sqlite3.Connection) -> list[str]:
         try:
             with conn:
                 cur = conn.execute(
-                    "UPDATE outbox SET status='claimed' WHERE id=?"
-                    " AND status='pending'",
-                    (rid,))
+                    "UPDATE outbox SET status='claimed', claimed_by=?,"
+                    " claimed_at=strftime('%Y-%m-%dT%H:%M:%SZ','now')"
+                    " WHERE id=? AND status='pending'",
+                    (claimed_by, rid))
             if cur.rowcount != 1:
                 continue  # lost the claim race (hook took it) — skip
             full = conn.execute(
@@ -207,6 +211,19 @@ def _consume_ct_notes(cfg: dict, conn: sqlite3.Connection) -> list[str]:
         except sqlite3.Error:
             continue
     return delivered
+
+
+def claim_ct_notes_text(cfg: dict, conn: sqlite3.Connection,
+                        claimed_by: str) -> str:
+    """Claim + render pending ct-notes as one joined block (own connection at the
+    caller). Used by the free-round path to consume notes ONLY after its ear write
+    has committed — so an off-screen tick never swallows a note. Returns "" when
+    none. Best-effort: any error -> "" (no claim)."""
+    try:
+        notes = _consume_ct_notes(cfg, conn, claimed_by=claimed_by)
+    except Exception:
+        return ""
+    return "\n\n".join(n for n in notes if n)
 
 
 # --------------------------------------------------------------------------- #
@@ -613,6 +630,7 @@ def gather(
     advance_baseline: bool = False,
     full_replay: bool = False,
     consume_kick: bool = False,
+    claim_ct_notes: bool = True,
 ) -> dict:
     """Assemble the wakeup note data dict. conn must use sqlite3.Row factory.
     `fresh`/`wake_kind` are accepted for caller compatibility; the handoff
@@ -745,9 +763,13 @@ def gather(
     # Reply receipts (C11): same active-vs-passive gate as kick_reasons — only a
     # delivered note stamps receipt_seen, so a passive re-render never consumes.
     receipts = _consume_receipts(cfg, conn, now) if consume_kick else []
-    # ct-targeted outbox notes: an awake cortex only receives them via this note
-    # path (the wake-branch hook fires just on a wake turn) — same active gate.
-    ct_notes = _consume_ct_notes(cfg, conn) if consume_kick else []
+    # ct-targeted outbox notes (F9): claimed + rendered here only on a VISIBLE
+    # round — the wake-bell payload (claim_ct_notes default True). The background
+    # free-round render passes claim_ct_notes=False and claims separately AFTER
+    # its ear write commits (see watchdog._deliver_ct_notes_to_ear), so a tick that
+    # renders off-screen never swallows a note no turn will show.
+    ct_notes = (_consume_ct_notes(cfg, conn)
+                if (consume_kick and claim_ct_notes) else [])
 
     return {
         "replay_cutoff_ts": replay_cutoff_ts,

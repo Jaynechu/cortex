@@ -36,6 +36,7 @@ def cfg(tmp_path):
             "reason_reply": 'Msg #{id} replied: "{text}"',
             "reason_timeout": "Msg #{id} no reply in {minutes}min",
             "reason_morning": "She's up — day mode",
+            "reason_note": "New note #{id}",
             "max_reasons": 8,
         },
     }
@@ -265,3 +266,36 @@ def test_awake_morning_no_wait_no_flag_still_carrier(cfg, _stub_spawn):
     r = kick.kick(cfg, "morning")
     _assert_carrier(cfg, r, _stub_spawn, "She's up — day mode")
     assert r["flag_cleared"] is False
+
+
+# --- F9: 'note' kind = ct-note drop -> immediate delivery -------------------
+
+def test_note_kind_asleep_wakes(cfg, _stub_spawn):
+    # ct note while asleep -> the note kind wakes cortex (tick + reason queued).
+    wake_state.update(cfg, awake=False, next_wake_at="2026-07-17T09:00:00")
+    r = kick.kick(cfg, "note", id=9)
+    assert r["ok"] and r["ticked"] and not r["awake"]
+    assert len(_stub_spawn) == 1
+    assert _ws(cfg)["kick_reasons"] == ["New note #9"]
+
+
+def test_note_kind_awake_idle_opens_carrier(cfg, _stub_spawn):
+    # ct note while awake-idle (no live wait) -> F3 carrier round (the visible
+    # round that renders the note), reason queued, never rides the ear.
+    wake_state.update(cfg, awake=True)
+    r = kick.kick(cfg, "note", id=9)
+    _assert_carrier(cfg, r, _stub_spawn, "New note #9")
+
+
+def test_note_kind_awake_live_wait_queues_no_carrier(cfg, _stub_spawn):
+    # ct note while awake + LIVE wait -> reason queued, rides the wait-expiry
+    # free-round (no new carrier, no ear write; note is not an interrupt).
+    wake_state.update(cfg, awake=True, silence_wait_until=_future_iso())
+    r = kick.kick(cfg, "note", id=9)
+    assert r["awake"] is True and r["ticked"] is False
+    assert r["round_opened"] is False and r["signalled"] is False
+    assert _stub_spawn == []
+    d = _ws(cfg)
+    assert d["kick_reasons"] == ["New note #9"]
+    assert d["silence_wait_until"]                      # wait untouched
+    assert _signal(cfg) == ""                           # ear NOT written

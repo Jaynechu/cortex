@@ -401,6 +401,82 @@ def test_stale_epoch_wait_expiry_does_not_advance_baseline(awake_no_sentinel, mo
     assert wake_state.get_last_note_ts(cfg) == before  # baseline NOT advanced
 
 
+# --- F9: ct-note claim tied to a VISIBLE round (death replay) ----------------
+
+def _make_outbox(cfg, body="睡了吗", note_id=9):
+    conn = db.connect(cfg)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "created_at TEXT, from_sid TEXT, from_channel TEXT, target TEXT, body TEXT, "
+        "status TEXT DEFAULT 'pending', sent_at TEXT, replied_at TEXT, "
+        "reply_text TEXT, receipt_seen INTEGER DEFAULT 0, "
+        "claimed_by TEXT, claimed_at TEXT)")
+    conn.execute(
+        "INSERT INTO outbox (id, created_at, from_sid, from_channel, target, body,"
+        " status) VALUES (?, '2026-07-08T03:00:00Z', 'cafe', 'tg', 'ct', ?, 'pending')",
+        (note_id, body))
+    conn.commit()
+    conn.close()
+
+
+def _outbox_row(cfg, note_id=9):
+    conn = db.connect(cfg)
+    try:
+        return conn.execute(
+            "SELECT status, claimed_by, claimed_at FROM outbox WHERE id=?",
+            (note_id,)).fetchone()
+    finally:
+        conn.close()
+
+
+def test_free_round_render_does_not_claim_ct_note(awake_no_sentinel):
+    """Death replay: the background free-round RENDER (a tick that may never
+    surface) must NOT claim a ct note. Only the post-commit ear delivery claims."""
+    cfg = awake_no_sentinel
+    _make_outbox(cfg)
+    text, _pending = watchdog._free_round_note(cfg)
+    # render ran, but the ct note is untouched — still pending, no audit stamp.
+    row = _outbox_row(cfg)
+    assert row["status"] == "pending"
+    assert row["claimed_by"] is None
+
+
+def test_free_round_visible_round_claims_ct_note_with_audit(awake_no_sentinel):
+    """The visible wait-expiry free-round DELIVERS the ct note to the ear and
+    stamps the audit columns (claimed_by / claimed_at)."""
+    cfg = awake_no_sentinel
+    _make_outbox(cfg, body="睡了吗")
+    wake_state.update(cfg, user_replied_this_wake=True, wait_count=1)
+    past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    wake_state.set_wait_until(cfg, past)
+    assert watchdog.silence_action(cfg, silent_min=0.0) == \
+        "wait-expiry free-round appended"
+    # Note claimed by the free-round path and surfaced on the ear.
+    row = _outbox_row(cfg)
+    assert row["status"] == "sent"
+    assert row["claimed_by"] == "cortex.free_round"
+    assert row["claimed_at"] is not None
+    assert "睡了吗" in "\n".join(_signal_lines(cfg))
+
+
+def test_free_round_stale_epoch_does_not_claim_ct_note(awake_no_sentinel, monkeypatch):
+    """A tick whose ear write is dropped (stale epoch) must leave the ct note
+    pending — the original death (claim then swallow) is closed."""
+    cfg = awake_no_sentinel
+    _make_outbox(cfg)
+    wake_state.update(cfg, user_replied_this_wake=True, wait_count=1)
+    past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    wake_state.set_wait_until(cfg, past)
+
+    def _stale(*a, **k):
+        raise wake_state.StateValidationError("epoch token stale")
+    monkeypatch.setattr(wake_state, "conditional_mutate", _stale)
+    assert watchdog.silence_action(cfg, silent_min=0.0) is None
+    row = _outbox_row(cfg)
+    assert row["status"] == "pending"          # NOT swallowed
+    assert row["claimed_by"] is None
+
+
 def test_free_round_note_precedes_choice_marker(cfg):
     """Acceptance (intel before choice): the rendered note (a `Now:` line) comes
     ABOVE the [NEW ROUND] 3-choice marker, and the marker is the LAST line of the

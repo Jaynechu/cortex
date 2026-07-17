@@ -32,7 +32,8 @@ def make_outbox_table(conn):
         "CREATE TABLE outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, "
         "created_at TEXT, from_sid TEXT, from_channel TEXT, target TEXT, body TEXT, "
         "status TEXT, sent_at TEXT, replied_at TEXT, reply_text TEXT, "
-        "receipt_seen INTEGER NOT NULL DEFAULT 0)"
+        "receipt_seen INTEGER NOT NULL DEFAULT 0, "
+        "claimed_by TEXT, claimed_at TEXT)"
     )
     conn.commit()
 

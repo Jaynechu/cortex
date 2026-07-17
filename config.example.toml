@@ -212,6 +212,7 @@ floor_max_min = 55             # wake-window draw upper bound (uniform hi / clam
 reason_reply = 'Msg #{id} replied: "{text}"'
 reason_timeout = "Msg #{id} no reply in {minutes}min"
 reason_morning = "She's up — day mode"
+reason_note = "New note #{id}"  # F9: ct note dropped -> immediate carrier round
 max_reasons = 8                # cap the pending-flag list (stuck bridge guard)
 
 # Wakeup note knobs. Every line is deterministic now, so the old whole-note

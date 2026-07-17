@@ -145,9 +145,14 @@ def _live_wait(cfg: dict) -> bool:
 
 
 def kick(cfg: dict, kind: str, **fields) -> dict:
-    """Run one kick. `kind` (reply/timeout/morning) selects a config reason
+    """Run one kick. `kind` (reply/timeout/morning/note) selects a config reason
     template; `fields` (id, text, minutes, ...) fill it. Returns a small result
     dict.
+
+    'note' (F9): a ct-targeted outbox note was just dropped — same treatment as a
+    non-interrupt kick (queue the reason, F3 carrier round while awake, wake while
+    asleep). The note body itself is claimed + rendered by note.py on the visible
+    round; this kick only opens that round.
 
     Asleep -> reason flag + wake machinery (tick).
     Awake + interrupt (reply/timeout) + LIVE wait -> P12 C2 path: clear the wait
@@ -227,7 +232,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Poke cortex awake to peek at a channel (watch / morning).")
     parser.add_argument("--kind", required=True,
-                        choices=("reply", "timeout", "morning"),
+                        choices=("reply", "timeout", "morning", "note"),
                         help="reason template to render into the wakeup note")
     parser.add_argument("--note-id", default=None,
                         help="outbox note id (reply / timeout)")
