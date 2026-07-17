@@ -229,5 +229,10 @@ replay_title = "最近对话回放"     # title of the conversation-replay secti
 handoff_wake_kinds = ["rotate"]  # wake kinds that get the handoff (fresh window only)
 cadence_bin = ""             # cadence CLI for cal/rem lines; empty = packaged default path
 turn_end_text = "NOTE: Call MCP tool to wait or lie_down at the end of each turn. Wait=wait(N) [N={wait_min}-{wait_max}]; sleep=lie_down(next_wake_min=N) [{next_wake_min}-{next_wake_max}]. Skip call = sleep in 5 mins. Auto timer is on during active chat - no call needed."  # one-line reminder appended at the end of every rendered note; "" omits it. {wait_min}/{wait_max}/{next_wake_min}/{next_wake_max} render from the wake clamps
+receipt_line = 'Note #{id} ({channel} {sent_hm}): she replied {replied_hm} "{text}"'  # reply-receipt line (C11); one per note she replied to since last note. {id}/{channel}/{sent_hm}/{replied_hm}/{text} from the outbox row; "" omits receipts
 # Header written into a freshly-created wishlist.md (append-only; never overwritten). Display text — customise freely.
 wishlist_header = "# Wishlist\n\n(owed treats / wants / self-rewards — append-only)\n"
+
+# Cross-channel note delivery into the cortex window.
+[outbox]
+inject_header = "📮 Message from {channel}·{sid4} {time}"  # header for a ct-targeted outbox note rendered by the wakeup note; mirror of marrow [outbox].inject_header (keep in sync). {channel}/{sid4}/{time} from the outbox row; "" = body only

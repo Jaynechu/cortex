@@ -26,6 +26,7 @@ def cfg(tmp_path):
             "watchdog_pidfile": str(home / "state" / "watchdog.pid"),
             "wake_audit_log": str(home / "state" / "wake_audit.log"),
         },
+        "wake": {"signal_log": str(home / "state" / "wake_signal.log")},
         "kick": {
             "reason_reply": 'Msg #{id} replied: "{text}"',
             "reason_timeout": "Msg #{id} no reply in {minutes}min",
@@ -52,6 +53,12 @@ def _audit(cfg) -> str:
     return config.wake_audit_log_path(cfg).read_text()
 
 
+def _signal(cfg) -> str:
+    from cortex import config
+    p = config.wake_signal_log_path(cfg)
+    return p.read_text() if p.exists() else ""
+
+
 def test_kick_asleep_ticks_and_writes_reason(cfg, _stub_spawn):
     wake_state.update(cfg, awake=False, next_wake_at="2026-07-17T09:00:00",
                       sentinel_pid=999999)
@@ -64,13 +71,18 @@ def test_kick_asleep_ticks_and_writes_reason(cfg, _stub_spawn):
     assert "sentinel_pid" not in d          # sentinel released
 
 
-def test_kick_awake_writes_reason_no_tick(cfg, _stub_spawn):
+def test_kick_awake_interrupt_signals_not_queued(cfg, _stub_spawn):
+    # P12: a reply/timeout kick reaching an AWAKE cortex rides the ear
+    # (wake_signal.log) instead of queuing in kick_reasons (a queued reason would
+    # duplicate at the next note render) — and never ticks.
     wake_state.update(cfg, awake=True, next_wake_at="2026-07-17T09:00:00")
     r = kick.kick(cfg, "timeout", id=4, minutes=30)
     assert r["ok"] and r["awake"] and not r["ticked"]
+    assert r["signalled"] is True
     assert _stub_spawn == []                 # NO tick while awake
     d = _ws(cfg)
-    assert d["kick_reasons"] == ["Msg #4 no reply in 30min"]  # flag-only
+    assert "kick_reasons" not in d           # NOT queued (no note duplication)
+    assert "Msg #4 no reply in 30min" in _signal(cfg)  # rode the ear
     assert d["next_wake_at"] == "2026-07-17T09:00:00"  # ledger untouched
 
 
@@ -96,9 +108,11 @@ def test_kind_and_fields_recorded_in_audit(cfg, _stub_spawn):
 
 
 def test_reason_list_capped_at_max(cfg, _stub_spawn):
+    # Asleep reply kicks queue kick_reasons (delivered by the wake note); the list
+    # is capped at max_reasons. (Awake interrupt kicks ride the ear, not the list.)
     cfg["kick"]["max_reasons"] = 3
-    wake_state.update(cfg, awake=True)  # awake: flag-only, no tick churn
     for i in range(5):
+        wake_state.update(cfg, awake=False)
         kick.kick(cfg, "reply", id=i, text="x")
     reasons = _ws(cfg)["kick_reasons"]
     assert len(reasons) == 3                          # capped
@@ -138,3 +152,48 @@ def test_morning_kick_no_flag_is_noop(cfg, _stub_spawn):
     wake_state.update(cfg, awake=False)  # day, no flag
     r = kick.kick(cfg, "morning")
     assert r["flag_cleared"] is False
+
+
+# --- P12: watch awake-interrupt (clear wait + ride the ear) ------------------
+
+def test_awake_reply_clears_wait_and_signals(cfg, _stub_spawn):
+    # Her reply voids the wait premise: an awake reply kick clears
+    # silence_wait_until in the SAME lock and pushes the reason down the ear.
+    wake_state.update(cfg, awake=True, silence_wait_until="2026-07-17T09:00:00")
+    r = kick.kick(cfg, "reply", id=7, text="miss you")
+    assert r["awake"] and r["wait_cleared"] is True and r["signalled"] is True
+    d = _ws(cfg)
+    assert "silence_wait_until" not in d               # wait voided
+    assert "kick_reasons" not in d                     # not queued
+    assert 'Msg #7 replied: "miss you"' in _signal(cfg)
+
+
+def test_awake_interrupt_no_wait_still_signals(cfg, _stub_spawn):
+    # No live wait to clear, but the reason still rides the ear (wait_cleared
+    # False, signalled True).
+    wake_state.update(cfg, awake=True)
+    r = kick.kick(cfg, "timeout", id=4, minutes=30)
+    assert r["wait_cleared"] is False and r["signalled"] is True
+
+
+def test_awake_morning_does_not_touch_wait_or_signal(cfg, _stub_spawn):
+    # Morning is not an interrupt kind: it clears the flag but leaves the wait
+    # and never writes the ear (its reason rides the normal wake note).
+    wake_state.update(cfg, awake=True, mode="night",
+                      silence_wait_until="2026-07-17T09:00:00")
+    r = kick.kick(cfg, "morning")
+    assert r["flag_cleared"] is True
+    assert r.get("wait_cleared") is False and r.get("signalled") is False
+    assert _ws(cfg)["silence_wait_until"] == "2026-07-17T09:00:00"
+    assert _signal(cfg) == ""
+
+
+def test_asleep_interrupt_queues_not_signals(cfg, _stub_spawn):
+    # Asleep path is unchanged: the reason queues in kick_reasons (delivered by
+    # the wake note), the ear is NOT written.
+    wake_state.update(cfg, awake=False, silence_wait_until="2026-07-17T09:00:00")
+    r = kick.kick(cfg, "reply", id=3, text="hi")
+    assert r["ticked"] is True                # asleep path unchanged (ticks)
+    d = _ws(cfg)
+    assert d["kick_reasons"] == ['Msg #3 replied: "hi"']
+    assert _signal(cfg) == ""                 # ear NOT written on the asleep path

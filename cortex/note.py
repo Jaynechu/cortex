@@ -103,6 +103,112 @@ def _consume_kick_reasons(cfg: dict, ws: dict) -> list[str]:
     return reasons
 
 
+def _receipt_channel(cfg: dict) -> str:
+    """from_channel tag on cortex-authored outbox notes (msg tool stamps it)."""
+    return str(_note_cfg(cfg).get("cortex_channel") or "ct")
+
+
+def _consume_receipts(cfg: dict, conn: sqlite3.Connection, now: datetime) -> list[str]:
+    """Reply receipts (P12/C11): outbox notes cortex sent that she has replied to
+    but not yet shown (receipt_seen=0, replied_at NOT NULL). Render one C11 line
+    each, then stamp receipt_seen=1 — a single UPDATE consume, so a receipt shows
+    exactly once. Called only from the delivered-note paths (consume_kick=True);
+    render-only re-renders never stamp. Best-effort: any DB error -> no receipts,
+    no stamp. Blank template -> receipts disabled."""
+    tmpl = str(_note_cfg(cfg).get("receipt_line") or "").strip()
+    if not tmpl or conn is None:
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT id, target, sent_at, replied_at, reply_text FROM outbox"
+            " WHERE from_channel=? AND replied_at IS NOT NULL AND receipt_seen=0"
+            " ORDER BY id",
+            (_receipt_channel(cfg),),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    if not rows:
+        return []
+    lines: list[str] = []
+    for r in rows:
+        sent_hm = _local_hm(r["sent_at"], cfg) if r["sent_at"] else "?"
+        replied_hm = _local_hm(r["replied_at"], cfg) if r["replied_at"] else "?"
+        text = " ".join((r["reply_text"] or "").split())
+        try:
+            lines.append(tmpl.format(id=r["id"], channel=r["target"] or "?",
+                                     sent_hm=sent_hm, replied_hm=replied_hm,
+                                     text=text))
+        except (KeyError, IndexError, ValueError):
+            lines.append(tmpl)
+    try:
+        ids = [r["id"] for r in rows]
+        qmarks = ",".join("?" for _ in ids)
+        with conn:
+            conn.execute(
+                f"UPDATE outbox SET receipt_seen=1 WHERE id IN ({qmarks})", ids)
+    except sqlite3.Error:
+        pass
+    return lines
+
+
+def _render_ct_note(cfg: dict, row: sqlite3.Row) -> str:
+    """One ct-targeted outbox note: [outbox].inject_header + body verbatim. Mirror
+    of marrow outbox._render_note so hook-delivered and note-delivered notes read
+    identically (same header, same placeholders channel/sid4/time)."""
+    tmpl = str((cfg.get("outbox", {}) or {}).get("inject_header") or "")
+    from_sid = row["from_sid"] or ""
+    sid4 = from_sid[:4] if from_sid else "????"
+    hhmm = _local_hm(row["created_at"], cfg) if row["created_at"] else ""
+    if tmpl:
+        try:
+            header = tmpl.format(channel=row["from_channel"] or "?", sid4=sid4,
+                                 time=hhmm)
+        except (KeyError, IndexError, ValueError):
+            header = tmpl
+        return f"{header}\n{row['body']}"
+    return str(row["body"] or "")
+
+
+def _consume_ct_notes(cfg: dict, conn: sqlite3.Connection) -> list[str]:
+    """Claim + render pending outbox notes targeting the cortex window (target='ct').
+    At-most-once via the SAME atomic claim marrow's hook uses (UPDATE ... WHERE
+    status='pending', guarded on rowcount) so a row taken by the hook path is never
+    re-delivered here and vice-versa. Called only from delivered-note paths
+    (consume_kick=True); render-only re-renders never claim. Best-effort."""
+    if conn is None:
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT id FROM outbox WHERE status='pending' AND target='ct'"
+            " ORDER BY id"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return []
+    delivered: list[str] = []
+    for r in rows:
+        rid = r["id"]
+        try:
+            with conn:
+                cur = conn.execute(
+                    "UPDATE outbox SET status='claimed' WHERE id=?"
+                    " AND status='pending'",
+                    (rid,))
+            if cur.rowcount != 1:
+                continue  # lost the claim race (hook took it) — skip
+            full = conn.execute(
+                "SELECT id, created_at, from_sid, from_channel, body"
+                " FROM outbox WHERE id=?", (rid,)).fetchone()
+            delivered.append(_render_ct_note(cfg, full))
+            with conn:
+                conn.execute(
+                    "UPDATE outbox SET status='sent',"
+                    " sent_at=strftime('%Y-%m-%dT%H:%M:%SZ','now') WHERE id=?",
+                    (rid,))
+        except sqlite3.Error:
+            continue
+    return delivered
+
+
 # --------------------------------------------------------------------------- #
 # DB-sourced facts
 # --------------------------------------------------------------------------- #
@@ -636,10 +742,18 @@ def gather(
     # re-renders (full_replay mirror, marrow render_module, --print-note) leave
     # it False so a passive re-render never drops an unseen wake reason.
     kick_reasons = _consume_kick_reasons(cfg, ws) if consume_kick else []
+    # Reply receipts (C11): same active-vs-passive gate as kick_reasons — only a
+    # delivered note stamps receipt_seen, so a passive re-render never consumes.
+    receipts = _consume_receipts(cfg, conn, now) if consume_kick else []
+    # ct-targeted outbox notes: an awake cortex only receives them via this note
+    # path (the wake-branch hook fires just on a wake turn) — same active gate.
+    ct_notes = _consume_ct_notes(cfg, conn) if consume_kick else []
 
     return {
         "replay_cutoff_ts": replay_cutoff_ts,
         "kick_reasons": kick_reasons,
+        "receipts": receipts,
+        "ct_notes": ct_notes,
         "last_wake": last_wake,
         "last_active": last_active,
         "budget": budget,
@@ -776,6 +890,19 @@ def render(cfg: dict, now: datetime, data: dict) -> str:
     kick_reasons = data.get("kick_reasons") or []
     if kick_reasons:
         blocks.append("\n".join(str(r) for r in kick_reasons))
+
+    # Reply receipts (C11): plain lines, one per note she replied to since the
+    # last note. No section header — each line speaks for itself.
+    receipts = data.get("receipts") or []
+    if receipts:
+        blocks.append("\n".join(str(r) for r in receipts))
+
+    # ct-targeted outbox notes (covert session->cortex drops): each carries its
+    # own header, rendered as its own block.
+    ct_notes = data.get("ct_notes") or []
+    for cn in ct_notes:
+        if cn:
+            blocks.append(str(cn))
 
     pending = data.get("pending") or []
     if pending:

@@ -89,6 +89,22 @@ def _clear_floor_deadline(cfg: dict) -> None:
         conn.close()
 
 
+def _append_wake_signal(cfg: dict, line: str) -> bool:
+    """Append a kick reason to wake_signal.log so the ear Monitor surfaces it as
+    a session turn on an already-awake cortex (mirror of watchdog's tuck-in
+    write). Best-effort: any I/O failure is swallowed. Returns True on write."""
+    if not line:
+        return False
+    try:
+        p = config.wake_signal_log_path(cfg)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "a") as f:
+            f.write(line + "\n")
+        return True
+    except (OSError, KeyError, TypeError):
+        return False
+
+
 def _sigterm(pid) -> None:
     try:
         p = int(pid)
@@ -130,14 +146,24 @@ def kick(cfg: dict, kind: str, **fields) -> dict:
     detail = " ".join(f"{k}={v}" for k, v in fields.items() if v is not None)
     reason = _reason_text(cfg, kind, **fields)
     morning = kind == "morning"
+    # watch awake-interrupt (P12): a reply/timeout kick reaching an AWAKE cortex
+    # voids the wait premise (her reply landed) — clear silence_wait_until in the
+    # SAME lock and push the reason down the ear (wake_signal.log) instead of
+    # letting it sit in kick_reasons until a free-round that wait() itself defers.
+    interrupt = kind in ("reply", "timeout")
     sentinel_pid = None
     was_awake = False
     flag_cleared = False
+    wait_cleared = False
     try:
         def _mutate(d):
-            nonlocal sentinel_pid, was_awake, flag_cleared
-            _append_reason(cfg, d, reason)
+            nonlocal sentinel_pid, was_awake, flag_cleared, wait_cleared
             was_awake = bool(d.get("awake"))
+            # Awake + interrupt kick: reason rides the ear (appended out-of-lock),
+            # NOT kick_reasons — else the next note render duplicates it. Asleep or
+            # morning: append to kick_reasons as before (the wake note renders it).
+            if not (was_awake and interrupt):
+                _append_reason(cfg, d, reason)
             # Morning kick clears the night flag under the SAME lock — awake or
             # asleep. Day cadence resumes because build_context now reads no flag
             # (day floor bounds + no cap gate). Mid-night kicks (reply/timeout)
@@ -145,6 +171,8 @@ def kick(cfg: dict, kind: str, **fields) -> dict:
             if morning and d.pop("mode", None) is not None:
                 flag_cleared = True
             if was_awake:
+                if interrupt and d.pop("silence_wait_until", None) is not None:
+                    wait_cleared = True
                 return
             # Asleep: cancel any in-flight alarm epoch, drop the durable ledger,
             # release the recorded sentinel. Floor hold is cleared out-of-lock.
@@ -159,8 +187,12 @@ def kick(cfg: dict, kind: str, **fields) -> dict:
     wake_state.wake_audit(cfg, "kick", kind,
                           f"{detail} flag_cleared={flag_cleared}".strip())
     if was_awake:
+        signalled = False
+        if interrupt:
+            signalled = _append_wake_signal(cfg, reason)
         return {"ok": True, "kind": kind, "awake": True, "ticked": False,
-                "flag_cleared": flag_cleared}
+                "flag_cleared": flag_cleared, "wait_cleared": wait_cleared,
+                "signalled": signalled}
 
     _sigterm(sentinel_pid)
     _clear_floor_deadline(cfg)

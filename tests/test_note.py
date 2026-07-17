@@ -27,6 +27,36 @@ def make_events_table(conn):
     conn.commit()
 
 
+def make_outbox_table(conn):
+    conn.execute(
+        "CREATE TABLE outbox (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "created_at TEXT, from_sid TEXT, from_channel TEXT, target TEXT, body TEXT, "
+        "status TEXT, sent_at TEXT, replied_at TEXT, reply_text TEXT, "
+        "receipt_seen INTEGER NOT NULL DEFAULT 0)"
+    )
+    conn.commit()
+
+
+def _add_ct_note(conn, *, id, from_sid="cafe1234", from_channel="tg",
+                 body="miss you", status="pending",
+                 created_at="2026-07-08T04:00:00Z"):
+    conn.execute(
+        "INSERT INTO outbox (id, created_at, from_sid, from_channel, target, body,"
+        " status) VALUES (?, ?, ?, ?, 'ct', ?, ?)",
+        (id, created_at, from_sid, from_channel, body, status))
+    conn.commit()
+
+
+def _add_receipt(conn, *, id, target="tg", from_channel="ct",
+                 sent_at="2026-07-08T04:00:00Z", replied_at="2026-07-08T04:05:00Z",
+                 reply_text="miss you", seen=0):
+    conn.execute(
+        "INSERT INTO outbox (id, from_channel, target, status, sent_at, replied_at,"
+        " reply_text, receipt_seen) VALUES (?, ?, ?, 'sent', ?, ?, ?, ?)",
+        (id, from_channel, target, sent_at, replied_at, reply_text, seen))
+    conn.commit()
+
+
 # --------------------------------------------------------------------------- #
 # render — full note + omissions
 # --------------------------------------------------------------------------- #
@@ -154,6 +184,109 @@ def test_gather_passive_render_keeps_kick_reasons(cfg, tmp_path):
     data = note.gather(conn, cfg, NOW)
     assert data["kick_reasons"] == []
     assert wake_state.load(cfg).get("kick_reasons") == ['Msg #2 no reply in 30min']
+
+
+# --------------------------------------------------------------------------- #
+# reply receipts (P12 / C11)
+# --------------------------------------------------------------------------- #
+
+def _receipt_conn():
+    import sqlite3
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    make_events_table(conn)
+    make_outbox_table(conn)
+    return conn
+
+
+def test_render_receipts_plain_lines(cfg):
+    data = {"receipts": ['Note #3 (tg 14:00): she replied 14:05 "hi"']}
+    text = note.render(cfg, NOW, data)
+    assert 'Note #3 (tg 14:00): she replied 14:05 "hi"' in text
+
+
+def test_gather_receipt_render_and_consume_once(cfg, tmp_path):
+    cfg = _home_cfg(cfg, tmp_path)
+    conn = _receipt_conn()
+    _add_receipt(conn, id=3, reply_text="miss you too")
+    data = note.gather(conn, cfg, NOW, consume_kick=True)
+    assert data["receipts"] == [
+        'Note #3 (tg 14:00): she replied 14:05 "miss you too"']
+    assert conn.execute(
+        "SELECT receipt_seen FROM outbox WHERE id=3").fetchone()[0] == 1
+    # A second delivered note sees nothing (already stamped).
+    data2 = note.gather(conn, cfg, NOW, consume_kick=True)
+    assert data2["receipts"] == []
+
+
+def test_gather_receipt_passive_render_keeps_seen_zero(cfg, tmp_path):
+    cfg = _home_cfg(cfg, tmp_path)
+    conn = _receipt_conn()
+    _add_receipt(conn, id=5)
+    # consume_kick=False (render-only path) must NOT stamp receipt_seen.
+    data = note.gather(conn, cfg, NOW)
+    assert data["receipts"] == []
+    assert conn.execute(
+        "SELECT receipt_seen FROM outbox WHERE id=5").fetchone()[0] == 0
+
+
+def test_gather_receipt_ignores_unreplied_and_other_sender(cfg, tmp_path):
+    cfg = _home_cfg(cfg, tmp_path)
+    conn = _receipt_conn()
+    _add_receipt(conn, id=1, replied_at=None, reply_text=None)  # no reply yet
+    _add_receipt(conn, id=2, from_channel="cli")               # not cortex-sent
+    data = note.gather(conn, cfg, NOW, consume_kick=True)
+    assert data["receipts"] == []
+
+
+# --------------------------------------------------------------------------- #
+# ct-targeted outbox note delivery via note render (P12 add-on)
+# --------------------------------------------------------------------------- #
+
+def test_gather_ct_note_delivered_and_marked_sent(cfg, tmp_path):
+    cfg = _home_cfg(cfg, tmp_path)
+    conn = _receipt_conn()
+    _add_ct_note(conn, id=9, from_sid="cafe1234", from_channel="tg", body="睡了吗")
+    data = note.gather(conn, cfg, NOW, consume_kick=True)
+    assert len(data["ct_notes"]) == 1
+    note_txt = data["ct_notes"][0]
+    assert "📮 Message from tg·cafe" in note_txt   # C1 header, channel + sid4
+    assert "睡了吗" in note_txt                      # body verbatim
+    # row consumed: pending -> sent
+    assert conn.execute(
+        "SELECT status FROM outbox WHERE id=9").fetchone()[0] == "sent"
+    # rendered into the note text
+    assert "睡了吗" in note.render(cfg, NOW, data)
+
+
+def test_gather_ct_note_consume_once(cfg, tmp_path):
+    cfg = _home_cfg(cfg, tmp_path)
+    conn = _receipt_conn()
+    _add_ct_note(conn, id=9)
+    assert note.gather(conn, cfg, NOW, consume_kick=True)["ct_notes"]
+    # second delivered note sees nothing (already sent)
+    assert note.gather(conn, cfg, NOW, consume_kick=True)["ct_notes"] == []
+
+
+def test_gather_ct_note_passive_render_does_not_claim(cfg, tmp_path):
+    cfg = _home_cfg(cfg, tmp_path)
+    conn = _receipt_conn()
+    _add_ct_note(conn, id=9)
+    # render-only path (consume_kick=False) must NOT claim/deliver the note
+    data = note.gather(conn, cfg, NOW)
+    assert data["ct_notes"] == []
+    assert conn.execute(
+        "SELECT status FROM outbox WHERE id=9").fetchone()[0] == "pending"
+
+
+def test_ct_note_claimed_by_hook_not_redelivered_by_note(cfg, tmp_path):
+    # Cross-path consume-once: a row the hook already claimed (status='claimed'
+    # or 'sent') is never re-delivered by the note path (claim is guarded on
+    # status='pending').
+    cfg = _home_cfg(cfg, tmp_path)
+    conn = _receipt_conn()
+    _add_ct_note(conn, id=9, status="sent")       # hook already delivered it
+    assert note.gather(conn, cfg, NOW, consume_kick=True)["ct_notes"] == []
 
 
 def test_render_turn_end_line_appears_every_render(cfg):

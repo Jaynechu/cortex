@@ -199,6 +199,10 @@ _DEFAULTS: dict[str, Any] = {
         # is set. {channel}/{hm}/{silent_h} render from the newest all-channel
         # ct_activity row at note time. "" omits it.
         "night_activity_text": "Last activity: {channel} {hm} ({silent_h}h silent)",
+        # Reply-receipt line (C11): one per sent note she has replied to since the
+        # last note. {id}/{channel}/{sent_hm}/{replied_hm}/{text} render from the
+        # marrow outbox row at note time. "" omits receipts entirely.
+        "receipt_line": 'Note #{id} ({channel} {sent_hm}): she replied {replied_hm} "{text}"',
         # One-line turn-end reminder appended at the very end of every rendered
         # note. "" omits it. {wait_min}/{wait_max}/{next_wake_min}/{next_wake_max}
         # render from the wake clamps at note time (never hardcoded).
@@ -213,12 +217,19 @@ _DEFAULTS: dict[str, Any] = {
         "wishlist_header":
             "# Wishlist\n\n(owed treats / wants / self-rewards — append-only)\n",
     },
+    # Cross-channel note delivery into the cortex window. Header for a ct-targeted
+    # outbox note rendered by the wakeup note (mirror of marrow [outbox].inject_header
+    # — must stay in sync so hook-delivered and note-delivered notes read the same).
+    # {channel}/{sid4}/{time} render from the outbox row. "" = body only.
+    "outbox": {
+        "inject_header": "📮 Message from {channel}·{sid4} {time}",
+    },
 }
 
 _SECTIONS = (
     "core", "paths", "knowledgec", "geofence", "health",
     "tick", "pacemaker", "gates", "triggers", "marrow",
-    "wake", "note", "kick", "night",
+    "wake", "note", "kick", "night", "outbox",
 )
 
 
