@@ -1,7 +1,8 @@
-"""cortex.kick (P6, reasons retired): under flock + epoch, asleep = gen bump +
-floor clear + sentinel kill + one detached tick; awake = audit-only no-op. The
-kind lands in the wake-audit log ONLY — never in wake_state or the note. All
-tick/sentinel spawns are stubbed — never kick the live cortex."""
+"""cortex.kick (P6 + reasons v2): under flock + epoch, asleep = gen bump + floor
+clear + sentinel kill + one detached tick; awake = reason-flag only. Every kick
+appends a rendered reason line (config [kick].reason_*) to wake_state for the
+next delivered note; the kind also lands in the wake-audit log. All tick/sentinel
+spawns are stubbed — never kick the live cortex."""
 from __future__ import annotations
 
 import json
@@ -25,6 +26,12 @@ def cfg(tmp_path):
             "watchdog_pidfile": str(home / "state" / "watchdog.pid"),
             "wake_audit_log": str(home / "state" / "wake_audit.log"),
         },
+        "kick": {
+            "reason_reply": 'Msg #{id} replied: "{text}"',
+            "reason_timeout": "Msg #{id} no reply in {minutes}min",
+            "reason_morning": "She's up — day mode",
+            "max_reasons": 8,
+        },
     }
 
 
@@ -45,25 +52,25 @@ def _audit(cfg) -> str:
     return config.wake_audit_log_path(cfg).read_text()
 
 
-def test_kick_asleep_ticks_no_reason(cfg, _stub_spawn):
+def test_kick_asleep_ticks_and_writes_reason(cfg, _stub_spawn):
     wake_state.update(cfg, awake=False, next_wake_at="2026-07-17T09:00:00",
                       sentinel_pid=999999)
-    r = kick.kick(cfg, "reply", id=7)
+    r = kick.kick(cfg, "reply", id=7, text="miss you")
     assert r["ok"] and r["ticked"] and not r["awake"]
     assert len(_stub_spawn) == 1  # exactly one tick spawned
     d = _ws(cfg)
-    assert "kick_reasons" not in d          # reasons retired
+    assert d["kick_reasons"] == ['Msg #7 replied: "miss you"']  # config template
     assert "next_wake_at" not in d          # ledger cleared
     assert "sentinel_pid" not in d          # sentinel released
 
 
-def test_kick_awake_audit_only_no_tick(cfg, _stub_spawn):
+def test_kick_awake_writes_reason_no_tick(cfg, _stub_spawn):
     wake_state.update(cfg, awake=True, next_wake_at="2026-07-17T09:00:00")
-    r = kick.kick(cfg, "morning")
+    r = kick.kick(cfg, "timeout", id=4, minutes=30)
     assert r["ok"] and r["awake"] and not r["ticked"]
     assert _stub_spawn == []                 # NO tick while awake
     d = _ws(cfg)
-    assert "kick_reasons" not in d           # no reason written
+    assert d["kick_reasons"] == ["Msg #4 no reply in 30min"]  # flag-only
     assert d["next_wake_at"] == "2026-07-17T09:00:00"  # ledger untouched
 
 
@@ -79,13 +86,23 @@ def test_kick_awake_does_not_bump_gen(cfg, _stub_spawn):
     assert _ws(cfg)["gen"] == 5              # awake: no epoch change
 
 
-def test_kind_and_fields_recorded_in_audit_only(cfg, _stub_spawn):
+def test_kind_and_fields_recorded_in_audit(cfg, _stub_spawn):
     wake_state.update(cfg, awake=False)
     kick.kick(cfg, "timeout", id=9, minutes=45)
     audit = _audit(cfg)
     assert "kick" in audit and "timeout" in audit
     assert "id=9" in audit and "minutes=45" in audit
-    assert "kick_reasons" not in _ws(cfg)
+    assert _ws(cfg)["kick_reasons"] == ["Msg #9 no reply in 45min"]
+
+
+def test_reason_list_capped_at_max(cfg, _stub_spawn):
+    cfg["kick"]["max_reasons"] = 3
+    wake_state.update(cfg, awake=True)  # awake: flag-only, no tick churn
+    for i in range(5):
+        kick.kick(cfg, "reply", id=i, text="x")
+    reasons = _ws(cfg)["kick_reasons"]
+    assert len(reasons) == 3                          # capped
+    assert reasons[-1] == 'Msg #4 replied: "x"'       # newest kept
 
 
 # --- night flag clear (P8) ---------------------------------------------------

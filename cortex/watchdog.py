@@ -253,7 +253,7 @@ def _free_round_note(cfg: dict) -> tuple[str, str | None]:
             # advance_baseline=False: render must NOT persist the baseline. The
             # caller advances it only after the injection is committed.
             data = note.gather(conn, cfg, now, window_sid=sid,
-                               advance_baseline=False)
+                               advance_baseline=False, consume_kick=True)
             text = note.render(cfg, now, data).strip()
             # FIX 6 + P2-B: the deferred advance must use the SAME cutoff this
             # note was built on, captured inside gather() — not a second query
