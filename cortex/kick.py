@@ -7,16 +7,15 @@ ledger hold and an awake window short-circuits to the watchdog. This module
 does what the marrow user-wake reset does for cortex windows, but for the
 sleeping case: under the wake_state flock + cancellation epoch it
 
-  1. appends a reason flag (rendered into the next wakeup note by note.py,
-     then cleared), then
-  2. if cortex is ALREADY AWAKE -> stop. The reason lands via the next
-     watchdog free-round note; no wake machinery is touched.
-  3. if cortex is ASLEEP -> bump gen (cancel any in-flight alarm), clear the
+  1. if cortex is ALREADY AWAKE -> stop (audit-only no-op). The next watchdog
+     free-round note reflects context; no wake machinery is touched.
+  2. if cortex is ASLEEP -> bump gen (cancel any in-flight alarm), clear the
      floor ledger hold (next_floor_due_at=None => DUE) + the durable next-wake
      ledger (next_wake_at), kill the recorded sentinel, then spawn ONE detached
      pacemaker_tick so the freed floor fires a real wake now.
 
-Reason templates live in cortex config ([kick].reason_*), never hardcoded.
+No reason is injected into the note — context on wake is enough. The kind is
+recorded ONLY in the wake-audit log (wake_audit("kick", kind, ...)).
 """
 from __future__ import annotations
 
@@ -28,30 +27,6 @@ import subprocess
 import sys
 
 from cortex import config, wake_state
-
-
-_MAX_REASONS = 8  # cap the pending-flag list so a stuck bridge can't grow it
-
-
-def _reason_text(cfg: dict, kind: str, **fields) -> str:
-    kcfg = cfg.get("kick", {}) or {}
-    tmpl = str(kcfg.get(f"reason_{kind}") or "").strip()
-    if not tmpl:
-        return ""
-    try:
-        return tmpl.format(**fields)
-    except (KeyError, IndexError, ValueError):
-        return tmpl
-
-
-def _append_reason(d: dict, reason: str) -> None:
-    if not reason:
-        return
-    reasons = d.get("kick_reasons")
-    if not isinstance(reasons, list):
-        reasons = []
-    reasons.append(reason)
-    d["kick_reasons"] = reasons[-_MAX_REASONS:]
 
 
 def _clear_floor_deadline(cfg: dict) -> None:
@@ -118,18 +93,18 @@ def _spawn_tick(cfg: dict) -> None:
 
 
 def kick(cfg: dict, kind: str, **fields) -> dict:
-    """Run one kick. `kind` selects the reason template (reply/timeout/morning);
-    `fields` fills it (note_id, minutes, ...). Returns a small result dict.
+    """Run one kick. `kind` (reply/timeout/morning) + `fields` (note_id, minutes,
+    ...) are recorded in the wake-audit log only. Returns a small result dict.
 
-    Awake cortex -> flag only (no tick). Asleep -> flag + wake machinery.
-    Best-effort throughout: a lock/state failure drops the kick silently."""
-    reason = _reason_text(cfg, kind, **fields)
+    Awake cortex -> audit-only no-op (no tick, no wake machinery). Asleep ->
+    wake machinery. Best-effort throughout: a lock/state failure drops the kick
+    silently."""
+    detail = " ".join(f"{k}={v}" for k, v in fields.items() if v is not None)
     sentinel_pid = None
     was_awake = False
     try:
         def _mutate(d):
             nonlocal sentinel_pid, was_awake
-            _append_reason(d, reason)
             was_awake = bool(d.get("awake"))
             if was_awake:
                 return
@@ -143,7 +118,7 @@ def kick(cfg: dict, kind: str, **fields) -> dict:
     except wake_state.StateValidationError:
         return {"ok": False, "reason": "state locked", "kind": kind}
 
-    wake_state.wake_audit(cfg, "kick", kind, reason)
+    wake_state.wake_audit(cfg, "kick", kind, detail)
     if was_awake:
         return {"ok": True, "kind": kind, "awake": True, "ticked": False}
 
