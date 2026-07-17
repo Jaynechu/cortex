@@ -454,7 +454,7 @@ def silence_action(cfg: dict, silent_min: float, *, allow_tuck: bool = True) -> 
         return None
 
     # Chat tier.
-    silent_max = float(wcfg.get("silent_max_min", 15))
+    silent_max = float(wcfg.get("silent_max_min", 20))
     grace = float(wcfg.get("tuck_grace_min", 5))
     if silent_min < silent_max:
         return None

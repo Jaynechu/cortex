@@ -118,7 +118,7 @@ ctl_sleep_marker = "⚙️ [CTL]"
 # Per-wake watchdog thresholds (spawned at injection, killed at lie_down).
 [wake.watchdog]
 poll_sec = 60
-silent_max_min = 15            # chat tier: user replied this wake -> at this silence, append free-round marker (no live wait_until)
+silent_max_min = 20            # chat tier: user replied this wake -> at this silence, append free-round marker (no live wait_until); same as wake.wait_max
 no_user_gate_min = 5           # no-user tier: no user reply this wake -> at this silence, proxy lie_down(auto) directly, no marker
 tuck_grace_min = 5             # after TUCK-IN, no wait/lie_down within this -> proxy lie_down(auto)
 fuse_tokens = 150000           # (c) window tokens >= this -> esc + proxy lie_down (fuse)
