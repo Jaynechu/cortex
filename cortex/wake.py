@@ -346,9 +346,9 @@ def _window_wake_plan(cfg) -> str:
         # rotated flag is consumed: from here on this wake is a fresh spawn
         # (set_awake will record the NEW session's transcript once it exists),
         # so nothing in between may read the retiring session's pointer as
-        # live. retired_sid (durable, set at rotate time by lie_down/
-        # _night_close) is untouched here — it is the belt-and-braces guard
-        # every resume path checks even after this one-shot flag is gone.
+        # live. retired_sid (durable, set at rotate time by lie_down) is
+        # untouched here — it is the belt-and-braces guard every resume path
+        # checks even after this one-shot flag is gone.
         wake_state.update(cfg, transcript=None)
         return "fresh"  # deliberate rotate/rebirth/token-cap -> new brain
     sid = wake_state.get_session_id(cfg)

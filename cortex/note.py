@@ -129,6 +129,70 @@ def _last_active(conn: sqlite3.Connection, cfg: dict, now: datetime) -> dict | N
     return {"minutes_ago": int(age.total_seconds() // 60), "ts": row["ts"]}
 
 
+def _last_activity_any(conn: sqlite3.Connection, cfg: dict, now: datetime) -> dict | None:
+    """Newest ct_activity row across ALL channels (tg/wx/cli/ct) — the last time
+    ANYONE was active anywhere. Feeds the night-mode C4 Last-activity line (the
+    all-channel silence that justified the flag). None when the table is absent or
+    empty. Distinct from _last_active (cortex-only)."""
+    try:
+        row = conn.execute(
+            "SELECT ts, channel FROM ct_activity ORDER BY ts DESC LIMIT 1"
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    if not row or not row["ts"]:
+        return None
+    try:
+        age = now - _parse_utc(row["ts"])
+    except (TypeError, ValueError):
+        return None
+    return {
+        "channel": row["channel"],
+        "hm": _local_hm(row["ts"], cfg),
+        "silent_h": age.total_seconds() / 3600.0,
+    }
+
+
+def _night_flag(cfg: dict) -> bool:
+    """True when the persistent night flag is set (wake_state mode == 'night').
+    Gates the C4 Last-activity line. Best-effort -> False on any read failure."""
+    from cortex import wake_state
+    try:
+        return wake_state.is_night_mode(cfg)
+    except Exception:
+        return False
+
+
+def _night_insert_ready(cfg: dict, now: datetime, last_activity_any: dict | None) -> bool:
+    """The night-package insert precondition (consciousness-level): local time is
+    inside the night window [night.start, night.morning_start) (wraps midnight)
+    AND all-channel silence >= [night].silence_hours. When True the C4 line
+    surfaces so cortex can choose lie_down(mode='night')."""
+    if not last_activity_any:
+        return False
+    ncfg = config.night_cfg(cfg)
+
+    def _hm(raw: str, dh: int, dm: int) -> tuple[int, int]:
+        try:
+            hh, mm = (int(x) for x in str(raw).split(":"))
+            return hh, mm
+        except (ValueError, TypeError):
+            return dh, dm
+
+    start = _hm(ncfg.get("start", "22:00"), 22, 0)
+    end = _hm(ncfg.get("morning_start", "06:00"), 6, 0)
+    local = now.astimezone(_tz(cfg))
+    cur = (local.hour, local.minute)
+    inside = (cur >= start or cur < end) if start > end else (start <= cur < end)
+    if not inside:
+        return False
+    try:
+        return float(last_activity_any.get("silent_h", 0)) >= float(
+            ncfg.get("silence_hours", 1.5))
+    except (TypeError, ValueError):
+        return False
+
+
 def _handoff_after(cfg: dict, prev_ts: str | None) -> bool:
     """True if the handoff file is non-empty and was modified after `prev_ts`
     (the prior wake=1 row's ISO-UTC ts). Uses the DB row ts as the stable
@@ -437,6 +501,16 @@ def gather(
     budget = _safe(_build_budget, conn, cfg, now, kv, ncfg)
     last_wake = _safe(_last_wake, conn, now)
     last_active = _safe(_last_active, conn, cfg, now)
+    # Night flag already set OR the insert precondition holds (past night.start
+    # AND all-channel silence >= silence_hours) -> surface the C4 line so cortex
+    # can see the state / decide to enter the night package (consciousness-level).
+    night_flag = _safe(_night_flag, cfg, default=False)
+    last_activity_any = _safe(_last_activity_any, conn, cfg, now)
+    night_insert = _safe(_night_insert_ready, cfg, now, last_activity_any,
+                         default=False)
+    night_mode = bool(night_flag or night_insert)
+    if not night_mode:
+        last_activity_any = None
     # Catchup suppression: the prior window may have been reaped (force_slept set)
     # yet still wrote its handoff before dying. If the handoff was touched after
     # that prior wake row's ts and is non-empty, there is nothing to backfill ->
@@ -538,6 +612,8 @@ def gather(
         "window_sid": window_sid,
         "awake_since_hm": awake_since_hm,
         "catchup_handoff_written": catchup_handoff_written,
+        "night_mode": night_mode,
+        "last_activity_any": last_activity_any,
     }
 
 
@@ -608,6 +684,15 @@ def render(cfg: dict, now: datetime, data: dict) -> str:
             seg += " (force-slept mid-task)"
         now_seg += f" | {seg}"
     header.append(now_seg)
+
+    # Night mode (C4): the all-channel silence that justified the flag.
+    if data.get("night_mode"):
+        la = data.get("last_activity_any")
+        tmpl = _note_cfg(cfg).get("night_activity_text", "")
+        if la and tmpl:
+            header.append(tmpl.format(channel=la.get("channel", "?"),
+                                      hm=la.get("hm", "?"),
+                                      silent_h=f"{la.get('silent_h', 0):.1f}"))
 
     budget_line = _render_budget(data.get("budget"))
     if budget_line:

@@ -164,6 +164,15 @@ def lie_down(cfg: dict, force_slept: str | None = None, rotate: bool = False,
         # defeat the 120-360 roaming band).
         next_floor = _arm_sentinel(cfg, next_floor, token)
         next_wake = _local_hm(next_floor, cfg)
+        if night:
+            # C6 ack: INVISIBLE — audit-log line only, never a window inject.
+            ack = (cfg.get("night", {}).get("ack_text") or "")
+            if ack:
+                try:
+                    ack = ack.format(next_wake=next_wake or "?")
+                except (KeyError, IndexError, ValueError):
+                    pass
+                wake_state.wake_audit(cfg, "night_package", "ack", ack)
         return {"tokens": tokens, "cleared_due": cleared,
                 "force_slept": force_slept, "rotated": rotated,
                 "next_wake": next_wake, "mode": mode}

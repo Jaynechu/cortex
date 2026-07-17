@@ -118,10 +118,14 @@ _DEFAULTS: dict[str, Any] = {
     # window opens (insert precondition); morning_start = her first message from
     # here clears the flag; silence_hours = all-channel silence to insert the
     # flag; cap = max self-wakes counted per flag-set->clear night (safety ceiling,
-    # not zero — roaming needs headroom).
+    # not zero — roaming needs headroom). ack_text (C6) = INVISIBLE audit-log line
+    # written when the night package runs ({next_wake} renders at lie_down); it
+    # never reaches the window.
     "night": {"floor_min": 120, "floor_max": 360,
               "start": "22:00", "morning_start": "06:00",
-              "silence_hours": 1.5, "cap": 6},
+              "silence_hours": 1.5, "cap": 6,
+              "ack_text": "Night shift: handoff ✓ → rotate to free up context "
+                          "→ next wake {next_wake}"},
     "knowledgec": {"stream_name": "/app/usage"},
     "knowledgec.categories": {"default": "uncategorized"},
     "geofence": {"enabled": False},
@@ -180,6 +184,10 @@ _DEFAULTS: dict[str, Any] = {
         "died_no_handoff_catchup_text":
             "Previous window died without a handoff — recover context from its "
             "transcript, then write the handoff.",
+        # Night-mode (C4) last-activity line: rendered only while the night flag
+        # is set. {channel}/{hm}/{silent_h} render from the newest all-channel
+        # ct_activity row at note time. "" omits it.
+        "night_activity_text": "Last activity: {channel} {hm} ({silent_h}h silent)",
         # One-line turn-end reminder appended at the very end of every rendered
         # note. "" omits it. {wait_min}/{wait_max}/{next_wake_min}/{next_wake_max}
         # render from the wake clamps at note time (never hardcoded).

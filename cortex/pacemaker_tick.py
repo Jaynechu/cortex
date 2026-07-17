@@ -14,7 +14,7 @@ import sys
 import time
 
 from cortex import config, db, transcript, wake_state
-from cortex.pacemaker import integration, gates
+from cortex.pacemaker import integration
 from cortex.wake import run_wake
 
 
@@ -185,14 +185,10 @@ def main() -> int:
         # re-validate against the live epoch before firing (stale-snapshot guard).
         snap_gen = st.get("gen") if isinstance(st.get("gen"), int) else None
         if wake_state.is_paused(cfg):
-            # DND holds everything, including night-close's wrap-up injection —
-            # must be checked before _night_close, not just inside _reconcile.
+            # DND holds everything (reconcile + reaps + injections).
             print(f"{db.utcnow_iso()} "
                   "paused (DND): reconcile + reaps + injections held", flush=True)
             return 0
-        nc = _night_close(cfg, integration._now(cfg), st)
-        if nc:
-            print(f"{db.utcnow_iso()} {nc}", flush=True)
         rc = _reconcile(conn, cfg, st, integration._now(cfg))
         if rc is not None:
             print(f"{db.utcnow_iso()} {rc}", flush=True)

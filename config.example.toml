@@ -175,17 +175,6 @@ at_home_default = true         # until geofence-derived location is wired in
 cal_busy_default = false       # until calendar busy state is wired in
 
 [gates]
-# Night window: zero self-wakes 23-06 (floor/self_scheduled/affect_flag all
-# silent). cap = 0 = no self-wake at night.
-[gates.night]
-start = "23:00"
-end = "06:00"
-cap = 0
-# Wrap-up instruction injected once (after the current turn) into a still-awake
-# resident window when the night window opens: it writes its handoff and lies
-# down. Once down, the session is marked non-resumable so the first post-night
-# wake is a plain fresh spawn that reads the handoff via SessionStart.
-close_prompt = "⏳ [NIGHT] Night window is open — one full sleep now. Write your handoff entry, then lie_down to end this wake."
 # Daily wake-token budget: once today's SUM(NET spend — cache-miss rewrite +
 # output, ct_wake_log.net_tokens with a tokens fallback) reaches tokens,
 # self-wakes stop; resets naturally at local midnight.
@@ -193,12 +182,20 @@ close_prompt = "⏳ [NIGHT] Night window is open — one full sleep now. Write y
 [gates.daily_budget]
 tokens = 1000000
 
-# Night roaming floor (minutes): lie_down(mode='night') draw + clamp under the
-# night flag; also the Night range in lie_down's tool description. P8 adds the
-# flag lifecycle keys (start / morning_start / silence_hours / cap) on top.
+# Night mode: flag-based low-frequency roaming (replaces the old fixed-window
+# gate). lie_down(mode='night') sets a persistent `mode: night` flag in
+# wake_state; the flag drives the floor band + a per-night cap and is cleared by
+# the morning kick (her first message past morning_start).
 [night]
-floor_min = 120
-floor_max = 360
+floor_min = 120           # roaming draw + lie_down(mode='night') clamp (min)
+floor_max = 360           # roaming draw + lie_down(mode='night') clamp (max)
+start = "22:00"           # self-check window opens (night-insert precondition)
+morning_start = "06:00"   # her first message from here clears the flag
+silence_hours = 1.5       # all-channel silence to insert the flag
+cap = 6                   # max self-wakes per flag-set->clear night (ceiling)
+# C6 ack: INVISIBLE audit-log line written when the night package runs
+# ({next_wake} renders at lie_down). Never reaches the window.
+ack_text = "Night shift: handoff ✓ → rotate to free up context → next wake {next_wake}"
 
 [triggers]
 # Wake-window (minutes) from lie-down. lie_down picks the next wake: an explicit
