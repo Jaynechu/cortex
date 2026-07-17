@@ -229,6 +229,17 @@ def _self_scheduled(cfg: dict) -> list[dict]:
     return out
 
 
+def _night_mode(cfg: dict) -> bool:
+    """True when the persistent night flag is set (wake_state mode == 'night').
+    An INPUT to the pure tick (mode drives floor bounds + the cap gate); the tick
+    itself never sets it. Best-effort: a read failure reads as day."""
+    from cortex import wake_state
+    try:
+        return wake_state.is_night_mode(cfg)
+    except Exception:
+        return False
+
+
 def build_context(conn: sqlite3.Connection, cfg: dict, now: datetime, state: PacemakerState) -> dict:
     pm = cfg["pacemaker"]
     last_activity = _latest_activity_at(conn)
@@ -243,6 +254,7 @@ def build_context(conn: sqlite3.Connection, cfg: dict, now: datetime, state: Pac
         "affect_flag": _read_json_file(config.affect_flag_path(cfg), None),
         "self_scheduled": _self_scheduled(cfg),
         "today_tokens": _today_tokens(conn, now),
+        "mode": "night" if _night_mode(cfg) else None,
         "events": [],
     }
 
@@ -298,7 +310,9 @@ def lie_down(conn: sqlite3.Connection, cfg: dict, now: datetime | None = None,
     now = now or _now(cfg)
     rng = rng or random.Random()
 
-    next_floor = reschedule_floor(now, cfg, rng, minutes)
+    # Proxy/gated-tick redraws (minutes=None) must honour the night flag too, so a
+    # blocked-then-redrawn floor lands in the roaming band, not the day band.
+    next_floor = reschedule_floor(now, cfg, rng, minutes, night=_night_mode(cfg))
     state = load_state(conn)
     new_state = dataclasses.replace(
         state,

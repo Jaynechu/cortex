@@ -55,7 +55,8 @@ def tick(
     floor_fired = any(r.kind == "floor" for r in reasons)
     new_next_floor_due_at = state.next_floor_due_at
     if floor_fired:
-        new_next_floor_due_at = reschedule_floor(now, config, rng)
+        new_next_floor_due_at = reschedule_floor(
+            now, config, rng, night=context.get("mode") == "night")
 
     # 2. gates
     gate_results = gates.run_gates(state, context, config, now)
@@ -63,13 +64,21 @@ def tick(
 
     wake = bool(reasons) and not gated_by
 
-    # Night cap accounting: a night wake consumes the cap.
+    # Night cap accounting: keyed on the flag lifecycle (one flag-set->clear =
+    # one night), not a clock window. The flag's own set-time is opaque to tick;
+    # the marker key here is just "counting a night" (a fixed sentinel) vs None
+    # (day). Entering night (flag set, no key yet) starts a fresh count; leaving
+    # night (flag cleared) resets it. Each night wake consumes the cap.
+    _NIGHT_KEY = "night"
+    night_on = context.get("mode") == "night"
     new_night_cap_key = state.night_cap_key
     new_night_wake_count = state.night_wake_count
-    current_night = gates.night_key(config, now)
-    if current_night is not None and current_night != state.night_cap_key:
-        new_night_cap_key, new_night_wake_count = current_night, 0
-    if wake and current_night is not None:
+    if night_on:
+        if state.night_cap_key != _NIGHT_KEY:
+            new_night_cap_key, new_night_wake_count = _NIGHT_KEY, 0
+    else:
+        new_night_cap_key, new_night_wake_count = None, 0
+    if wake and night_on:
         new_night_wake_count += 1
 
     new_last_wake_at = now if wake else state.last_wake_at
