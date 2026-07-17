@@ -202,14 +202,15 @@ _DEFAULTS: dict[str, Any] = {
         # marrow outbox row at note time. "" omits receipts entirely.
         "receipt_line": 'Note #{id} ({channel} {sent_hm}): she replied {replied_hm} "{text}"',
         # One-line turn-end reminder appended at the very end of every rendered
-        # note. "" omits it. {wait_min}/{wait_max}/{next_wake_min}/{next_wake_max}
-        # render from the wake clamps at note time (never hardcoded).
+        # note. "" omits it. {wait_min}/{wait_max}/{next_wake_min}/{next_wake_max}/
+        # {silent_max_min} render from the wake clamps at note time (never
+        # hardcoded).
         "turn_end_text":
-            "NOTE: Call MCP tool to wait or lie_down at the end of each turn. "
-            "Wait=wait(N) [N={wait_min}-{wait_max}]; "
-            "sleep=lie_down(next_wake_min=N) [{next_wake_min}-{next_wake_max}]. "
-            "Skip call = sleep in 5 mins. Auto timer is on during active chat "
-            "- no call needed.",
+            "NOTE: End activity with wait(N) or lie_down. Neither called = "
+            "{silent_max_min} min idle, then the 3-choice menu. Her message "
+            "resets all timers. No consecutive waits. "
+            "wait(N) [{wait_min}-{wait_max}]; "
+            "lie_down(next_wake_min=N) [{next_wake_min}-{next_wake_max}].",
         # Header written into a freshly-created wishlist.md (append-only file,
         # never overwritten). Display text — customise freely.
         "wishlist_header":
@@ -232,10 +233,12 @@ _SECTIONS = (
 
 
 def wake_clamps(cfg: dict) -> dict[str, int]:
-    """The four wake-clamp numbers rendered into note/tool text (never hardcoded).
-    Day lie_down bounds from [wake]; night bounds from [night].floor_*."""
+    """The wake-clamp numbers rendered into note/tool text (never hardcoded).
+    Day lie_down bounds from [wake]; night bounds from [night].floor_*; idle bar
+    from [wake.watchdog].silent_max_min."""
     w = cfg.get("wake", {})
     n = cfg.get("night", {})
+    wd = w.get("watchdog", {})
     return {
         "wait_min": int(w.get("wait_min", 1)),
         "wait_max": int(w.get("wait_max", 20)),
@@ -243,6 +246,7 @@ def wake_clamps(cfg: dict) -> dict[str, int]:
         "next_wake_max": int(w.get("next_wake_max", 240)),
         "night_min": int(n.get("floor_min", 120)),
         "night_max": int(n.get("floor_max", 360)),
+        "silent_max_min": int(wd.get("silent_max_min", 20)),
     }
 
 

@@ -377,15 +377,16 @@ def menu_delivered(cfg: dict) -> bool:
 
 def user_replied_this_wake(cfg: dict) -> bool:
     """True once a real user message landed in the current wake (set by the
-    marrow UserPromptSubmit hook). Drives the chat vs no-user silence tier."""
+    marrow UserPromptSubmit hook). Selects which timestamp source the unified
+    silence_action idle bar times from (user message vs awake_since)."""
     return bool(load(cfg).get("user_replied_this_wake"))
 
 
 def awake_since_min(cfg: dict) -> float | None:
     """Minutes elapsed since this wake began (awake_since), or None when not
-    awake / unparseable. The no-user silence tier times from HERE (elapsed since
-    wake), not from a user-message ts that may never exist on a fresh wake where
-    the user never spoke."""
+    awake / unparseable. When the user never spoke this wake, silence_action
+    times the same idle bar from HERE instead of a user-message ts that may
+    never exist."""
     raw = load(cfg).get("awake_since")
     if not raw:
         return None

@@ -291,14 +291,13 @@ def test_ct_note_claimed_by_hook_not_redelivered_by_note(cfg, tmp_path):
 
 
 def test_render_turn_end_line_appears_every_render(cfg):
-    # Clamp numbers render from config (wait 1-20, next_wake 21-240) — no hardcode.
+    # Clamp numbers render from config (wait 1-20, next_wake 21-240, idle 20) — no hardcode.
     text = note.render(cfg, NOW, {})
     assert text.rstrip().endswith(
-        "NOTE: Call MCP tool to wait or lie_down at the end of each turn. "
-        "Wait=wait(N) [N=1-20]; sleep=lie_down(next_wake_min=N) "
-        "[21-240]. "
-        "Skip call = sleep in 5 mins. Auto timer is on during active chat "
-        "- no call needed.")
+        "NOTE: End activity with wait(N) or lie_down. Neither called = "
+        "20 min idle, then the 3-choice menu. Her message resets all timers. "
+        "No consecutive waits. wait(N) [1-20]; "
+        "lie_down(next_wake_min=N) [21-240].")
 
 
 def test_render_turn_end_line_omitted_when_blank(cfg):
