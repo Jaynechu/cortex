@@ -92,8 +92,8 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
 - claim_lie_down (§4) = atomic awake-claim, only winner runs body, later gets `{"skipped":"not awake"}`.
 - lie_down body: record occupancy `tokens` into ct_wake_log (sole writer; bare `except:pass` = known silent-drop; net_tokens column historical/unwritten) → clear due self_schedule → integration.lie_down floor redraw.
 - Then: store_window_tokens → kill watchdog (skip if self) → optional set_rotated → _arm_sentinel; result adds next_wake=HH:MM.
-- wait (wait.py:23-35): one-shot watchdog silence extension; cap wake.wait_max_per_wake (2)/wake. commit_wait bumps gen + writes a `commit_wait` wake_audit line (old->new gen) like lie_down_claim (wake_state.py:371-401).
-- Clamped triggers.clamp_window_minutes to [wake.wait_min, wake.wait_max] (1/55) — OWN bounds, decoupled from floor draw window (floor_min_min/floor_max_min 10/55).
+- wait (wait.py): one-shot watchdog silence extension; no consecutive EMPTY waits — commit_wait refuses while `wait_spent` set; any tool-call round / user msg / kick clears it (marrow `_cortex_round_activity` / `_cortex_user_wake_reset` / kick path). commit_wait bumps gen + writes a `commit_wait` wake_audit line (old->new gen) like lie_down_claim.
+- Clamped triggers.clamp_window_minutes to [wake.wait_min, wake.wait_max] (1/20) — OWN bounds, decoupled from floor draw window (floor_min_min/floor_max_min 10/55).
 - say (say.py, window.py:476-483): sound + front resident window — urgent-only ping, else silent; --note accepted but ignored (CLI symmetry).
 ## 6. Wakeup note (`note.py`)
 - gather (note.py:311-340): every section behind _safe(), render pure, omit cleanly when absent (386-446).
