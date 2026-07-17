@@ -204,6 +204,16 @@ ack_text = "Night shift: handoff ✓ → rotate to free up context → next wake
 floor_min_min = 10             # wake-window draw lower bound (uniform lo / clamp min)
 floor_max_min = 55             # wake-window draw upper bound (uniform hi / clamp max)
 
+# External-wake (cortex.kick) reason lines rendered as plain lines in the wakeup
+# note (no section header), then cleared on delivery. A bridge/cli poke appends
+# one; note.py renders + consumes it. {id} = outbox note id; {text} = her reply
+# body (bridge-truncated); {minutes} = channel silence minutes.
+[kick]
+reason_reply = 'Msg #{id} replied: "{text}"'
+reason_timeout = "Msg #{id} no reply in {minutes}min"
+reason_morning = "She's up — day mode"
+max_reasons = 8                # cap the pending-flag list (stuck bridge guard)
+
 # Wakeup note knobs. Every line is deterministic now, so the old whole-note
 # max_chars cap is gone; per-source limits below keep each line bounded.
 # Persona/display strings + behaviour (identity stays in config).

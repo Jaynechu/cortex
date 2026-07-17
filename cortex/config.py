@@ -158,6 +158,17 @@ _DEFAULTS: dict[str, Any] = {
         "floor_min_min": 10,
         "floor_max_min": 55,
     },
+    # External-wake (cortex.kick) reason lines rendered as plain lines into the
+    # wakeup note (no section header), then cleared on delivery. A bridge/cli
+    # poke appends one; note.py renders + consumes it. {id} = outbox note id;
+    # {text} = her reply body (truncated by the bridge); {minutes} = silence min.
+    "kick": {
+        "reason_reply": 'Msg #{id} replied: "{text}"',
+        "reason_timeout": "Msg #{id} no reply in {minutes}min",
+        "reason_morning": "She's up — day mode",
+        # Cap the pending-flag list so a stuck bridge can't grow it unbounded.
+        "max_reasons": 8,
+    },
     # Wakeup note knobs. Every field is deterministic now, so the old whole-note
     # max_chars cap is gone; per-source limits below keep each line bounded.
     # OSS: identity/display strings stay in config, never hardcoded in .py.
@@ -207,7 +218,7 @@ _DEFAULTS: dict[str, Any] = {
 _SECTIONS = (
     "core", "paths", "knowledgec", "geofence", "health",
     "tick", "pacemaker", "gates", "triggers", "marrow",
-    "wake", "note", "night",
+    "wake", "note", "kick", "night",
 )
 
 

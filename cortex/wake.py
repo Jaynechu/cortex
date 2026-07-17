@@ -80,7 +80,7 @@ def assemble_note(conn: sqlite3.Connection, cfg: dict, now: datetime,
     a later re-query that could race in an event this note never showed."""
     data = note.gather(conn, cfg, now, decision=decision,
                        fresh=fresh, wake_kind=wake_kind,
-                       died_no_handoff=died_no_handoff)
+                       died_no_handoff=died_no_handoff, consume_kick=True)
     text = note.render(cfg, now, data)
     if return_cutoff:
         return text, data.get("replay_cutoff_ts")

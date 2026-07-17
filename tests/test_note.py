@@ -95,6 +95,67 @@ def test_render_omits_absent_lines(cfg):
     assert "### Replay" not in text
 
 
+def test_render_kick_reasons_plain_lines_no_header(cfg):
+    data = {"kick_reasons": ['Msg #3 replied: "miss you"', "She's up — day mode"]}
+    text = note.render(cfg, NOW, data)
+    assert 'Msg #3 replied: "miss you"' in text
+    assert "She's up — day mode" in text
+    assert "### Woke for" not in text          # header rejected
+    assert "Woke for" not in text
+
+
+def test_render_kick_reasons_absent_when_empty(cfg):
+    assert "Woke for" not in note.render(cfg, NOW, {"kick_reasons": []})
+
+
+def _home_cfg(cfg, tmp_path):
+    """cfg with tmp_path state paths so wake_state writes stay off the live dir
+    (conftest hard-wall)."""
+    home = tmp_path / "cortex"
+    (home / "state").mkdir(parents=True, exist_ok=True)
+    cfg = dict(cfg)
+    cfg["paths"] = {
+        **cfg.get("paths", {}),
+        "cortex_home": str(home),
+        "wake_state_file": str(home / "state" / "wake_state.json"),
+        "watchdog_pidfile": str(home / "state" / "watchdog.pid"),
+    }
+    return cfg
+
+
+def test_gather_consumes_kick_reasons_on_delivery(cfg, tmp_path):
+    import sqlite3
+
+    from cortex import wake_state
+    cfg = _home_cfg(cfg, tmp_path)
+    wake_state.update(cfg, kick_reasons=['Msg #1 replied: "hi"'])
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    make_events_table(conn)
+    # consume_kick=True (delivered-note path) renders + clears the flags.
+    data = note.gather(conn, cfg, NOW, consume_kick=True)
+    assert data["kick_reasons"] == ['Msg #1 replied: "hi"']
+    assert wake_state.load(cfg).get("kick_reasons") in (None, [])
+    # A second delivered note sees nothing (already consumed).
+    data2 = note.gather(conn, cfg, NOW, consume_kick=True)
+    assert data2["kick_reasons"] == []
+
+
+def test_gather_passive_render_keeps_kick_reasons(cfg, tmp_path):
+    import sqlite3
+
+    from cortex import wake_state
+    cfg = _home_cfg(cfg, tmp_path)
+    wake_state.update(cfg, kick_reasons=['Msg #2 no reply in 30min'])
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    make_events_table(conn)
+    # consume_kick=False (render-only path) must NOT drop the unseen reason.
+    data = note.gather(conn, cfg, NOW)
+    assert data["kick_reasons"] == []
+    assert wake_state.load(cfg).get("kick_reasons") == ['Msg #2 no reply in 30min']
+
+
 def test_render_turn_end_line_appears_every_render(cfg):
     # Clamp numbers render from config (wait 1-20, next_wake 21-240) — no hardcode.
     text = note.render(cfg, NOW, {})
