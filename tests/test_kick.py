@@ -86,3 +86,38 @@ def test_kind_and_fields_recorded_in_audit_only(cfg, _stub_spawn):
     assert "kick" in audit and "timeout" in audit
     assert "id=9" in audit and "minutes=45" in audit
     assert "kick_reasons" not in _ws(cfg)
+
+
+# --- night flag clear (P8) ---------------------------------------------------
+
+def test_morning_kick_clears_flag_asleep(cfg, _stub_spawn):
+    wake_state.update(cfg, awake=False, mode="night")
+    r = kick.kick(cfg, "morning")
+    assert r["flag_cleared"] is True
+    assert "mode" not in _ws(cfg)  # day cadence: flag gone
+
+
+def test_morning_kick_clears_flag_awake(cfg, _stub_spawn):
+    # Morning clears the flag even while awake (flag clear is separate from the
+    # awake audit-only no-op for wake machinery).
+    wake_state.update(cfg, awake=True, mode="night")
+    r = kick.kick(cfg, "morning")
+    assert r["awake"] is True and r["ticked"] is False
+    assert r["flag_cleared"] is True
+    assert "mode" not in _ws(cfg)
+    assert _stub_spawn == []  # no tick while awake
+
+
+def test_midnight_reply_kick_keeps_flag(cfg, _stub_spawn):
+    # A watch reply/timeout mid-night wakes cortex but does NOT clear the flag
+    # (dawdling is not morning).
+    wake_state.update(cfg, awake=False, mode="night")
+    r = kick.kick(cfg, "reply", id=3)
+    assert r.get("flag_cleared") is False
+    assert _ws(cfg)["mode"] == "night"  # flag survives
+
+
+def test_morning_kick_no_flag_is_noop(cfg, _stub_spawn):
+    wake_state.update(cfg, awake=False)  # day, no flag
+    r = kick.kick(cfg, "morning")
+    assert r["flag_cleared"] is False

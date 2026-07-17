@@ -65,7 +65,6 @@ def test_every_injected_prompt_carries_a_machine_marker(tmp_path):
     assert marked(wake["tuck_in_text"])
     assert marked(wake["fuse_marker"])
     assert marked(wake["ctl_sleep_marker"])
-    assert marked(cfg["gates"]["night"]["close_prompt"])
     # the family covers the new fuse / ctl / command markers
     for needle in ("[FUSE]", "[CTL]", "[CMD"):
         assert needle in markers

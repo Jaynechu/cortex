@@ -85,17 +85,23 @@ def _record_tokens(conn, cfg: dict, state: dict, force_slept: str | None) -> int
 
 
 def lie_down(cfg: dict, force_slept: str | None = None, rotate: bool = False,
-             next_wake_min: float | None = None) -> dict:
+             next_wake_min: float | None = None, mode: str | None = None) -> dict:
     """End the current wake. `next_wake_min` picks the next internal wake:
-    an explicit minutes-from-now (clamped to [next_wake_min, next_wake_max]), or
-    None = a uniform "dice" draw within the floor window (proxy paths: watchdog
-    auto, stale reap, fuse — session-facing dice retired, N required at the
-    MCP/CLI layer). `rotate` respawns a fresh window next wake; it no longer
-    lowers the clamp floor."""
+    an explicit minutes-from-now (clamped to the day or night band), or None = a
+    uniform "dice" draw within the floor window (proxy paths: watchdog auto, stale
+    reap, fuse — session-facing dice retired, N required at the MCP/CLI layer).
+    `rotate` respawns a fresh window next wake; it no longer lowers the clamp
+    floor. `mode='night'` = the night package: rotate is forced (light window),
+    the explicit next_wake_min clamps to [night.floor_min, night.floor_max], and
+    the persistent night flag is set as a child of this claim's epoch."""
     from cortex.pacemaker.triggers import clamp_next_wake_minutes
 
+    night = mode == "night"
+    if night:
+        rotate = True  # night package always frees context with a fresh window
     if next_wake_min is not None:
-        next_wake_min = clamp_next_wake_minutes(next_wake_min, cfg, rotate=rotate)
+        next_wake_min = clamp_next_wake_minutes(
+            next_wake_min, cfg, rotate=rotate, night=night)
     # Atomic awake claim: the watchdog (60s poll) and the tick awake-branch can
     # both run silence_action in the same window; only the caller that clears the
     # awake marker here proceeds, so the ct_wake_log update + floor redraw fire
@@ -144,15 +150,32 @@ def lie_down(cfg: dict, force_slept: str | None = None, rotate: bool = False,
                     cfg, token, _mark_rotated(state.get("transcript"))))
             except wake_state.StateValidationError:
                 pass  # superseded -> the newer epoch owns the window, no rotate
-        # awake marker already cleared atomically by claim_lie_down at entry.
-        # _arm_sentinel may night-clamp next_floor; use its EFFECTIVE return so
-        # the reported next_wake always matches the ledger + sentinel (never
-        # reports the pre-clamp time, e.g. 02:00 when 08:00 was actually armed).
+        # Night flag: set AFTER rotate, BEFORE floor/sentinel — a conditional
+        # CHILD of the claim gen (no bump, same as rotate) so a superseding user
+        # reset suppresses it. The flag persists across wakes until the morning
+        # kick clears it; day lie_downs never touch it.
+        if night:
+            try:
+                wake_state.conditional_mutate(cfg, token, _set_night_mode)
+            except wake_state.StateValidationError:
+                pass  # superseded -> newer epoch owns the window, no flag
+        # awake marker already cleared atomically by claim_lie_down at entry. The
+        # sentinel arms at the real due time now (no gate-end clamp — that would
+        # defeat the 120-360 roaming band).
         next_floor = _arm_sentinel(cfg, next_floor, token)
         next_wake = _local_hm(next_floor, cfg)
+        if night:
+            # C6 ack: INVISIBLE — audit-log line only, never a window inject.
+            ack = (cfg.get("night", {}).get("ack_text") or "")
+            if ack:
+                try:
+                    ack = ack.format(next_wake=next_wake or "?")
+                except (KeyError, IndexError, ValueError):
+                    pass
+                wake_state.wake_audit(cfg, "night_package", "ack", ack)
         return {"tokens": tokens, "cleared_due": cleared,
                 "force_slept": force_slept, "rotated": rotated,
-                "next_wake": next_wake}
+                "next_wake": next_wake, "mode": mode}
     finally:
         conn.close()
 
@@ -179,44 +202,28 @@ def _mark_rotated(transcript_path):
     return _m
 
 
-def _clamp_to_night_end(cfg: dict, next_floor: datetime) -> datetime:
-    """If next_floor falls inside the night gate, push it to the gate END — no
-    pointless mid-night alarm the gate would block anyway; the morning gate-open
-    fires it once. Outside the gate (or gate disabled) -> unchanged."""
-    from cortex.pacemaker import gates
-    if gates.night_key(cfg, next_floor) is None:
-        return next_floor
-    ncfg = cfg.get("gates", {}).get("night", {}) or {}
-    try:
-        hh, mm = (ncfg.get("end", "06:00")).split(":")
-        tz = ZoneInfo(cfg["core"]["timezone"])
-        local = next_floor.astimezone(tz)
-        end = local.replace(hour=int(hh), minute=int(mm), second=0, microsecond=0)
-        if end <= local:  # gate end is tomorrow morning
-            from datetime import timedelta
-            end = end + timedelta(days=1)
-        return end
-    except (ValueError, KeyError):
-        return next_floor
+def _set_night_mode(d: dict):
+    """Mutator (used under conditional_mutate): set the persistent night flag as
+    a child of the claim gen (no bump). Cleared later by the morning kick."""
+    d["mode"] = "night"
+    return True
 
 
 def _arm_sentinel(cfg: dict, next_floor: datetime, token=None) -> datetime | None:
     """Persist the durable next-wake ledger and arm the one-shot exact-time wake
     sentinel for `next_floor`, all as CONDITIONAL children of the claim `token`.
-    Ledger first (survives a compact/kill that loses the sentinel args);
-    night-clamp the time so no alarm lands inside the gate. Kills the recorded
-    predecessor sentinel (never orphaned), then spawns a fresh one carrying
-    (gen, state_id, target) as CLI args and conditionally registers its pid.
+    Ledger first (survives a compact/kill that loses the sentinel args). Kills the
+    recorded predecessor sentinel (never orphaned), then spawns a fresh one
+    carrying (gen, state_id, target) as CLI args and conditionally registers its
+    pid. No night-end clamp: the flag drives low-frequency roaming, so a night
+    alarm fires at its real due time.
 
     BUG A: if a user reset / newer claim bumps gen mid-body, the ledger write and
     the pid registration are both dropped under the strict lock; a sentinel that
     was already spawned before losing the race is SIGTERMed and NOT registered.
-    Gated by [wake].sentinel; false = tick-only. Returns the EFFECTIVE
-    (post-clamp) next_floor so the caller's reported next_wake always agrees with
-    the ledger and sentinel."""
+    Gated by [wake].sentinel; false = tick-only. Returns `next_floor` so the
+    caller's reported next_wake always agrees with the ledger and sentinel."""
     _kill_sentinel(cfg)
-    if next_floor is not None:
-        next_floor = _clamp_to_night_end(cfg, next_floor)
     iso = _local_iso(next_floor, cfg) if next_floor is not None else None
     # Conditional ledger write: a bump since the claim -> this alarm is stale,
     # write nothing (fail closed). No bump: a plain (non-gen) ledger write.
@@ -307,11 +314,14 @@ def main(argv: list[str] | None = None) -> int:
                         help="respawn a fresh window on the next wake")
     parser.add_argument("--next-wake-min", type=float, required=True,
                         help="minutes until the next internal wake (required, "
-                             "clamped to [next_wake_min, next_wake_max])")
+                             "clamped to the day or night band)")
+    parser.add_argument("--mode", default=None, choices=("night",),
+                        help="'night' = night package (forces rotate, night "
+                             "floor band, sets the persistent night flag)")
     args = parser.parse_args(argv)
     cfg = config.load()
     result = lie_down(cfg, force_slept=args.force_slept, rotate=args.rotate,
-                      next_wake_min=args.next_wake_min)
+                      next_wake_min=args.next_wake_min, mode=args.mode)
     print(json.dumps(result, ensure_ascii=False))  # surface next_wake harmlessly
     return 0
 

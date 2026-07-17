@@ -2,8 +2,8 @@
 call marrow's resumed full-env cortex session, and persist the session_id.
 Freshness (a fresh marrow session, no resume_sid) comes only from the
 rotate/dead-window detection: a rotated or dead resident window is a new brain
-that reads the previous brain's handoff via SessionStart. Night close (23:00)
-retires the resident session so the first post-night wake is a plain fresh spawn.
+that reads the previous brain's handoff via SessionStart. The night package
+(lie_down(mode='night')) forces a rotate, so the next wake is a plain fresh spawn.
 
 marrow lives in its own repo/venv (separate deps) — invoked as a subprocess
 against marrow's own venv python rather than imported in-process, so cortex
@@ -328,7 +328,7 @@ def wake_id_of(now: datetime) -> str:
 
 def _window_wake_plan(cfg) -> str:
     """Classify how the resident window should be woken. Three outcomes:
-      "fresh"  — a deliberate new brain: the rotate flag is set (night close /
+      "fresh"  — a deliberate new brain: the rotate flag is set (night package /
                  explicit rotate / rebirth / token-cap fresh) OR the transcript
                  rolled to a different session since the last wake (a /clear).
                  A brand-new session; the handoff carries context forward.
@@ -346,9 +346,9 @@ def _window_wake_plan(cfg) -> str:
         # rotated flag is consumed: from here on this wake is a fresh spawn
         # (set_awake will record the NEW session's transcript once it exists),
         # so nothing in between may read the retiring session's pointer as
-        # live. retired_sid (durable, set at rotate time by lie_down/
-        # _night_close) is untouched here — it is the belt-and-braces guard
-        # every resume path checks even after this one-shot flag is gone.
+        # live. retired_sid (durable, set at rotate time by lie_down) is
+        # untouched here — it is the belt-and-braces guard every resume path
+        # checks even after this one-shot flag is gone.
         wake_state.update(cfg, transcript=None)
         return "fresh"  # deliberate rotate/rebirth/token-cap -> new brain
     sid = wake_state.get_session_id(cfg)

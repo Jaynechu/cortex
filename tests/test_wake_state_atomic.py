@@ -31,6 +31,40 @@ def test_lock_file_path_is_sibling(cfg):
     assert lp == wake_state.wake_state_path(cfg).with_suffix(".lock")
 
 
+# --- night flag lifecycle (P8) -----------------------------------------------
+
+def test_night_flag_survives_wake_cycle(cfg):
+    """The night flag persists across set_awake / clear_awake (it is NOT an
+    awake-key), so it outlives individual wakes until the morning clear."""
+    wake_state.update(cfg, mode="night")
+    wake_state.set_awake(cfg, 1, None)  # a wake begins
+    assert wake_state.is_night_mode(cfg) is True
+    wake_state.clear_awake(cfg)         # the wake ends
+    assert wake_state.is_night_mode(cfg) is True  # flag still set
+
+
+def test_clear_night_mode_returns_true_once(cfg):
+    wake_state.update(cfg, mode="night")
+    assert wake_state.clear_night_mode(cfg) is True
+    assert wake_state.is_night_mode(cfg) is False
+    assert wake_state.clear_night_mode(cfg) is False  # no-op second call
+
+
+def test_lie_down_night_mode_sets_flag_under_lock(cfg):
+    wake_state.set_awake(cfg, 1, None)
+    r = lie_down.lie_down(cfg, next_wake_min=200, mode="night")
+    assert r["mode"] == "night"
+    assert wake_state.is_night_mode(cfg) is True
+
+
+def test_lie_down_night_mode_via_cli(cfg, monkeypatch):
+    monkeypatch.setattr(config, "load", lambda: cfg)
+    wake_state.set_awake(cfg, 1, None)
+    rc = lie_down.main(["--next-wake-min", "150", "--mode", "night"])
+    assert rc == 0
+    assert wake_state.is_night_mode(cfg) is True
+
+
 def test_commit_wait_writes_audit_line(cfg):
     """An accepted wait bumps gen (a new cancellation epoch) — it must leave a
     commit_wait audit line (old->new gen) so the bump is visible in forensics,

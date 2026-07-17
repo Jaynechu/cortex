@@ -113,10 +113,19 @@ _DEFAULTS: dict[str, Any] = {
         # subprocess kill = this + margin. Must match marrow's own default.
         "call_timeout_s": 600,
     },
-    # Night roaming floor (minutes) — lie_down(mode='night') draw + clamp under
-    # the night flag. P8 owns the flag lifecycle; only floor_min/floor_max are
-    # read here so lie_down's tool description can render the Night range.
-    "night": {"floor_min": 120, "floor_max": 360},
+    # Night mode (flag-based low-frequency roaming). floor_min/floor_max =
+    # lie_down(mode='night') draw + clamp under the flag. start = self-check
+    # window opens (insert precondition); morning_start = her first message from
+    # here clears the flag; silence_hours = all-channel silence to insert the
+    # flag; cap = max self-wakes counted per flag-set->clear night (safety ceiling,
+    # not zero — roaming needs headroom). ack_text (C6) = INVISIBLE audit-log line
+    # written when the night package runs ({next_wake} renders at lie_down); it
+    # never reaches the window.
+    "night": {"floor_min": 120, "floor_max": 360,
+              "start": "22:00", "morning_start": "06:00",
+              "silence_hours": 1.5, "cap": 6,
+              "ack_text": "Night shift: handoff ✓ → rotate to free up context "
+                          "→ next wake {next_wake}"},
     "knowledgec": {"stream_name": "/app/usage"},
     "knowledgec.categories": {"default": "uncategorized"},
     "geofence": {"enabled": False},
@@ -136,15 +145,6 @@ _DEFAULTS: dict[str, Any] = {
         "cal_busy_default": False,
     },
     "gates": {
-        # Night window (plan 07-08): zero self-wakes 23-06 — floor/
-        # self_scheduled/affect_flag all silent.
-        # close_prompt = wrap-up instruction injected once into a still-awake
-        # resident window when the night window opens (write handoff + lie_down).
-        "night": {
-            "start": "23:00", "end": "06:00", "cap": 0,
-            "close_prompt": "⏳ [NIGHT] Night window is open — one full sleep now. "
-                            "Write your handoff entry, then lie_down to end this wake.",
-        },
         # Daily wake-token budget: once Cortex Today (sum of today's finished-
         # window final context occupancies + the current live window occupancy)
         # reaches this, self-wakes stop; resets at local midnight.
@@ -184,6 +184,10 @@ _DEFAULTS: dict[str, Any] = {
         "died_no_handoff_catchup_text":
             "Previous window died without a handoff — recover context from its "
             "transcript, then write the handoff.",
+        # Night-mode (C4) last-activity line: rendered only while the night flag
+        # is set. {channel}/{hm}/{silent_h} render from the newest all-channel
+        # ct_activity row at note time. "" omits it.
+        "night_activity_text": "Last activity: {channel} {hm} ({silent_h}h silent)",
         # One-line turn-end reminder appended at the very end of every rendered
         # note. "" omits it. {wait_min}/{wait_max}/{next_wake_min}/{next_wake_max}
         # render from the wake clamps at note time (never hardcoded).
@@ -220,6 +224,13 @@ def wake_clamps(cfg: dict) -> dict[str, int]:
         "night_min": int(n.get("floor_min", 120)),
         "night_max": int(n.get("floor_max", 360)),
     }
+
+
+def night_cfg(cfg: dict) -> dict:
+    """The [night] section (flag-based roaming knobs). Missing -> defaults."""
+    n = dict(_DEFAULTS["night"])
+    n.update(cfg.get("night", {}) or {})
+    return n
 
 
 def _config_path() -> Path:

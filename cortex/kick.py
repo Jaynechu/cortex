@@ -100,12 +100,20 @@ def kick(cfg: dict, kind: str, **fields) -> dict:
     wake machinery. Best-effort throughout: a lock/state failure drops the kick
     silently."""
     detail = " ".join(f"{k}={v}" for k, v in fields.items() if v is not None)
+    morning = kind == "morning"
     sentinel_pid = None
     was_awake = False
+    flag_cleared = False
     try:
         def _mutate(d):
-            nonlocal sentinel_pid, was_awake
+            nonlocal sentinel_pid, was_awake, flag_cleared
             was_awake = bool(d.get("awake"))
+            # Morning kick clears the night flag under the SAME lock — awake or
+            # asleep. Day cadence resumes because build_context now reads no flag
+            # (day floor bounds + no cap gate). Mid-night kicks (reply/timeout)
+            # never touch the flag: dawdling is not morning.
+            if morning and d.pop("mode", None) is not None:
+                flag_cleared = True
             if was_awake:
                 return
             # Asleep: cancel any in-flight alarm epoch, drop the durable ledger,
@@ -118,14 +126,17 @@ def kick(cfg: dict, kind: str, **fields) -> dict:
     except wake_state.StateValidationError:
         return {"ok": False, "reason": "state locked", "kind": kind}
 
-    wake_state.wake_audit(cfg, "kick", kind, detail)
+    wake_state.wake_audit(cfg, "kick", kind,
+                          f"{detail} flag_cleared={flag_cleared}".strip())
     if was_awake:
-        return {"ok": True, "kind": kind, "awake": True, "ticked": False}
+        return {"ok": True, "kind": kind, "awake": True, "ticked": False,
+                "flag_cleared": flag_cleared}
 
     _sigterm(sentinel_pid)
     _clear_floor_deadline(cfg)
     _spawn_tick(cfg)
-    return {"ok": True, "kind": kind, "awake": False, "ticked": True}
+    return {"ok": True, "kind": kind, "awake": False, "ticked": True,
+            "flag_cleared": flag_cleared}
 
 
 def main(argv: list[str] | None = None) -> int:

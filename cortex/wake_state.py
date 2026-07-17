@@ -549,6 +549,26 @@ def take_rotated(cfg: dict) -> bool:
         return val
 
 
+def is_night_mode(cfg: dict) -> bool:
+    """True when the persistent night flag is set (mode == 'night'). The flag
+    outlives individual wakes — it is set by lie_down(mode='night') and cleared
+    only by the morning kick, so it survives the awake-key clears that fire every
+    wake/sleep cycle."""
+    return str(load(cfg).get("mode") or "") == "night"
+
+
+def clear_night_mode(cfg: dict) -> bool:
+    """Drop the night flag (read-and-clear) under the advisory lock. Returns True
+    if it was set. The morning kick calls this to return to day cadence; a
+    no-flag call is a harmless no-op."""
+    with _flock(cfg):
+        d = load(cfg)
+        if d.pop("mode", None) is not None:
+            _save(cfg, d)
+            return True
+        return False
+
+
 def set_retired_sid(cfg: dict, transcript_path: str | None) -> None:
     """Durably record the claude session UUID (the transcript jsonl stem, same
     convention as window.claude_session_id) that was just retired by a
