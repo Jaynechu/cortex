@@ -163,13 +163,6 @@ def _verify_esc_or_hard_interrupt(cfg: dict, grace_sec: float, trigger: str) -> 
     return f"hard-interrupt:{trigger} pid={pid}"
 
 
-_DEFAULT_FUSE_PROMPT = (
-    "⚙️ [FUSE] Summarise this whole session into one section and append it to "
-    "handoff.md — follow the format and style of the preceding sections. Call "
-    "lie_down(rotate=True) when done."
-)
-
-
 def _fuse(cfg: dict, grace: float) -> None:
     """Fuse path: esc the runaway turn, prompt the session to write its handoff
     and lie_down(rotate=True), then give it a bounded grace window to do so
@@ -177,18 +170,22 @@ def _fuse(cfg: dict, grace: float) -> None:
     reaction, fall back to the force path (SIGINT esc-equivalent + proxy
     lie_down); force_slept is set only when the handoff was NOT written this
     grace phase, so the catchup marker fires exactly when the handoff is missing.
-    Hard deadline on the whole grace phase — the fuse must never hang."""
+    Hard deadline on the whole grace phase — the fuse must never hang.
+
+    Covert delivery: only the "⚙️ [FUSE]" marker reaches the window (bell via the
+    ear Monitor; typed only if the ear is dead). The full FUSE instruction body is
+    injected invisibly by the marrow hook keyed on the marker ([cortex].fuse_prompt_text)."""
     from cortex import lie_down as lie_down_mod
 
     wcfg = cfg["wake"].get("watchdog", {})
     handoff_grace = float(wcfg.get("fuse_handoff_grace_sec", 300))
-    prompt = wcfg.get("fuse_handoff_prompt") or _DEFAULT_FUSE_PROMPT
+    marker_line = str(cfg["wake"].get("fuse_marker") or "⚙️ [FUSE]").strip()
 
     window.send_esc(cfg)
-    time.sleep(1.0)  # let esc land before typing the prompt
+    time.sleep(1.0)  # let esc land before delivering the marker
     handoff = config.handoff_path(cfg)
     before_mtime = handoff.stat().st_mtime if handoff.exists() else None
-    window.inject_prompt(cfg, prompt)
+    window.deliver_covert_marker(cfg, marker_line)
 
     # Poll for the session to lie down on its own (awake marker cleared) within
     # the grace window. Hard deadline = handoff_grace from now.

@@ -109,6 +109,11 @@ tuck_in_text = "⏳ [NEW ROUND]"
 # Substring match: "[CMD" catches every ⚙️ [CMD ct-*] slash-command body.
 machine_line_markers = ["[TUCK-IN]", "[NEW ROUND]", "[NIGHT]", "[FUSE]", "[CTL]", "[CMD"]
 wait_expiry_note = true      # every free-round tuck-in (silence-gate or wait(N)-expiry) appends a freshly rendered wakeup note (diff mode: only events since the last rendered note this wake)
+# Covert-delivery markers written to wake_signal.log (bell via ear Monitor; typed only if the
+# ear is dead). Only the marker reaches the window; the body is injected invisibly by the marrow
+# hook (fuse -> [cortex].fuse_prompt_text; ctl -> [cortex].ctl_sleep_text from the mins/rotate args).
+fuse_marker = "⚙️ [FUSE]"
+ctl_sleep_marker = "⚙️ [CTL]"
 
 # Per-wake watchdog thresholds (spawned at injection, killed at lie_down).
 [wake.watchdog]
@@ -126,7 +131,9 @@ hard_interrupt_grace_sec = 30
 # lie_down(rotate=True). It gets this many seconds to do so itself before the
 # force path (SIGINT + proxy lie_down) fires. Hard deadline — the fuse never hangs.
 fuse_handoff_grace_sec = 300
-# fuse_handoff_prompt = ""     # override the "write handoff + lie_down" prompt text
+# FUSE prompt body now lives marrow-side ([cortex].fuse_prompt_text) — cortex writes only the
+# ⚙️ [FUSE] marker; the marrow hook injects the body covertly. The old cortex-side
+# fuse_handoff_prompt override is retired.
 
 # Context-window rotation: lie_down (and the tick fallback) flag a rotate when the
 # window grows past this, so the NEXT wake respawns a fresh window (SIGTERM claude

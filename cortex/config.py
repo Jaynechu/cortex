@@ -96,12 +96,14 @@ _DEFAULTS: dict[str, Any] = {
         # When a declared wait(N) expires, append a freshly rendered wakeup note
         # to the free-round marker (note content only, no behavioural nudge).
         "wait_expiry_note": True,
-        # Manual `cortex.ctl sleep` instruction injected into a live window.
-        # {mins} = next_wake_min; {rotate} = "write your handoff then " when
-        # --rotate, else ""; {rotate_arg} = ", rotate=true" when --rotate, else "".
-        "ctl_sleep_prompt":
-            "⚙️ [CTL] Wrap up this turn: "
-            "{rotate}lie_down(next_wake_min={mins}{rotate_arg}).",
+        # Covert-delivery markers written to wake_signal.log (bell via the ear
+        # Monitor; typed only if the ear is dead). Only the marker line reaches
+        # the window; the full instruction body is injected invisibly by the
+        # marrow hook keyed on the marker (fuse -> [cortex].fuse_prompt_text;
+        # ctl -> [cortex].ctl_sleep_text, rendered from the mins/rotate args the
+        # ctl marker line carries).
+        "fuse_marker": "⚙️ [FUSE]",
+        "ctl_sleep_marker": "⚙️ [CTL]",
     },
     # marrow repo invocation for the wake call (separate venv/deps, C3).
     "marrow": {

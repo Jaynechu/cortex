@@ -442,6 +442,35 @@ def type_wake_signal(cfg: dict, now) -> bool:
     return inject_prompt(cfg, wake_signal_line(cfg, now, rearm=True))
 
 
+def deliver_covert_marker(cfg: dict, marker_line: str) -> str:
+    """Deliver a machine-marker line to the resident window the SAME covert way a
+    wake bell reaches it: append it to wake_signal.log so the armed Monitor ear
+    surfaces ONLY the marker (the full instruction body is injected invisibly by
+    the marrow UserPromptSubmit hook keyed on the marker). The visible round is
+    just the short marker line — never the prompt body.
+
+    Reuses the wake ladder rung order: BELL first (log append); typed fallback
+    (inject_prompt) ONLY when the ear did not pick the bell up within
+    ear_timeout_sec — the accepted physical last resort. Returns the rung used:
+    'bell' | 'typed' | 'none' (no resident window to type into)."""
+    from cortex import transcript
+
+    before = transcript.mtime(cfg)
+    _append_signal_line(cfg, marker_line)
+    timeout = float(cfg["wake"].get("ear_timeout_sec", 90))
+    step = 3.0
+    waited = 0.0
+    while waited < timeout:
+        time.sleep(min(step, timeout - waited))
+        waited += step
+        after = transcript.mtime(cfg)
+        if after is not None and (before is None or after > before):
+            return "bell"
+    # Ear missed the bell -> typed fallback (last resort). The typed marker line
+    # still flows through the marrow hook (marker detected -> body injected).
+    return "typed" if inject_prompt(cfg, marker_line) else "none"
+
+
 def send_esc(cfg: dict) -> None:
     """Interrupt the current turn (ESC, char id 27, no trailing newline)."""
     sid = wake_state.get_session_id(cfg)

@@ -79,15 +79,17 @@ def cmd_sleep(cfg: dict, until: str | None, minutes: float | None, rotate: bool)
     # lie_down prompt then hits claim_lie_down's "not awake" no-op and the
     # requested minutes/rotate are silently dropped.
     if wake_state.load(cfg).get("awake"):
-        tmpl = cfg["wake"].get("ctl_sleep_prompt") or (
-            "Wrap up this turn: {rotate}lie_down(next_wake_min={mins}{rotate_arg}).")
-        rot = "write your handoff then " if rotate else ""
-        rotate_arg = ", rotate=true" if rotate else ""
-        prompt = (tmpl.replace("{mins}", str(int(mins)))
-                  .replace("{rotate_arg}", rotate_arg)
-                  .replace("{rotate}", rot))
-        if window.inject_prompt(cfg, prompt):
-            return f"sleep: instruction injected (next_wake_min={int(mins)}, rotate={rotate})"
+        # Covert delivery: only the "⚙️ [CTL] mins=N rotate=B" marker line reaches
+        # the window (bell via the ear Monitor; typed only if the ear is dead).
+        # The full sleep instruction body is injected invisibly by the marrow hook
+        # ([cortex].ctl_sleep_text), rendered from the mins/rotate args this line
+        # carries — she never SEES the instruction, only the short marker.
+        marker = str(cfg["wake"].get("ctl_sleep_marker") or "⚙️ [CTL]").strip()
+        marker_line = f"{marker} mins={int(mins)} rotate={'true' if rotate else 'false'}"
+        rung = window.deliver_covert_marker(cfg, marker_line)
+        if rung != "none":
+            return (f"sleep: instruction delivered ({rung}) "
+                    f"(next_wake_min={int(mins)}, rotate={rotate})")
         return "sleep: no resident window to inject into"
     # Not awake (dead window, or alive-but-dormant): set the ledger directly
     # so the next reconcile/tick fires it.

@@ -417,28 +417,31 @@ def test_ctl_sleep_gates_on_awake_not_liveness(cfg):
     assert wake_state.get_next_wake_at(cfg) is not None
 
 
-def test_ctl_sleep_live_window_rotate_injects_rotate_arg(cfg, monkeypatch):
-    """P2-1: `sleep --rotate` on a live+awake window must generate a
-    lie_down() call with rotate=true, not just add prose the session can
-    miss."""
+def test_ctl_sleep_live_window_rotate_delivers_marker_with_args(cfg, monkeypatch):
+    """P2-1: `sleep --rotate` on a live+awake window delivers the covert CTL
+    marker carrying mins + rotate=true (the body renders marrow-side from these
+    args). Only the marker + args reach the window, never the instruction body."""
     from cortex import ctl, window
     wake_state.set_awake(cfg, 1, None)
     captured = {}
-    monkeypatch.setattr(window, "inject_prompt",
-                        lambda c, text: captured.setdefault("text", text) or True)
+    monkeypatch.setattr(window, "deliver_covert_marker",
+                        lambda c, line: captured.setdefault("line", line) or "bell")
     ctl.cmd_sleep(cfg, until=None, minutes=30, rotate=True)
-    assert "rotate=true" in captured["text"]
-    assert "lie_down(" in captured["text"]
+    assert "[CTL]" in captured["line"]
+    assert "mins=30" in captured["line"]
+    assert "rotate=true" in captured["line"]
+    assert "lie_down(" not in captured["line"]  # body not on screen
 
 
-def test_ctl_sleep_live_window_no_rotate_omits_rotate_arg(cfg, monkeypatch):
+def test_ctl_sleep_live_window_no_rotate_omits_rotate_true(cfg, monkeypatch):
     from cortex import ctl, window
     wake_state.set_awake(cfg, 1, None)
     captured = {}
-    monkeypatch.setattr(window, "inject_prompt",
-                        lambda c, text: captured.setdefault("text", text) or True)
+    monkeypatch.setattr(window, "deliver_covert_marker",
+                        lambda c, line: captured.setdefault("line", line) or "bell")
     ctl.cmd_sleep(cfg, until=None, minutes=30, rotate=False)
-    assert "rotate=true" not in captured["text"]
+    assert "rotate=false" in captured["line"]
+    assert "rotate=true" not in captured["line"]
 
 
 def test_ctl_wake_live_window_renders_fresh_note(cfg, monkeypatch):
