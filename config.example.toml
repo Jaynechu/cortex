@@ -98,10 +98,12 @@ wait_max = 20               # wait(N) clamp upper bound (minutes)
 next_wake_min = 21          # lie_down(next_wake_min=N) clamp lower bound (minutes)
 next_wake_max = 240         # lie_down(next_wake_min=N) clamp upper bound (minutes)
 sentinel = true             # arm cortex.sentinel (one-shot exact-time wake) at every lie_down; false = tick-only fallback
-# Menu injected once when the observe window (auto silence gate or a declared wait)
-# expires — the 3-choice free round (C2). Leading "⏳ [NEW ROUND]" is the machine-
-# line marker; the body is user-final C2. {mins}/{user} optional (no-op in C2).
-tuck_in_text = "⏳ [NEW ROUND] No need to wait in silence — 3 choices: 1) talk to her in session (second person) or msg another session  2) do your own things — see Playbook  3) lie_down..."
+# Marker line written to wake_signal.log when the observe window expires. MARKER
+# ONLY — the C2 menu body is NOT written here (it would show in the ear Monitor
+# event); marrow's UserPromptSubmit hook injects the menu invisibly via
+# additionalContext ([cortex].tuck_in_menu_text on the marrow side). Leading
+# "⏳ [NEW ROUND]" is the machine-line marker. {mins}/{user} optional.
+tuck_in_text = "⏳ [NEW ROUND]"
 # Markers identifying a NON-user turn (so they don't reset the silence timer and
 # downstream memory drops them). wake_signal_marker is added automatically.
 # Substring match: "[CMD" catches every ⚙️ [CMD ct-*] slash-command body.
@@ -191,14 +193,6 @@ tokens = 1000000
 floor_min = 120
 floor_max = 360
 
-# External-wake (cortex.kick) reason lines rendered into the wakeup note (§Copy
-# C5). A bridge/cli poke appends one; note.py renders + clears it. {id} = outbox
-# note id; {minutes} = channel silence minutes.
-[kick]
-reason_reply = "watch: note #{id} got her reply"
-reason_timeout = "watch: note #{id} silent {minutes}min"
-reason_morning = "morning: she's up — flag cleared, day cadence"
-
 [triggers]
 # Wake-window (minutes) from lie-down. lie_down picks the next wake: an explicit
 # minutes choice (clamped to [min, max]) or a uniform "dice" draw when omitted.
@@ -211,7 +205,6 @@ floor_max_min = 55             # wake-window draw upper bound (uniform hi / clam
 # Persona/display strings + behaviour (identity stays in config).
 [note]
 title = ""                   # first line of the wakeup note, e.g. a nickname for the note; empty hides it
-kick_header = "### Woke for"  # header above the external-wake (cortex.kick) reason block
 replay_events = 6            # trailing user/assistant events in the replay section
 replay_event_chars = 300     # per-event truncation in the replay section
 replay_exclude_channels = ["ct"]  # channels excluded from replay (ct = cortex self-talk); [] to include all

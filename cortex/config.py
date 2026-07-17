@@ -79,16 +79,15 @@ _DEFAULTS: dict[str, Any] = {
         # Exact-time wake: arm cortex.sentinel (one-shot detached sleep-then-tick)
         # at every lie_down. false = tick-only (launchd 5-min fallback).
         "sentinel": True,
-        # Menu injected once when the observe window (auto silence gate or a
-        # declared wait) expires — the 3-choice free round (C2). The leading
-        # "⏳ [NEW ROUND]" is the machine-line marker (tuck_in_marker family) the
-        # ear/hook needs so the line never resets the silence timer; the body is
-        # user-final C2 verbatim. {mins}/{user} kept as optional placeholders (no
-        # placeholder in C2 = a harmless no-op substitution).
-        "tuck_in_text":
-            "⏳ [NEW ROUND] No need to wait in silence — 3 choices: "
-            "1) talk to her in session (second person) or msg another session  "
-            "2) do your own things — see Playbook  3) lie_down...",
+        # Marker line written to wake_signal.log when the observe window (auto
+        # silence gate or a declared wait) expires. MARKER ONLY — the 3-choice
+        # menu body (C2) is NOT written here: it would render on screen in the
+        # ear Monitor event. Instead marrow's UserPromptSubmit hook injects the
+        # menu invisibly via additionalContext ([cortex].tuck_in_menu_text on the
+        # marrow side) when it sees this marker turn. "⏳ [NEW ROUND]" is the
+        # machine-line marker (tuck_in_marker family) so the line never resets the
+        # silence timer. {mins}/{user} kept as optional placeholders.
+        "tuck_in_text": "⏳ [NEW ROUND]",
         # Markers that identify a NON-user turn (wake bell / free-round / night /
         # fuse / ctl / slash-command line), so they never reset the silence timer
         # and downstream memory drops them. wake_signal_marker is added
@@ -149,14 +148,6 @@ _DEFAULTS: dict[str, Any] = {
         # reaches this, self-wakes stop; resets at local midnight.
         "daily_budget": {"tokens": 1_000_000},
     },
-    # External-wake (cortex.kick) reason templates rendered into the wakeup note
-    # (§Copy C5). {id} = outbox note id; {minutes} = channel silence minutes.
-    # A bridge/cli poke appends one of these; note.py renders + clears them.
-    "kick": {
-        "reason_reply": "watch: note #{id} got her reply",
-        "reason_timeout": "watch: note #{id} silent {minutes}min",
-        "reason_morning": "morning: she's up — flag cleared, day cadence",
-    },
     "triggers": {
         # Wake-window draw (minutes) from lie-down. lie_down picks the next wake:
         # an explicit choice clamped to [min, max] (max = cache-TTL guard, min =
@@ -172,8 +163,6 @@ _DEFAULTS: dict[str, Any] = {
         # Optional first line of the wakeup note (e.g. a nickname for the
         # note), followed by a blank line then the usual content. "" omits it.
         "title": "",
-        # Header above the external-wake (cortex.kick) reason block.
-        "kick_header": "### Woke for",
         # Trailing conversation events force-appended to the Replay block
         # (cross-session, uniform, no decay). 4 = two round-trips.
         "replay_events": 4,
@@ -212,7 +201,7 @@ _DEFAULTS: dict[str, Any] = {
 _SECTIONS = (
     "core", "paths", "knowledgec", "geofence", "health",
     "tick", "pacemaker", "gates", "triggers", "marrow",
-    "wake", "note", "kick", "night",
+    "wake", "note", "night",
 )
 
 

@@ -93,7 +93,7 @@ def test_chat_tuck_in_then_grace(awake_no_sentinel):
     assert wake_state.is_awake(cfg) is True
     text = "\n".join(_signal_lines(cfg))
     assert "[NEW ROUND]" in text
-    assert "3 choices" in text  # C2 menu body
+    assert "3 choices" not in text  # menu body no longer written to the log (covert)
     writes_after_first = text.count("[NEW ROUND]")
     assert writes_after_first == 1
     # Marker stamped -> not re-appended on the next poll.
@@ -225,13 +225,14 @@ def test_wait_expiry_fires_once_then_falls_through(awake_no_sentinel):
 
 # --- template render ----------------------------------------------------------
 
-def test_free_round_template_is_c2_menu(cfg):
-    """Default menu = C2 (user-final): the 3-choice free round behind the
-    [NEW ROUND] marker. No leftover {mins}/{user}/{n}/{cap} placeholders."""
+def test_free_round_line_is_marker_only(cfg):
+    """Default free-round line = the [NEW ROUND] marker ONLY (menu body moved to
+    marrow's covert additionalContext inject). No 3-choice menu text on screen;
+    no leftover {mins}/{user}/{n}/{cap} placeholders."""
     line, _pending = watchdog._build_tuck_in_line(cfg, mins=17.0)
-    assert "3 choices" in line
-    assert "lie_down" in line and "Playbook" in line
     assert "[NEW ROUND]" in line
+    assert "3 choices" not in line  # menu body no longer written to the log
+    assert "Playbook" not in line
     for stray in ("{mins}", "{user}", "{n}", "{cap}"):
         assert stray not in line
 
