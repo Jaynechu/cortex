@@ -564,13 +564,44 @@ def is_night_mode(cfg: dict) -> bool:
 def clear_night_mode(cfg: dict) -> bool:
     """Drop the night flag (read-and-clear) under the advisory lock. Returns True
     if it was set. The morning kick calls this to return to day cadence; a
-    no-flag call is a harmless no-op."""
+    no-flag call is a harmless no-op. Also clears the night_kick marker so the
+    next night window re-arms its Stage-1 bell."""
     with _flock(cfg):
         d = load(cfg)
-        if d.pop("mode", None) is not None:
+        was_set = d.pop("mode", None) is not None
+        kick_cleared = d.pop("night_kick", None) is not None
+        if was_set or kick_cleared:
+            _save(cfg, d)
+        return was_set
+
+
+def try_mark_night_kick(cfg: dict) -> bool:
+    """Stage-1 dedupe: set the night_kick marker ONCE per night window, checking
+    it is unset AND the session asleep AND the night flag unset inside ONE
+    strict-lock hold (never advisory). Returns True when it marked (the caller
+    then sends the bell), False on no-op (already kicked / awake / flag set) or
+    fail-closed lock/parse failure. Cleared by clear_night_mode + the morning
+    kick, so each night window bells at most once."""
+    try:
+        with _strict_flock(cfg):
+            d = _load_strict(cfg)
+            _ensure_epoch(d)
+            if (d.get("night_kick") or d.get("awake")
+                    or str(d.get("mode") or "") == "night"):
+                return False
+            d["night_kick"] = True
             _save(cfg, d)
             return True
+    except StateValidationError:
         return False
+
+
+def clear_night_kick(cfg: dict) -> None:
+    """Drop the night_kick marker (advisory lock). Best-effort no-op when unset."""
+    with _flock(cfg):
+        d = load(cfg)
+        if d.pop("night_kick", None) is not None:
+            _save(cfg, d)
 
 
 def try_set_night_mode_auto(cfg: dict) -> bool:
@@ -588,6 +619,27 @@ def try_set_night_mode_auto(cfg: dict) -> bool:
             if d.get("awake") or str(d.get("mode") or "") == "night":
                 return False
             d["mode"] = "night"
+            _save(cfg, d)
+            return True
+    except StateValidationError:
+        return False
+
+
+def try_set_night_fallback(cfg: dict) -> bool:
+    """Stage-2 hard fallback: cortex never woke to run its own night package, so
+    pair the night flag WITH the rotate marker in ONE strict-lock hold (checking
+    awake==false + flag unset), so the next wake respawns a fresh light window
+    even without a handoff. Returns True when it set flag+rotate, False on no-op
+    (awake / already set) or fail-closed lock/parse failure. This is the only
+    flag-only path and it always couples flag with rotate."""
+    try:
+        with _strict_flock(cfg):
+            d = _load_strict(cfg)
+            _ensure_epoch(d)
+            if d.get("awake") or str(d.get("mode") or "") == "night":
+                return False
+            d["mode"] = "night"
+            d["rotated"] = True
             _save(cfg, d)
             return True
     except StateValidationError:

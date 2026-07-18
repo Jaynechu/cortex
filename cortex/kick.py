@@ -184,9 +184,12 @@ def kick(cfg: dict, kind: str, **fields) -> dict:
             if not ear_ride:
                 _append_reason(cfg, d, reason)
             # Morning kick clears the night flag under the SAME lock — awake or
-            # asleep. Mid-night kicks (reply/timeout) never touch the flag.
-            if morning and d.pop("mode", None) is not None:
-                flag_cleared = True
+            # asleep. Mid-night kicks (reply/timeout) never touch the flag. Also
+            # clear the night_kick marker so the next night re-arms its bell.
+            if morning:
+                d.pop("night_kick", None)
+                if d.pop("mode", None) is not None:
+                    flag_cleared = True
             if was_awake:
                 # F5: a kick is an external trigger -> restore the round's wait
                 # quota so the carrier/interrupt round may wait again if it ends
@@ -236,7 +239,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Poke cortex awake to peek at a channel (watch / morning).")
     parser.add_argument("--kind", required=True,
-                        choices=("reply", "timeout", "morning", "note"),
+                        choices=("reply", "timeout", "morning", "note",
+                                 "night_due"),
                         help="reason template to render into the wakeup note")
     parser.add_argument("--note-id", default=None,
                         help="outbox note id (reply / timeout)")

@@ -107,38 +107,66 @@ def _in_night_window(now, cfg: dict) -> bool:
     return cur >= start or cur < morning  # wraps midnight
 
 
-def _night_self_check(cfg: dict, now) -> str | None:
-    """Asleep-branch backstop (no model round): inside the night window AND
-    all-channel silence >= [night].silence_hours AND no turn in flight AND the
-    flag is not set -> set the night flag directly, so pacing switches to the
-    night floor band even on a night cortex never wakes to run lie_down(mode=
-    'night'). The formal night package (handoff + rotate) stays cortex's own
-    lie_down; this only backstops the cadence. Returns a log line when it acts /
-    holds for a reportable reason, else None.
+def _night_self_check(cfg: dict, now) -> tuple[str | None, bool]:
+    """Asleep-branch two-stage night bell-ringer (no direct flag-only set on the
+    happy path). Returns (log line or None, short_circuit): short_circuit=True
+    when Stage 1 rang the bell — the bell spawns its OWN wake tick, so the caller
+    must NOT also run its wake path this tick (else two windows open). The formal
+    night package (handoff + rotate + night band + flag) is cortex's OWN
+    lie_down(mode='night'); this only makes cortex wake to run it.
 
-    In-flight guard: user-silence (last_user_message_mtime) does NOT reset during a
-    long assistant turn, so it can fake quiet mid-turn. Raw transcript mtime bumps
-    on every write (assistant / tool / system), so a fresh mtime = a turn in
-    flight -> hold. Atomicity: the awake==false check + flag set happen inside one
-    strict-lock hold in wake_state.try_set_night_mode_auto (never advisory)."""
+    Preconditions (both stages): inside [night.start, morning_start), all-channel
+    silence >= [night].silence_hours, the night flag unset, no turn in flight.
+    In-flight guard: user-silence (last user message) does NOT reset during a long
+    assistant turn, so raw transcript mtime freshness ([night].in_flight_min) is
+    the mid-turn guard.
+
+    Stage 1 (marker unset): mark the once-per-window night_kick flag atomically
+    (asleep + flag-unset + not-yet-kicked, one strict-lock hold), then send ONE
+    wake kick carrying [night].package_due_text so cortex wakes and runs its own
+    four-piece (handoff enforced by the marrow gate). At most one bell per window.
+
+    Stage 2 (marker set, later tick): the bell fired but the flag is still unset
+    and the session is still asleep (cortex never woke) -> HARD fallback: set the
+    night flag + rotate marker in one strict-lock hold, so the next wake is a
+    fresh light window. This is the only flag-only path and always couples both."""
     if wake_state.is_night_mode(cfg):
-        return None  # already set -> no-op
+        return None, False  # already set -> no-op
     if not _in_night_window(now, cfg):
-        return None
+        return None, False
     n = config.night_cfg(cfg)
     silent_min = transcript.user_silent_min(cfg)
     if silent_min is None or silent_min < float(n.get("silence_hours", 1.5)) * 60.0:
-        return None  # not silent long enough (or unknown -> hold)
+        return None, False  # not silent long enough (or unknown -> hold)
     mt = transcript.mtime(cfg)
     if mt is not None:
         idle_min = (time.time() - mt) / 60.0
         if idle_min < float(n.get("in_flight_min", 5)):
-            return "night self-check: turn in flight (mtime fresh) -> hold"
-    if wake_state.try_set_night_mode_auto(cfg):
-        wake_state.wake_audit(cfg, "night_auto", "self-check",
+            return "night self-check: turn in flight (mtime fresh) -> hold", False
+    kicked = bool(wake_state.load(cfg).get("night_kick"))
+    if not kicked:
+        # Stage 1: ring the bell once so cortex runs its own night package.
+        if not wake_state.try_mark_night_kick(cfg):
+            return None, False  # awake / flag / already-kicked landed under lock
+        silent_h = silent_min / 60.0
+        text = str(n.get("package_due_text") or "")
+        if text:
+            try:
+                text = text.format(silent_h=f"{silent_h:.1f}")
+            except (KeyError, IndexError, ValueError):
+                pass
+        from cortex import kick as kick_mod
+        kick_mod.kick(cfg, "night_due", text=text or None)
+        wake_state.wake_audit(cfg, "night_kick", "self-check",
                               f"silent={silent_min:.0f}min")
-        return f"night self-check: flag set (silent {silent_min:.0f}min)"
-    return None  # awake / already set landed under the lock -> no-op
+        return f"night self-check: bell sent (silent {silent_min:.0f}min)", True
+    # Stage 2: bell already fired, flag still unset, still asleep -> hard fallback.
+    if wake_state.try_set_night_fallback(cfg):
+        wake_state.wake_audit(cfg, "night_auto_fallback", "self-check",
+                              f"silent={silent_min:.0f}min no-handoff")
+        return (f"night self-check: auto fallback flag+rotate "
+                f"(silent {silent_min:.0f}min)"), False
+    return None, False  # awake / already set landed under the lock -> no-op
 
 
 def _parse_local(iso: str | None, cfg: dict):
@@ -251,12 +279,15 @@ def main() -> int:
             return 0
 
         now = integration._now(cfg)
-        # Asleep-branch night backstop: set the night flag directly (no model
-        # round) when the night window + all-channel silence + no in-flight turn
-        # hold, so pacing switches even when cortex never woke to run lie_down.
-        nc = _night_self_check(cfg, now)
+        # Asleep-branch night backstop (two-stage): Stage 1 rings a wake bell so
+        # cortex runs its own night package; Stage 2 (bell already fired, still
+        # asleep + flag unset) hard-sets flag+rotate. A Stage-1 bell spawns its
+        # own wake tick, so short-circuit here to avoid opening a second window.
+        nc, nc_short = _night_self_check(cfg, now)
         if nc is not None:
             print(f"{db.utcnow_iso()} {nc}", flush=True)
+        if nc_short:
+            return 0
         t_tick = time.monotonic()
         decision = integration.run_tick(conn, cfg, now=now)
         t_gate = time.monotonic()

@@ -1,9 +1,10 @@
-"""P14 Fix 2 — pacemaker night self-check backstop.
+"""P14 Fix 2 — pacemaker night two-stage bell-ringer.
 
-Covers: in-window + all-channel-silent + asleep + no in-flight turn -> flag set;
-awake -> no set (atomic guard); turn in flight (fresh transcript mtime) -> no set;
-outside the night window -> no set; already-set -> no-op; the wake_state atomic
-primitive holds awake==false + flag mutation in one strict-lock hold.
+Stage 1: in-window + all-channel-silent + asleep + no in-flight turn + not yet
+kicked -> mark night_kick once + send the night_due wake bell (short-circuit).
+Stage 2: bell already fired, flag still unset, still asleep -> hard fallback sets
+night flag + rotate marker atomically. Awake / in-flight / outside window / not
+silent enough / already-set -> no action.
 """
 from __future__ import annotations
 
@@ -44,7 +45,16 @@ def _mtime_idle(monkeypatch, cfg, idle_min):
         monkeypatch.setattr(transcript, "mtime", lambda cfg: None)
     else:
         monkeypatch.setattr(transcript, "mtime",
-                             lambda cfg: time.time() - idle_min * 60.0)
+                            lambda cfg: time.time() - idle_min * 60.0)
+
+
+def _no_bell(monkeypatch):
+    """Record night_due kicks without spawning a real tick."""
+    calls = []
+    from cortex import kick as kick_mod
+    monkeypatch.setattr(kick_mod, "kick",
+                        lambda cfg, kind, **f: calls.append((kind, f)) or {"ok": True})
+    return calls
 
 
 # --- window helper ------------------------------------------------------------
@@ -59,90 +69,151 @@ def test_in_night_window_wraps_midnight(cfg):
     assert pacemaker_tick._in_night_window(_at(cfg, 22), cfg) is True
 
 
-# --- self-check decision matrix ----------------------------------------------
+# --- Stage 1: bell ------------------------------------------------------------
 
-def test_in_window_silent_asleep_sets_flag(cfg, monkeypatch):
+def test_stage1_sends_bell_once(cfg, monkeypatch):
+    calls = _no_bell(monkeypatch)
     _silent(monkeypatch, 120)          # 2h >= 1.5h
     _mtime_idle(monkeypatch, cfg, 30)  # no in-flight turn
-    r = pacemaker_tick._night_self_check(cfg, _at(cfg, 23))
-    assert r is not None and "flag set" in r
-    assert wake_state.is_night_mode(cfg) is True
+    msg, short = pacemaker_tick._night_self_check(cfg, _at(cfg, 23))
+    assert short is True and msg is not None and "bell sent" in msg
+    assert len(calls) == 1
+    kind, fields = calls[0]
+    assert kind == "night_due"
+    assert "2.0h silent" in fields.get("text", "")   # {silent_h} rendered
+    assert wake_state.load(cfg).get("night_kick") is True
+    assert wake_state.is_night_mode(cfg) is False     # flag NOT set by Stage 1
 
 
-def test_awake_no_set(cfg, monkeypatch):
+def test_stage1_no_duplicate_bell(cfg, monkeypatch):
+    calls = _no_bell(monkeypatch)
+    _silent(monkeypatch, 120)
+    _mtime_idle(monkeypatch, cfg, 30)
+    pacemaker_tick._night_self_check(cfg, _at(cfg, 23))   # Stage 1
+    assert len(calls) == 1
+    # second tick: marker set + flag still unset -> Stage 2, no more bell
+    msg, short = pacemaker_tick._night_self_check(cfg, _at(cfg, 23, 30))
+    assert short is False
+    assert len(calls) == 1                                # bell not re-sent
+
+
+# --- Stage 2: hard fallback ---------------------------------------------------
+
+def test_stage2_fallback_sets_flag_and_rotate(cfg, monkeypatch):
+    _no_bell(monkeypatch)
+    _silent(monkeypatch, 120)
+    _mtime_idle(monkeypatch, cfg, 30)
+    pacemaker_tick._night_self_check(cfg, _at(cfg, 23))       # Stage 1 (bell)
+    msg, short = pacemaker_tick._night_self_check(cfg, _at(cfg, 0, 30))  # Stage 2
+    assert short is False and msg is not None and "fallback" in msg
+    d = wake_state.load(cfg)
+    assert d.get("mode") == "night"
+    assert d.get("rotated") is True
+
+
+# --- no-action matrix ---------------------------------------------------------
+
+def test_awake_no_action(cfg, monkeypatch):
+    calls = _no_bell(monkeypatch)
     wake_state.set_awake(cfg, 1, None)  # a wake in progress
     _silent(monkeypatch, 120)
     _mtime_idle(monkeypatch, cfg, 30)
-    r = pacemaker_tick._night_self_check(cfg, _at(cfg, 23))
-    assert r is None
+    msg, short = pacemaker_tick._night_self_check(cfg, _at(cfg, 23))
+    assert short is False and len(calls) == 0
     assert wake_state.is_night_mode(cfg) is False
+    assert wake_state.load(cfg).get("night_kick") is None
 
 
-def test_turn_in_flight_no_set(cfg, monkeypatch):
+def test_turn_in_flight_no_action(cfg, monkeypatch):
+    calls = _no_bell(monkeypatch)
     _silent(monkeypatch, 120)          # user-silence looks quiet...
     _mtime_idle(monkeypatch, cfg, 1)   # ...but transcript just written -> in flight
-    r = pacemaker_tick._night_self_check(cfg, _at(cfg, 23))
-    assert r is not None and "in flight" in r
-    assert wake_state.is_night_mode(cfg) is False
+    msg, short = pacemaker_tick._night_self_check(cfg, _at(cfg, 23))
+    assert short is False and msg is not None and "in flight" in msg
+    assert len(calls) == 0
+    assert wake_state.load(cfg).get("night_kick") is None
 
 
-def test_outside_window_no_set(cfg, monkeypatch):
+def test_outside_window_no_action(cfg, monkeypatch):
+    calls = _no_bell(monkeypatch)
     _silent(monkeypatch, 300)
     _mtime_idle(monkeypatch, cfg, 60)
-    r = pacemaker_tick._night_self_check(cfg, _at(cfg, 12))  # midday
-    assert r is None
-    assert wake_state.is_night_mode(cfg) is False
+    msg, short = pacemaker_tick._night_self_check(cfg, _at(cfg, 12))  # midday
+    assert (msg, short) == (None, False) and len(calls) == 0
 
 
-def test_already_set_no_op(cfg, monkeypatch):
+def test_already_night_flag_no_op(cfg, monkeypatch):
+    calls = _no_bell(monkeypatch)
     wake_state.update(cfg, mode="night")
     _silent(monkeypatch, 120)
     _mtime_idle(monkeypatch, cfg, 30)
-    r = pacemaker_tick._night_self_check(cfg, _at(cfg, 23))
-    assert r is None  # early-out, no audit churn
-    assert wake_state.is_night_mode(cfg) is True
+    msg, short = pacemaker_tick._night_self_check(cfg, _at(cfg, 23))
+    assert (msg, short) == (None, False) and len(calls) == 0
 
 
-def test_not_silent_enough_no_set(cfg, monkeypatch):
+def test_not_silent_enough_no_action(cfg, monkeypatch):
+    calls = _no_bell(monkeypatch)
     _silent(monkeypatch, 30)           # 30min < 1.5h
     _mtime_idle(monkeypatch, cfg, 30)
-    r = pacemaker_tick._night_self_check(cfg, _at(cfg, 23))
-    assert r is None
-    assert wake_state.is_night_mode(cfg) is False
+    msg, short = pacemaker_tick._night_self_check(cfg, _at(cfg, 23))
+    assert (msg, short) == (None, False) and len(calls) == 0
 
 
 def test_unknown_silence_holds(cfg, monkeypatch):
+    calls = _no_bell(monkeypatch)
     _silent(monkeypatch, None)         # transcript unreadable -> hold
     _mtime_idle(monkeypatch, cfg, 30)
-    r = pacemaker_tick._night_self_check(cfg, _at(cfg, 23))
-    assert r is None
-    assert wake_state.is_night_mode(cfg) is False
+    msg, short = pacemaker_tick._night_self_check(cfg, _at(cfg, 23))
+    assert (msg, short) == (None, False) and len(calls) == 0
 
 
-def test_no_transcript_mtime_still_sets(cfg, monkeypatch):
-    """mtime unavailable -> no in-flight evidence, so the flag still sets when
-    user-silence already cleared the bar."""
+def test_no_transcript_mtime_still_bells(cfg, monkeypatch):
+    """mtime unavailable -> no in-flight evidence, so Stage 1 still bells."""
+    calls = _no_bell(monkeypatch)
     _silent(monkeypatch, 120)
     _mtime_idle(monkeypatch, cfg, None)
-    r = pacemaker_tick._night_self_check(cfg, _at(cfg, 23))
-    assert r is not None and "flag set" in r
-    assert wake_state.is_night_mode(cfg) is True
+    msg, short = pacemaker_tick._night_self_check(cfg, _at(cfg, 23))
+    assert short is True and len(calls) == 1
 
 
-# --- atomic primitive ---------------------------------------------------------
+# --- atomic primitives --------------------------------------------------------
 
-def test_try_set_night_mode_auto_sets_when_asleep(cfg):
-    assert wake_state.try_set_night_mode_auto(cfg) is True
-    assert wake_state.is_night_mode(cfg) is True
+def test_try_mark_night_kick_once(cfg):
+    assert wake_state.try_mark_night_kick(cfg) is True
+    assert wake_state.try_mark_night_kick(cfg) is False   # already marked
+    assert wake_state.load(cfg).get("night_kick") is True
 
 
-def test_try_set_night_mode_auto_noop_when_awake(cfg):
+def test_try_mark_night_kick_noop_when_awake(cfg):
     wake_state.set_awake(cfg, 1, None)
-    assert wake_state.try_set_night_mode_auto(cfg) is False
+    assert wake_state.try_mark_night_kick(cfg) is False
+    assert wake_state.load(cfg).get("night_kick") is None
+
+
+def test_try_mark_night_kick_noop_when_flag_set(cfg):
+    wake_state.update(cfg, mode="night")
+    assert wake_state.try_mark_night_kick(cfg) is False
+
+
+def test_try_set_night_fallback_sets_flag_and_rotate(cfg):
+    assert wake_state.try_set_night_fallback(cfg) is True
+    d = wake_state.load(cfg)
+    assert d.get("mode") == "night" and d.get("rotated") is True
+
+
+def test_try_set_night_fallback_noop_when_awake(cfg):
+    wake_state.set_awake(cfg, 1, None)
+    assert wake_state.try_set_night_fallback(cfg) is False
     assert wake_state.is_night_mode(cfg) is False
 
 
-def test_try_set_night_mode_auto_noop_when_already_set(cfg):
+def test_try_set_night_fallback_noop_when_already_set(cfg):
     wake_state.update(cfg, mode="night")
-    assert wake_state.try_set_night_mode_auto(cfg) is False
-    assert wake_state.is_night_mode(cfg) is True
+    assert wake_state.try_set_night_fallback(cfg) is False
+
+
+def test_clear_night_mode_clears_kick_marker(cfg):
+    wake_state.update(cfg, mode="night", night_kick=True)
+    assert wake_state.clear_night_mode(cfg) is True
+    d = wake_state.load(cfg)
+    assert d.get("mode") is None and d.get("night_kick") is None

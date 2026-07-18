@@ -124,7 +124,15 @@ _DEFAULTS: dict[str, Any] = {
               "start": "22:00", "morning_start": "06:00",
               "silence_hours": 1.5, "in_flight_min": 5, "cap": 6,
               "ack_text": "Night shift: handoff ✓ → rotate to free up context "
-                          "→ next wake {next_wake}"},
+                          "→ next wake {next_wake}",
+              # Stage-1 bell: the pacemaker self-check kicks cortex awake with
+              # this reason so it runs its OWN lie_down(mode="night") four-piece
+              # (handoff + rotate + night band + flag). {silent_h} = hours of
+              # all-channel silence at kick time. Rendered via the night_due kick.
+              "package_due_text":
+                  "🌙 Night window reached ({silent_h}h silent). Pack up for "
+                  "the night: write handoff, then lie_down(next_wake_min=N, "
+                  'mode="night").'},
     "knowledgec": {"stream_name": "/app/usage"},
     "knowledgec.categories": {"default": "uncategorized"},
     "geofence": {"enabled": False},
@@ -166,6 +174,10 @@ _DEFAULTS: dict[str, Any] = {
         "reason_timeout": "Msg #{id} no reply in {minutes}min",
         "reason_morning": "She's up — day mode",
         "reason_note": "New note #{id}",
+        # Night self-check bell (Stage 1): passthrough of [night].package_due_text
+        # (already rendered by the tick and passed as {text}). Kept as a template
+        # so the copy stays single-sourced under [night].
+        "reason_night_due": "{text}",
         # Cap the pending-flag list so a stuck bridge can't grow it unbounded.
         "max_reasons": 8,
     },
