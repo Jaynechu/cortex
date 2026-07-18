@@ -573,6 +573,27 @@ def clear_night_mode(cfg: dict) -> bool:
         return False
 
 
+def try_set_night_mode_auto(cfg: dict) -> bool:
+    """Pacemaker backstop: set the night flag ONLY when the session is asleep and
+    the flag is not already set, checking awake==false and mutating the flag inside
+    ONE strict-lock hold (never advisory _flock) so a wake landing mid-check can
+    never race an unlocked write. Returns True when it set the flag, False on
+    no-op (awake / already set) or fail-closed lock/parse failure. The precondition
+    gating (night window + all-channel silence + no in-flight turn) is the tick's;
+    this primitive only guarantees the asleep-and-unset flip is atomic."""
+    try:
+        with _strict_flock(cfg):
+            d = _load_strict(cfg)
+            _ensure_epoch(d)
+            if d.get("awake") or str(d.get("mode") or "") == "night":
+                return False
+            d["mode"] = "night"
+            _save(cfg, d)
+            return True
+    except StateValidationError:
+        return False
+
+
 def set_retired_sid(cfg: dict, transcript_path: str | None) -> None:
     """Durably record the claude session UUID (the transcript jsonl stem, same
     convention as window.claude_session_id) that was just retired by a

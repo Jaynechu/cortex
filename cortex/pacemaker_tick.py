@@ -89,6 +89,58 @@ def _snapshot_awake_current(cfg: dict, snap_gen: int | None) -> bool:
     return gen == snap_gen
 
 
+def _in_night_window(now, cfg: dict) -> bool:
+    """True when `now` (tz-aware, config tz) sits in [night.start, morning_start).
+    Both are HH:MM local; the window wraps midnight (start >= morning_start), so
+    22:00->06:00 spans two dates. Malformed bounds -> False (never auto-flag)."""
+    n = config.night_cfg(cfg)
+    try:
+        sh, sm = (int(x) for x in str(n.get("start", "22:00")).split(":"))
+        mh, mm = (int(x) for x in str(n.get("morning_start", "06:00")).split(":"))
+    except (ValueError, AttributeError):
+        return False
+    cur = now.hour * 60 + now.minute
+    start = sh * 60 + sm
+    morning = mh * 60 + mm
+    if start <= morning:
+        return start <= cur < morning
+    return cur >= start or cur < morning  # wraps midnight
+
+
+def _night_self_check(cfg: dict, now) -> str | None:
+    """Asleep-branch backstop (no model round): inside the night window AND
+    all-channel silence >= [night].silence_hours AND no turn in flight AND the
+    flag is not set -> set the night flag directly, so pacing switches to the
+    night floor band even on a night cortex never wakes to run lie_down(mode=
+    'night'). The formal night package (handoff + rotate) stays cortex's own
+    lie_down; this only backstops the cadence. Returns a log line when it acts /
+    holds for a reportable reason, else None.
+
+    In-flight guard: user-silence (last_user_message_mtime) does NOT reset during a
+    long assistant turn, so it can fake quiet mid-turn. Raw transcript mtime bumps
+    on every write (assistant / tool / system), so a fresh mtime = a turn in
+    flight -> hold. Atomicity: the awake==false check + flag set happen inside one
+    strict-lock hold in wake_state.try_set_night_mode_auto (never advisory)."""
+    if wake_state.is_night_mode(cfg):
+        return None  # already set -> no-op
+    if not _in_night_window(now, cfg):
+        return None
+    n = config.night_cfg(cfg)
+    silent_min = transcript.user_silent_min(cfg)
+    if silent_min is None or silent_min < float(n.get("silence_hours", 1.5)) * 60.0:
+        return None  # not silent long enough (or unknown -> hold)
+    mt = transcript.mtime(cfg)
+    if mt is not None:
+        idle_min = (time.time() - mt) / 60.0
+        if idle_min < float(n.get("in_flight_min", 5)):
+            return "night self-check: turn in flight (mtime fresh) -> hold"
+    if wake_state.try_set_night_mode_auto(cfg):
+        wake_state.wake_audit(cfg, "night_auto", "self-check",
+                              f"silent={silent_min:.0f}min")
+        return f"night self-check: flag set (silent {silent_min:.0f}min)"
+    return None  # awake / already set landed under the lock -> no-op
+
+
 def _parse_local(iso: str | None, cfg: dict):
     from datetime import datetime
     from zoneinfo import ZoneInfo
@@ -199,6 +251,12 @@ def main() -> int:
             return 0
 
         now = integration._now(cfg)
+        # Asleep-branch night backstop: set the night flag directly (no model
+        # round) when the night window + all-channel silence + no in-flight turn
+        # hold, so pacing switches even when cortex never woke to run lie_down.
+        nc = _night_self_check(cfg, now)
+        if nc is not None:
+            print(f"{db.utcnow_iso()} {nc}", flush=True)
         t_tick = time.monotonic()
         decision = integration.run_tick(conn, cfg, now=now)
         t_gate = time.monotonic()

@@ -114,13 +114,15 @@ _DEFAULTS: dict[str, Any] = {
     # lie_down(mode='night') draw + clamp under the flag. start = self-check
     # window opens (insert precondition); morning_start = her first message from
     # here clears the flag; silence_hours = all-channel silence to insert the
-    # flag; cap = max self-wakes counted per flag-set->clear night (safety ceiling,
+    # flag; in_flight_min = raw transcript mtime idle (min) below which a turn is
+    # treated as in flight, so the self-check holds (Stop-only user-silence can
+    # fake quiet mid-turn); cap = max self-wakes counted per flag-set->clear night (safety ceiling,
     # not zero — roaming needs headroom). ack_text (C6) = INVISIBLE audit-log line
     # written when the night package runs ({next_wake} renders at lie_down); it
     # never reaches the window.
     "night": {"floor_min": 120, "floor_max": 360,
               "start": "22:00", "morning_start": "06:00",
-              "silence_hours": 1.5, "cap": 6,
+              "silence_hours": 1.5, "in_flight_min": 5, "cap": 6,
               "ack_text": "Night shift: handoff ✓ → rotate to free up context "
                           "→ next wake {next_wake}"},
     "knowledgec": {"stream_name": "/app/usage"},
