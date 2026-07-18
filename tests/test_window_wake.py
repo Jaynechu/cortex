@@ -4,6 +4,7 @@ window control is verified live. Uses a temp cortex_home + temp DB."""
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -188,9 +189,13 @@ def test_window_wake_respawn_delivers_note_as_prompt(cfg, monkeypatch):
     res = wake._window_wake(conn, cfg, "N", now, respawn=True)
     conn.close()
     assert res["mode"] == "window"
-    assert calls["prompt"] == window.fresh_initial_prompt(cfg, now)
     assert window.wake_prompt(cfg) in calls["prompt"]           # emoji present
     assert cfg["wake"].get("wake_signal_marker", "[CORTEX-WAKE]") in calls["prompt"]  # bell marker present
+    # P14 Fix 3: every spawn bakes a registration-handshake token (gen:state_id)
+    # into the same trailing tag as the cancellation epoch — not a literal
+    # match against a second fresh_initial_prompt call (that would mint its
+    # OWN random token from a fresh handshake, not reproduce this one).
+    assert re.search(r"\{g\d+:[0-9a-fA-F]+\}", calls["prompt"])
     assert "signal" not in calls                # fresh path never appends a signal
     assert calls["watchdog"] is True
     d = wake_state.load(cfg)
@@ -1204,9 +1209,11 @@ def test_window_wake_dead_resumes_when_sid_present(cfg, monkeypatch):
     conn.close()
     assert res["mode"] == "window"
     assert calls["resume_sid"] == "live-uuid"   # same conversation resumed
-    assert calls["prompt"] == window.fresh_initial_prompt(cfg, now)
+    # P14 Fix 3: the resumed relaunch also bakes a fresh registration-handshake
+    # token (not a literal match against a second fresh_initial_prompt call).
     assert window.wake_prompt(cfg) in calls["prompt"]
     assert cfg["wake"].get("wake_signal_marker", "[CORTEX-WAKE]") in calls["prompt"]
+    assert re.search(r"\{g\d+:[0-9a-fA-F]+\}", calls["prompt"])
     note_text = wake_state.wakeup_note_path(cfg).read_text()
     assert "died without a handoff" not in note_text  # resume -> no catchup
 

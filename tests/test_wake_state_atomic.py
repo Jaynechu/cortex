@@ -105,3 +105,40 @@ def test_lie_down_cli_requires_next_wake_min(cfg, monkeypatch):
     with pytest.raises(SystemExit) as exc:
         lie_down.main([])
     assert exc.value.code != 0
+
+
+# --- single-active-window registration handshake (P14 Fix 3) -----------------
+
+def test_start_registration_handshake_marks_pending_and_bumps_gen(cfg):
+    gen_before = wake_state.current_epoch(cfg)[0]
+    gen, state_id = wake_state.start_registration_handshake(cfg)
+    d = wake_state.load(cfg)
+    assert d["cortex_registration_pending"] is True
+    assert gen == gen_before + 1
+    assert d["gen"] == gen and d["state_id"] == state_id
+
+
+def test_start_registration_handshake_token_matches_current_epoch(cfg):
+    token = wake_state.start_registration_handshake(cfg)
+    assert wake_state.token_current(cfg, token) is True
+
+
+def test_registration_pending_survives_until_claimed_elsewhere(cfg):
+    """cortex only STARTS the handshake — the claim itself lives in marrow's
+    cortex_bridge (marrow can't import cortex); this side just leaves the
+    pending flag + token for that claim to consume."""
+    wake_state.start_registration_handshake(cfg)
+    assert wake_state.load(cfg).get("cortex_registration_pending") is True
+    # cortex_claude_sid is untouched by the cortex-side handshake start —
+    # only the marrow-side claim ever writes it.
+    assert "cortex_claude_sid" not in wake_state.load(cfg)
+
+
+def test_rotate_retires_registration_immediately(cfg):
+    """/ct-clear (lie_down rotate=True) drops cortex_claude_sid the instant the
+    rotate claim lands — the old window loses registration before the new one
+    ever spawns/claims (lie_down._mark_rotated)."""
+    wake_state.update(cfg, cortex_claude_sid="old-sid-1234")
+    wake_state.set_awake(cfg, 1, "/x/old-sid-1234.jsonl")
+    lie_down.lie_down(cfg, rotate=True, next_wake_min=30)
+    assert wake_state.load(cfg).get("cortex_claude_sid") is None

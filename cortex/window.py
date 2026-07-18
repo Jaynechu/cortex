@@ -146,13 +146,17 @@ def wake_signal_line(cfg: dict, now, rearm: bool = False, token=None) -> str:
     return line
 
 
-def fresh_initial_prompt(cfg: dict, now) -> str:
+def fresh_initial_prompt(cfg: dict, now, token=None) -> str:
     """The baked first prompt for a brand-new/resumed cortex window: the
     configured emoji + the bell marker line, e.g. '☀️ [CORTEX-WAKE] 00:55'.
     Same marker as the ear bell, so the marrow UserPromptSubmit hook detects it
     and injects the full wakeup note — the window gets its wake identity + note
-    in one stroke instead of the emoji alone being read as a bare chat message."""
-    return f"{wake_prompt(cfg)} {wake_signal_line(cfg, now)}"
+    in one stroke instead of the emoji alone being read as a bare chat message.
+    `token` (gen, state_id), when given, doubles as the registration handshake
+    token (wake_state.start_registration_handshake): the marrow hook claims
+    single-active-window registration off this SAME trailing tag, no second
+    wire format needed."""
+    return f"{wake_prompt(cfg)} {wake_signal_line(cfg, now, token=token)}"
 
 
 def launch_command(cfg: dict, initial_prompt: str | None = None,

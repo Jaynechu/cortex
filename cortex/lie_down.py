@@ -192,12 +192,17 @@ def _token_ok(cfg: dict, token) -> bool:
 
 def _mark_rotated(transcript_path):
     """Mutator (used under conditional_mutate): set the one-shot rotate flag +
-    the durable retired-sid, both children of the claim gen (no bump)."""
+    the durable retired-sid, both children of the claim gen (no bump). Also
+    retires single-active-window registration immediately (P14 Fix 3): the
+    rotating window's cortex_claude_sid registration is dropped here so a
+    zombie turn on the old window fails the gate the instant it resumes,
+    without waiting for the next spawn's handshake."""
     from pathlib import Path
 
     def _m(d: dict):
         d["rotated"] = True
         d["retired_sid"] = Path(str(transcript_path)).stem if transcript_path else None
+        d.pop("cortex_claude_sid", None)
         return True
     return _m
 

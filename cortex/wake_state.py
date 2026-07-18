@@ -610,6 +610,40 @@ def get_retired_sid(cfg: dict) -> str | None:
     return load(cfg).get("retired_sid")
 
 
+# ── single-active-window registration (P14 Fix 3) ─────────────────────────────
+# `cortex_claude_sid` is a SEPARATE registration key from `session_id`/
+# `transcript` (iTerm liveness/respawn) — strict one-way responsibility: this
+# side (cortex) only ever STARTS the handshake (marks it pending, bumps the
+# epoch); the CLAIM + gate-check + read live in marrow's cortex_bridge.py
+# (marrow's venv cannot import cortex, so it re-implements the same
+# strict-flock+CAS protocol on the SAME sibling .lock file — byte-compatible,
+# same trap as the COUPLED note on lock_path above: override the wake-state
+# path on one side without the other and the two lock files split). Every
+# write here goes through _strict_flock (fail-closed) — the advisory _flock
+# is not acceptable for a registration that gates tool access.
+
+
+def start_registration_handshake(cfg: dict) -> tuple[int, str]:
+    """Called at every spawn (fresh window, resume-of-dead): mark the
+    registration PENDING under a fresh epoch. The spawned/resumed window's
+    first marker prompt must carry this exact (gen, state_id) token to claim
+    registration in the marrow hook (cortex_bridge.claim_registration_if_pending).
+    Bumps gen — any older pending/claimed token is invalidated. Returns the new
+    (gen, state_id); falls back to the current (unbumped) epoch on a lock
+    failure (fail-closed — the handshake simply cannot start, caught by the
+    gate default-deny)."""
+    try:
+        with _strict_flock(cfg):
+            d = _load_strict(cfg)
+            _ensure_epoch(d)
+            d["gen"] = int(d["gen"]) + 1
+            d["cortex_registration_pending"] = True
+            _save(cfg, d)
+            return int(d["gen"]), str(d["state_id"])
+    except StateValidationError:
+        return current_epoch(cfg)
+
+
 def get_sentinel_pid(cfg: dict) -> int | None:
     """Recorded pid of the one-shot exact-time wake sentinel (cortex.sentinel),
     or None. Every new lie_down kills this predecessor before arming a fresh one."""

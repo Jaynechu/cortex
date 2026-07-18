@@ -451,7 +451,13 @@ def _spawn_wake(conn, cfg, now, resume: bool = False,
 
     The recorded transcript hint must be the NEW session's jsonl — captured only
     after it actually appears (bounded poll) — never the pre-spawn newest, which
-    is the OLD session and would drive an endless respawn loop next tick."""
+    is the OLD session and would drive an endless respawn loop next tick.
+
+    Single-active-window registration (P14 Fix 3): every spawn/resume/rebirth
+    starts a registration handshake (wake_state.start_registration_handshake)
+    and bakes its token into the same trailing wake-line tag as the
+    cancellation epoch — the new window's first marker prompt claims
+    registration in the marrow hook off this token, no separate wire format."""
     from cortex import transcript, wake_state, watchdog, window
     from cortex.pacemaker import integration
 
@@ -459,8 +465,9 @@ def _spawn_wake(conn, cfg, now, resume: bool = False,
     prev_path = transcript.newest(cfg)
     prev_path = str(prev_path) if prev_path else None
     spawn_ts = time.time()
+    reg_token = wake_state.start_registration_handshake(cfg)
     try:
-        window.respawn(cfg, initial_prompt=window.fresh_initial_prompt(cfg, now),
+        window.respawn(cfg, initial_prompt=window.fresh_initial_prompt(cfg, now, token=reg_token),
                        resume_sid=resume_sid)
     except window.WindowError as e:
         _alert_respawn_failed(conn, wake_id_of(now), str(e)[:180])
