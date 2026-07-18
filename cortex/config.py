@@ -196,7 +196,9 @@ _DEFAULTS: dict[str, Any] = {
         # Night-mode (C4) last-activity line: rendered only while the night flag
         # is set. {channel}/{hm}/{silent_h} render from the newest all-channel
         # ct_activity row at note time. "" omits it.
-        "night_activity_text": "Last activity: {channel} {hm} ({silent_h}h silent)",
+        "night_activity_text":
+            "Last activity: {channel} {hm} ({silent_h}h silent); Turn on "
+            "night mode if you think user is asleep.",
         # Reply-receipt line (C11): one per sent note she has replied to since the
         # last note. {id}/{channel}/{sent_hm}/{replied_hm}/{text} render from the
         # marrow outbox row at note time. "" omits receipts entirely.
