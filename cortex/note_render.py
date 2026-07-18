@@ -22,6 +22,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Print a fresh wakeup note.")
     parser.add_argument("--transcript", default=None,
                         help="caller transcript path; stem[:8] -> Window SID")
+    parser.add_argument("--no-ct", action="store_true",
+                        help="skip ct-note peek — the marrow hook delivers ct "
+                             "notes via outbox.deliver, so rendering them here "
+                             "would double them in the same payload")
     args = parser.parse_args()
 
     cfg = config.load()
@@ -35,6 +39,8 @@ def main() -> None:
     conn = db.connect(cfg)
     try:
         data = note.gather(conn, cfg, now, window_sid=window_sid)
+        if args.no_ct:
+            data["ct_notes"] = []
         print(note.render(cfg, now, data))
     finally:
         conn.close()

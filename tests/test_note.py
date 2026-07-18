@@ -154,7 +154,7 @@ def _home_cfg(cfg, tmp_path):
     return cfg
 
 
-def test_gather_consumes_kick_reasons_on_delivery(cfg, tmp_path):
+def test_gather_kick_reasons_settle_on_injection(cfg, tmp_path):
     import sqlite3
 
     from cortex import wake_state
@@ -163,16 +163,32 @@ def test_gather_consumes_kick_reasons_on_delivery(cfg, tmp_path):
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     make_events_table(conn)
-    # consume_kick=True (delivered-note path) renders + clears the flags.
-    data = note.gather(conn, cfg, NOW, consume_kick=True)
+    # consume_kick=True + settle=True (real injection) renders + clears the flags.
+    data = note.gather(conn, cfg, NOW, consume_kick=True, settle=True)
     assert data["kick_reasons"] == ['Msg #1 replied: "hi"']
     assert wake_state.load(cfg).get("kick_reasons") in (None, [])
-    # A second delivered note sees nothing (already consumed).
-    data2 = note.gather(conn, cfg, NOW, consume_kick=True)
+    # A second settled note sees nothing (already consumed).
+    data2 = note.gather(conn, cfg, NOW, consume_kick=True, settle=True)
     assert data2["kick_reasons"] == []
 
 
-def test_gather_passive_render_keeps_kick_reasons(cfg, tmp_path):
+def test_gather_kick_reasons_peek_without_settle_keeps_pending(cfg, tmp_path):
+    import sqlite3
+
+    from cortex import wake_state
+    cfg = _home_cfg(cfg, tmp_path)
+    wake_state.update(cfg, kick_reasons=['Msg #1 replied: "hi"'])
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    make_events_table(conn)
+    # consume_kick=True, settle=False (frozen note that may be discarded):
+    # renders the reason but does NOT clear it — pending-visible.
+    data = note.gather(conn, cfg, NOW, consume_kick=True)
+    assert data["kick_reasons"] == ['Msg #1 replied: "hi"']
+    assert wake_state.load(cfg).get("kick_reasons") == ['Msg #1 replied: "hi"']
+
+
+def test_gather_passive_render_peeks_kick_reasons(cfg, tmp_path):
     import sqlite3
 
     from cortex import wake_state
@@ -181,9 +197,10 @@ def test_gather_passive_render_keeps_kick_reasons(cfg, tmp_path):
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     make_events_table(conn)
-    # consume_kick=False (render-only path) must NOT drop the unseen reason.
+    # consume_kick=False (render-only path) PEEKS the reason so an un-injected
+    # kick surfaces in the fresh render — must NOT clear it.
     data = note.gather(conn, cfg, NOW)
-    assert data["kick_reasons"] == []
+    assert data["kick_reasons"] == ['Msg #2 no reply in 30min']
     assert wake_state.load(cfg).get("kick_reasons") == ['Msg #2 no reply in 30min']
 
 
@@ -206,27 +223,42 @@ def test_render_receipts_plain_lines(cfg):
     assert 'Note #3 (tg 14:00): she replied 14:05 "hi"' in text
 
 
-def test_gather_receipt_render_and_consume_once(cfg, tmp_path):
+def test_gather_receipt_render_and_settle_once(cfg, tmp_path):
     cfg = _home_cfg(cfg, tmp_path)
     conn = _receipt_conn()
     _add_receipt(conn, id=3, reply_text="miss you too")
-    data = note.gather(conn, cfg, NOW, consume_kick=True)
+    # consume_kick=True + settle=True (real injection) stamps receipt_seen.
+    data = note.gather(conn, cfg, NOW, consume_kick=True, settle=True)
     assert data["receipts"] == [
         'Note #3 (tg 14:00): she replied 14:05 "miss you too"']
     assert conn.execute(
         "SELECT receipt_seen FROM outbox WHERE id=3").fetchone()[0] == 1
-    # A second delivered note sees nothing (already stamped).
-    data2 = note.gather(conn, cfg, NOW, consume_kick=True)
+    # A second settled note sees nothing (already stamped).
+    data2 = note.gather(conn, cfg, NOW, consume_kick=True, settle=True)
     assert data2["receipts"] == []
 
 
-def test_gather_receipt_passive_render_keeps_seen_zero(cfg, tmp_path):
+def test_gather_receipt_peek_without_settle_keeps_seen_zero(cfg, tmp_path):
+    cfg = _home_cfg(cfg, tmp_path)
+    conn = _receipt_conn()
+    _add_receipt(conn, id=3, reply_text="miss you too")
+    # consume_kick=True, settle=False (frozen note): renders but does NOT stamp.
+    data = note.gather(conn, cfg, NOW, consume_kick=True)
+    assert data["receipts"] == [
+        'Note #3 (tg 14:00): she replied 14:05 "miss you too"']
+    assert conn.execute(
+        "SELECT receipt_seen FROM outbox WHERE id=3").fetchone()[0] == 0
+
+
+def test_gather_receipt_passive_render_peeks_seen_zero(cfg, tmp_path):
     cfg = _home_cfg(cfg, tmp_path)
     conn = _receipt_conn()
     _add_receipt(conn, id=5)
-    # consume_kick=False (render-only path) must NOT stamp receipt_seen.
+    # consume_kick=False (render-only path) PEEKS the receipt (renders it) but
+    # must NOT stamp receipt_seen.
     data = note.gather(conn, cfg, NOW)
-    assert data["receipts"] == []
+    assert data["receipts"] == [
+        'Note #5 (tg 14:00): she replied 14:05 "miss you"']
     assert conn.execute(
         "SELECT receipt_seen FROM outbox WHERE id=5").fetchone()[0] == 0
 
@@ -244,29 +276,40 @@ def test_gather_receipt_ignores_unreplied_and_other_sender(cfg, tmp_path):
 # ct-targeted outbox note delivery via note render (P12 add-on)
 # --------------------------------------------------------------------------- #
 
-def test_gather_ct_note_delivered_and_marked_sent(cfg, tmp_path):
+def test_gather_ct_note_claimed_pending_visible_then_settle(cfg, tmp_path):
     cfg = _home_cfg(cfg, tmp_path)
     conn = _receipt_conn()
     _add_ct_note(conn, id=9, from_sid="cafe1234", from_channel="tg", body="睡了吗")
+    # consume_kick=True, settle=False (frozen note): claims pending -> claimed
+    # (pending-visible), renders, but does NOT mark sent.
     data = note.gather(conn, cfg, NOW, consume_kick=True)
     assert len(data["ct_notes"]) == 1
     note_txt = data["ct_notes"][0]
     assert "📮 Message from tg·cafe" in note_txt   # C1 header, channel + sid4
     assert "睡了吗" in note_txt                      # body verbatim
-    # row consumed: pending -> sent
+    assert conn.execute(
+        "SELECT status FROM outbox WHERE id=9").fetchone()[0] == "claimed"
+    assert "睡了吗" in note.render(cfg, NOW, data)
+    # An un-settled claimed note re-renders on the next claim (at-least-once).
+    data2 = note.gather(conn, cfg, NOW, consume_kick=True)
+    assert len(data2["ct_notes"]) == 1
+    # A real injection (settle=True) marks it sent — then it is gone.
+    data3 = note.gather(conn, cfg, NOW, consume_kick=True, settle=True)
+    assert len(data3["ct_notes"]) == 1
     assert conn.execute(
         "SELECT status FROM outbox WHERE id=9").fetchone()[0] == "sent"
-    # rendered into the note text
-    assert "睡了吗" in note.render(cfg, NOW, data)
+    assert note.gather(conn, cfg, NOW, consume_kick=True, settle=True)[
+        "ct_notes"] == []
 
 
-def test_gather_ct_note_consume_once(cfg, tmp_path):
+def test_gather_ct_note_settle_consume_once(cfg, tmp_path):
     cfg = _home_cfg(cfg, tmp_path)
     conn = _receipt_conn()
     _add_ct_note(conn, id=9)
-    assert note.gather(conn, cfg, NOW, consume_kick=True)["ct_notes"]
-    # second delivered note sees nothing (already sent)
-    assert note.gather(conn, cfg, NOW, consume_kick=True)["ct_notes"] == []
+    # settle=True on the first call -> marked sent -> gone on the second.
+    assert note.gather(conn, cfg, NOW, consume_kick=True, settle=True)["ct_notes"]
+    assert note.gather(conn, cfg, NOW, consume_kick=True, settle=True)[
+        "ct_notes"] == []
 
 
 def test_gather_ct_note_passive_render_does_not_claim(cfg, tmp_path):
@@ -280,10 +323,43 @@ def test_gather_ct_note_passive_render_does_not_claim(cfg, tmp_path):
         "SELECT status FROM outbox WHERE id=9").fetchone()[0] == "pending"
 
 
-def test_ct_note_claimed_by_hook_not_redelivered_by_note(cfg, tmp_path):
-    # Cross-path consume-once: a row the hook already claimed (status='claimed'
-    # or 'sent') is never re-delivered by the note path (claim is guarded on
-    # status='pending').
+def test_gather_passive_render_peeks_claimed_ct_note_read_only(cfg, tmp_path):
+    # A pending-visible (claimed, un-settled) ct note surfaces read-only in a
+    # passive render (consume_kick=False) — never claims, never settles.
+    cfg = _home_cfg(cfg, tmp_path)
+    conn = _receipt_conn()
+    _add_ct_note(conn, id=9, body="睡了吗", status="claimed")
+    data = note.gather(conn, cfg, NOW)
+    assert len(data["ct_notes"]) == 1
+    assert "睡了吗" in data["ct_notes"][0]
+    # untouched: still claimed, never marked sent
+    assert conn.execute(
+        "SELECT status FROM outbox WHERE id=9").fetchone()[0] == "claimed"
+
+
+def test_ct_note_claim_exactly_one_owner(cfg, tmp_path):
+    # Exactly-one-owner: a pending row claimed once cannot be claimed a second
+    # time (guard on status='pending'). The first claimer owns it; a racing
+    # claim finds nothing pending. Re-render of the claimed row is idempotent.
+    cfg = _home_cfg(cfg, tmp_path)
+    conn = _receipt_conn()
+    _add_ct_note(conn, id=9, body="睡了吗")
+    first = note._consume_ct_notes(cfg, conn, claimed_by="cortex.note")
+    assert len(first) == 1
+    assert conn.execute(
+        "SELECT claimed_by FROM outbox WHERE id=9").fetchone()[0] == "cortex.note"
+    # A different path re-rendering the already-claimed row does not re-claim
+    # (claimed_by stays the first owner) — idempotent re-render, no double claim.
+    second = note._consume_ct_notes(cfg, conn, claimed_by="cortex.free_round")
+    assert len(second) == 1  # re-rendered (at-least-once), not re-claimed
+    assert conn.execute(
+        "SELECT claimed_by FROM outbox WHERE id=9").fetchone()[0] == "cortex.note"
+
+
+def test_ct_note_claimed_by_hook_not_reclaimed_by_note(cfg, tmp_path):
+    # Cross-path exactly-one-owner: a row the hook already SENT is never
+    # re-delivered by the note path (both pending-claim and claimed-re-render
+    # skip a 'sent' row).
     cfg = _home_cfg(cfg, tmp_path)
     conn = _receipt_conn()
     _add_ct_note(conn, id=9, status="sent")       # hook already delivered it

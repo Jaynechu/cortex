@@ -256,9 +256,14 @@ def _free_round_note(cfg: dict) -> tuple[str, str | None]:
             # time — the render can run on a tick whose ear write is later dropped
             # (stale epoch) and would silently swallow the note. The caller claims
             # ct notes separately AFTER the ear write commits.
+            # settle=True: this free-round render clears kick reasons / stamps
+            # receipts (restoring the prior clear-at-render behavior — the line is
+            # about to be written to the ear). ct notes stay deferred
+            # (claim_ct_notes=False) and settle in _deliver_ct_notes_to_ear AFTER
+            # the ear write commits, so a dropped write never swallows a ct note.
             data = note.gather(conn, cfg, now, window_sid=sid,
                                advance_baseline=False, consume_kick=True,
-                               claim_ct_notes=False)
+                               claim_ct_notes=False, settle=True)
             text = note.render(cfg, now, data).strip()
             # FIX 6 + P2-B: the deferred advance must use the SAME cutoff this
             # note was built on, captured inside gather() — not a second query
