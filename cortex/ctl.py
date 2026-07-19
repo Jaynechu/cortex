@@ -29,8 +29,18 @@ def _now(cfg: dict) -> datetime:
 def cmd_wake(cfg: dict) -> str:
     """In-window take-office (P17): /ct-wake runs INSIDE the target window (a
     manually opened cortex window). It never spawns/resumes/hunts — the pacemaker
-    owns spawning. Registration is CAS-claimed by marrow's caller-side hook before
-    this runs; here we drive the wake_state take-office.
+    owns spawning.
+
+    Registration (stage-then-promote, P17 gap fix): marrow's caller-side
+    PreToolUse hook has already STAGED the calling window's own claude sid as
+    wake_state's pending_claim before this runs (marrow, not cortex, has
+    reliable access to the caller's sid). This function is the sole
+    promoter/discarder — a refused wake discards the staged claim WITHOUT ever
+    touching cortex_claude_sid, so the true resident's registration and
+    is_cortex_session identity stay fully intact. No pending_claim staged
+    (e.g. ctl wake invoked outside a claude window, or the hook missed) ->
+    promote is a no-op either way; take-office still proceeds on the existing
+    liveness semantics below, registration simply stays whatever it already was.
 
     Resident-first (codex P0 fix): `rotated`/`retired_sid` are NOT the grant
     gate — `rotated` is one-shot (consumed by the next pacemaker wake) and
@@ -40,11 +50,12 @@ def cmd_wake(cfg: dict) -> str:
     claude process is actually alive this instant (window.find_claude_pid):
 
       live resident, THIS ctl process is NOT its own descendant (a foreign
-          window woke while another is on duty) -> refuse, zero side effects.
+          window woke while another is on duty) -> refuse, zero side effects
+          (registration untouched, staged claim discarded).
       live resident, THIS ctl process runs INSIDE it (self re-wake of a
-          dormant resident) -> take office.
-      no live resident (dead or none) -> take office. died_no_handoff fires
-          only when the dead resident did NOT cleanly retire: neither the
+          dormant resident) -> take office, promote (idempotent — same sid).
+      no live resident (dead or none) -> take office, promote. died_no_handoff
+          fires only when the dead resident did NOT cleanly retire: neither the
           one-shot `rotated` flag is still pending (not yet consumed by a
           pacemaker wake) NOR does its own transcript sid match the durable
           `retired_sid` (that exact session was the one properly rotated).
@@ -54,6 +65,7 @@ def cmd_wake(cfg: dict) -> str:
 
     resident_pid = window.find_claude_pid(cfg)
     if resident_pid is not None and not _chains_to_ancestor(os.getpid(), resident_pid):
+        wake_state.discard_pending_claim(cfg)
         return str(cfg["wake"].get("ctl_wake_resident_text") or "").strip()
 
     died_no_handoff = resident_pid is None and not _cleanly_retired(cfg)
@@ -69,6 +81,7 @@ def cmd_wake(cfg: dict) -> str:
         wid = _record_wake_row(conn, now)
         wake_state.take_rotated(cfg)  # consume the one-shot flag if set
         wake_state.set_awake(cfg, wid, str(tpath) if tpath else None)
+        wake_state.promote_pending_claim(cfg)
         _kill_sentinel(cfg)
         # A human explicitly waking wants activity back — leave DND (ct-pause
         # documents /ct-wake as its exit).

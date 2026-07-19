@@ -675,6 +675,59 @@ def get_retired_sid(cfg: dict) -> str | None:
 # is not acceptable for a registration that gates tool access.
 
 
+# `pending_claim` (P17 /ct-wake stage-then-promote) is the ONE registration key
+# where responsibility runs the OPPOSITE direction from the handshake above:
+# marrow's PreToolUse hook (the only side with reliable access to the calling
+# window's own claude sid) STAGES {"sid", "ts"} here before `cortex.ctl wake`
+# runs; cmd_wake (this repo) is the sole promoter/discarder, because only it
+# knows the grant-vs-refuse outcome (the live-resident check). A refused wake
+# must discard pending_claim untouched — never promote a foreign window's
+# staged sid over a live resident's registration.
+
+
+def promote_pending_claim(cfg: dict, sid: str | None = None) -> bool:
+    """Grant path: promote wake_state's staged pending_claim to the official
+    cortex_claude_sid registration, clearing pending_claim. `sid` (when given)
+    must match the staged sid or the promotion is skipped (stale staging from
+    an unrelated window) — pending_claim is still cleared either way, since a
+    stale/mismatched claim has no further use. No staged claim -> no-op, False
+    (caller falls back to leaving cortex_claude_sid as-is). Fail-closed on a
+    lock timeout (nothing promoted/cleared)."""
+    try:
+        with _strict_flock(cfg):
+            d = _load_strict(cfg)
+            _ensure_epoch(d)
+            claim = d.pop("pending_claim", None)
+            if not isinstance(claim, dict) or not claim.get("sid"):
+                _save(cfg, d)
+                return False
+            claimed_sid = str(claim["sid"])
+            if sid is not None and claimed_sid != str(sid):
+                _save(cfg, d)  # stale claim discarded, nothing promoted
+                return False
+            d["cortex_claude_sid"] = claimed_sid
+            d["cortex_registered_at"] = datetime.now(timezone.utc).isoformat()
+            _save(cfg, d)
+            return True
+    except StateValidationError:
+        return False
+
+
+def discard_pending_claim(cfg: dict) -> None:
+    """Refuse path: drop any staged pending_claim WITHOUT touching
+    cortex_claude_sid — a refused /ct-wake must leave the true resident's
+    registration fully intact. Best-effort (fail-closed silently on a lock
+    timeout — an unconsumed stale claim is harmless, the next promote/discard
+    call resolves it)."""
+    try:
+        with _strict_flock(cfg):
+            d = _load_strict(cfg)
+            if d.pop("pending_claim", None) is not None:
+                _save(cfg, d)
+    except StateValidationError:
+        pass
+
+
 def start_registration_handshake(cfg: dict) -> tuple[int, str]:
     """Called at every spawn (fresh window, resume-of-dead): mark the
     registration PENDING under a fresh epoch. The spawned/resumed window's

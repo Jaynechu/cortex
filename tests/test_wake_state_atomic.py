@@ -142,3 +142,52 @@ def test_rotate_retires_registration_immediately(cfg):
     wake_state.set_awake(cfg, 1, "/x/old-sid-1234.jsonl")
     lie_down.lie_down(cfg, rotate=True, next_wake_min=30)
     assert wake_state.load(cfg).get("cortex_claude_sid") is None
+
+
+# --- P17 stage-then-promote: pending_claim (/ct-wake) --------------------------
+# Opposite direction from start_registration_handshake above: marrow STAGES the
+# claim (only it knows the caller's own sid); cmd_wake here is the sole
+# promoter/discarder (only it knows the grant-vs-refuse outcome).
+
+def test_promote_pending_claim_writes_registration_and_clears_staging(cfg):
+    wake_state.update(cfg, pending_claim={"sid": "newsid", "ts": "2026-01-01T00:00:00+00:00"})
+    ok = wake_state.promote_pending_claim(cfg)
+    assert ok is True
+    d = wake_state.load(cfg)
+    assert d["cortex_claude_sid"] == "newsid"
+    assert "pending_claim" not in d
+    assert "cortex_registered_at" in d
+
+
+def test_promote_pending_claim_no_staged_claim_is_noop(cfg):
+    wake_state.update(cfg, cortex_claude_sid="already-here")
+    ok = wake_state.promote_pending_claim(cfg)
+    assert ok is False
+    assert wake_state.load(cfg)["cortex_claude_sid"] == "already-here"
+
+
+def test_promote_pending_claim_sid_mismatch_discards_without_promoting(cfg):
+    """A staged claim for a DIFFERENT sid than the one the caller expects is
+    discarded, not promoted — stale staging from an unrelated window."""
+    wake_state.update(cfg, cortex_claude_sid="untouched",
+                      pending_claim={"sid": "staged-sid", "ts": "2026-01-01T00:00:00+00:00"})
+    ok = wake_state.promote_pending_claim(cfg, sid="different-sid")
+    assert ok is False
+    d = wake_state.load(cfg)
+    assert d["cortex_claude_sid"] == "untouched"
+    assert "pending_claim" not in d  # still cleared — no further use
+
+
+def test_discard_pending_claim_drops_staging_leaves_registration(cfg):
+    wake_state.update(cfg, cortex_claude_sid="true-resident",
+                      pending_claim={"sid": "foreign", "ts": "2026-01-01T00:00:00+00:00"})
+    wake_state.discard_pending_claim(cfg)
+    d = wake_state.load(cfg)
+    assert d["cortex_claude_sid"] == "true-resident"
+    assert "pending_claim" not in d
+
+
+def test_discard_pending_claim_no_staged_claim_is_harmless_noop(cfg):
+    wake_state.update(cfg, cortex_claude_sid="whatever")
+    wake_state.discard_pending_claim(cfg)  # must not raise
+    assert wake_state.load(cfg)["cortex_claude_sid"] == "whatever"

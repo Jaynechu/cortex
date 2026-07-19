@@ -192,6 +192,67 @@ def test_ctl_wake_live_dormant_self_window_grants(cfg, monkeypatch):
     assert wake_state.is_awake(cfg) is True
 
 
+# --- P17 gap fix: stage-then-promote registration (refused wake leaves the ----
+# --- true resident's cortex_claude_sid + identity fully untouched) -----------
+
+def test_ctl_wake_refused_foreign_wake_leaves_registration_untouched(cfg, monkeypatch):
+    """A foreign window's staged pending_claim must be DISCARDED on refusal,
+    never promoted — the true resident's cortex_claude_sid (and therefore
+    marrow's is_cortex_session identity for that resident) stays exactly as it
+    was before the foreign /ct-wake ran."""
+    from cortex import ctl, window
+    monkeypatch.setattr(window, "find_claude_pid", lambda c: 4321)
+    monkeypatch.setattr("cortex.lie_down._chains_to_ancestor",
+                        lambda pid, ancestor: False)  # foreign
+    wake_state.update(cfg, cortex_claude_sid="true-resident",
+                      pending_claim={"sid": "foreign-window", "ts": "2026-01-01T00:00:00+00:00"})
+    msg = ctl.cmd_wake(cfg)
+    assert msg == cfg["wake"]["ctl_wake_resident_text"]
+    st = wake_state.load(cfg)
+    assert st["cortex_claude_sid"] == "true-resident"  # untouched
+    assert "pending_claim" not in st  # discarded, not left dangling
+
+
+def test_ctl_wake_granted_promotes_staged_claim_to_registration(cfg, monkeypatch):
+    """No live resident (dead/none) -> take office AND promote the staged
+    pending_claim to cortex_claude_sid."""
+    from cortex import ctl, window
+    monkeypatch.setattr(window, "find_claude_pid", lambda c: None)  # no resident
+    wake_state.update(cfg, pending_claim={"sid": "new-window", "ts": "2026-01-01T00:00:00+00:00"})
+    ctl.cmd_wake(cfg)
+    st = wake_state.load(cfg)
+    assert st["cortex_claude_sid"] == "new-window"
+    assert "pending_claim" not in st
+
+
+def test_ctl_wake_self_rewake_promotes_idempotently(cfg, monkeypatch):
+    """Self re-wake of a dormant resident: promote is idempotent — same sid
+    staged as already registered still lands cleanly."""
+    from cortex import ctl, window
+    monkeypatch.setattr(window, "find_claude_pid", lambda c: 4321)
+    monkeypatch.setattr("cortex.lie_down._chains_to_ancestor",
+                        lambda pid, ancestor: ancestor == 4321)  # self
+    wake_state.update(cfg, cortex_claude_sid="dormant-self",
+                      pending_claim={"sid": "dormant-self", "ts": "2026-01-01T00:00:00+00:00"})
+    ctl.cmd_wake(cfg)
+    st = wake_state.load(cfg)
+    assert st["cortex_claude_sid"] == "dormant-self"
+    assert "pending_claim" not in st
+
+
+def test_ctl_wake_no_pending_claim_never_crashes_registration_unchanged(cfg, monkeypatch):
+    """Item 3 fallback: ctl wake with NO staged claim (hook missed, or invoked
+    outside a claude window) -> take-office still proceeds, registration is
+    simply left as-is (no crash, no spurious registration write)."""
+    from cortex import ctl, window
+    monkeypatch.setattr(window, "find_claude_pid", lambda c: None)  # no resident
+    wake_state.update(cfg, cortex_claude_sid="whatever-was-there")
+    ctl.cmd_wake(cfg)
+    st = wake_state.load(cfg)
+    assert st["cortex_claude_sid"] == "whatever-was-there"  # unchanged
+    assert "pending_claim" not in st
+
+
 # --- awake-gate watchdog-liveness heal (watchdog death during a wait) ---------
 
 def _awake_window(cfg, conn):
