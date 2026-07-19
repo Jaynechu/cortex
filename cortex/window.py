@@ -499,8 +499,13 @@ def _ps_tty_claude_pids(ttyname: str) -> list[int]:
 
 
 def _pgrep_claude_pids() -> list[int]:
+    """`-a` is REQUIRED: BSD/macOS pgrep excludes the calling process's own
+    ANCESTORS by default (see pgrep(1) `-a`) — since this is called from a
+    subprocess of the very cortex claude window we need to find, plain
+    `pgrep -x claude` silently drops that exact pid every time (verified
+    07-20 live-incident root cause: resident_pid always recorded None)."""
     try:
-        p = subprocess.run(["pgrep", "-x", "claude"], capture_output=True, text=True)
+        p = subprocess.run(["pgrep", "-a", "-x", "claude"], capture_output=True, text=True)
     except OSError:
         return []
     if p.returncode not in (0, 1):  # 1 = no matches, still a clean run

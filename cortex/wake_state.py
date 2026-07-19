@@ -736,12 +736,25 @@ def claim_office(cfg: dict, sid: str | None, via: str, resident_pid: int | None,
     refuse (no write, audit refuse, return False). Otherwise grant: record
     cortex_claude_sid=sid + cortex_resident_pid=resident_pid, clear the staging
     fields, stamp, audit grant, return True. `force` skips the refuse verdict but
-    still routes here + audits via=force. No sid -> no-op False. Fail-closed on a
-    lock/parse failure (nothing written, audit refuse, return False)."""
+    still routes here + audits via=force. No sid -> no-op False.
+
+    `resident_pid=None` (07-20 live incident, root cause: pgrep excluding its
+    own ancestors -> the caller could never resolve its own pid) is a HARD
+    refuse, never a silent grant-without-a-pid — a registration with no
+    recorded pid can never be judged alive later, which is exactly the
+    fail-open hole that let the accidental-close respawn clobber a live
+    resident. Audited as refuse/no_pid, distinct from a live-resident refuse.
+
+    Fail-closed on a lock/parse failure (nothing written, audit refuse, return
+    False)."""
     if not sid:
         return False
     if caller_pid is None:
         caller_pid = os.getpid()
+    if resident_pid is None:
+        wake_audit(cfg, "claim", "refuse",
+                   f"via={via} sid={sid} caller_pid={caller_pid} no_pid")
+        return False
     try:
         with _strict_flock(cfg):
             d = _load_strict(cfg)
@@ -751,8 +764,7 @@ def claim_office(cfg: dict, sid: str | None, via: str, resident_pid: int | None,
                            f"via={via} sid={sid} caller_pid={caller_pid}")
                 return False
             d["cortex_claude_sid"] = str(sid)
-            if resident_pid is not None:
-                d["cortex_resident_pid"] = int(resident_pid)
+            d["cortex_resident_pid"] = int(resident_pid)
             d.pop("pending_claim", None)
             d.pop("cortex_registration_pending", None)
             d["cortex_registered_at"] = datetime.now(timezone.utc).isoformat()

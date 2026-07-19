@@ -348,6 +348,30 @@ def test_claim_office_grant_no_resident_records_pid(cfg):
     assert "claim\tgrant" in log and "via=test" in log
 
 
+def test_claim_office_refuses_when_resident_pid_unresolved(cfg):
+    """07-20 live incident, root cause: pgrep excludes its own ancestors, so a
+    caller could never resolve its own claude pid -> resident_pid=None reached
+    claim_office and used to silently GRANT with no pid recorded (fail-open
+    inversion). Fixed: resident_pid=None is now a HARD refuse, audited
+    distinctly (no_pid) — never a silent grant-without-a-pid."""
+    ok = wake_state.claim_office(cfg, "ghost-sid", "test", resident_pid=None)
+    assert ok is False
+    d = wake_state.load(cfg)
+    assert "cortex_claude_sid" not in d  # nothing written
+    log = wake_state.config.wake_audit_log_path(cfg).read_text()
+    assert "claim\trefuse" in log and "no_pid" in log
+
+
+# NOTE: real-process-tree proof for claude_ancestor_pid (the `pgrep -a -x
+# claude` fix) is NOT a pytest case — tests/conftest.py's _guarded() hard-blocks
+# any real pgrep/ps/claude subprocess call in this suite (test isolation, by
+# design: "no test may reach these"). Verified instead by direct manual
+# invocation outside pytest (see P18 incident-fix report): resolved the live
+# harness claude pid via the real pgrep/ps walk, confirmed comm=claude, and
+# confirmed cmd_wake -> claim_office end-to-end against a scratch state dir
+# records that real pid + writes the matching audit line.
+
+
 def test_claim_office_refuse_live_foreign_resident_zero_write(cfg, monkeypatch):
     """Recorded resident pid alive + NOT in caller chain -> refuse, zero write,
     audit refuse line present."""
@@ -429,6 +453,29 @@ def test_manual_take_office_then_two_ticks_no_respawn(cfg, monkeypatch):
     d2 = wake_state.load(cfg)
     assert d2["cortex_claude_sid"] == "manual-win"  # registration untouched
     assert d2["cortex_resident_pid"] == 4321
+
+
+def test_fresh_grant_missing_pid_refused_reconcile_still_fires(cfg, monkeypatch):
+    """07-20 live-incident regression: if resident-pid resolution fails
+    (claude_ancestor_pid -> None, the exact real-world pgrep bug), the claim
+    must be REFUSED, not silently granted with no pid. Consequence checked
+    here: since no cortex_resident_pid is ever recorded, resident_alive stays
+    False and reconcile is free to fire normally (no ghost "alive-but-unproven"
+    registration blocking the ledger) — the old bug was a SILENT grant with a
+    permanently-unprovable pid; the fix removes that state from ever existing."""
+    from cortex import ctl, window
+    monkeypatch.setattr(window, "claude_ancestor_pid", lambda p=None: None)  # pid unresolved
+    wake_state.update(cfg, pending_claim={"sid": "unresolved-win",
+                                          "ts": "2026-01-01T00:00:00+00:00"})
+    ctl.cmd_wake(cfg)
+    d = wake_state.load(cfg)
+    assert "cortex_claude_sid" not in d or d.get("cortex_claude_sid") != "unresolved-win"
+    assert "cortex_resident_pid" not in d  # never recorded without a real pid
+    log = wake_state.config.wake_audit_log_path(cfg).read_text()
+    assert "claim\trefuse" in log and "no_pid" in log
+    # reconcile must not be stuck holding on an unproven/ghost registration:
+    # no resident recorded -> resident_alive False -> normal ledger flow applies.
+    assert wake_state.resident_alive(cfg) is False
 
 
 def test_ctl_wake_force_overrides_live_resident_takes_office(cfg, monkeypatch):
