@@ -160,14 +160,19 @@ _MARKER_LEAD_RE = re.compile(
 
 
 def _line_starts_with_marker(text: str, markers: list[str]) -> bool:
-    """True iff ANY line of *text* begins with a machine marker after a tolerated
-    leading decoration run. Machine writes (wake bell '☀️ HH:MM',
-    tuck-in block whose final line is '⏳ [NEW ROUND] …') always line-start their
-    marker; a real user message merely quoting one mid-sentence never matches, so
-    it still resets the silence timer (zero false positives on real speech)."""
+    """True iff ANY line of *text* begins with a machine marker, tried RAW first
+    (so an emoji-leading marker — e.g. the bell prefix '☀️' or a multi-codepoint
+    ZWJ template like '🧚‍♀️' — matches itself directly) and only if that
+    misses, after a tolerated leading decoration run is stripped (so a TEXT
+    marker like '[NEW ROUND]' still matches past a machine-written emoji lead,
+    e.g. '⏳ [NEW ROUND] …'). A real user message merely quoting a marker
+    mid-sentence never matches either path, so it still resets the silence
+    timer (zero false positives on real speech)."""
     if not markers:
         return False
     for line in text.splitlines() or [text]:
+        if any(line.startswith(mk) for mk in markers):
+            return True
         head = _MARKER_LEAD_RE.sub("", line, count=1)
         if any(head.startswith(mk) for mk in markers):
             return True

@@ -56,7 +56,7 @@ def test_every_injected_prompt_carries_a_machine_marker(tmp_path):
     from cortex import transcript
 
     cfg = config.load(tmp_path / "none.toml")
-    markers = transcript._line_markers(cfg)  # [CORTEX-WAKE] + machine_line_markers
+    markers = transcript._line_markers(cfg)  # bell prefix + machine_line_markers
 
     def marked(text: str) -> bool:
         return any(m in text for m in markers)
