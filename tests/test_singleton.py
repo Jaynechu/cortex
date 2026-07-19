@@ -145,28 +145,51 @@ def test_spawn_launches_when_recorded_pid_dead(cfg, monkeypatch):
 
 
 # --- ctl.cmd_wake already-on-duty guard (double-wake prevention) --------------
+#
+# codex P0 (live-confirmed): rotated/retired_sid are NOT liveness signals —
+# retired_sid is sticky forever once any rotate has ever happened, so a bare
+# presence check made the refuse branch permanently dead code and let a
+# SECOND window take office next to a genuinely live resident (three active
+# cortex windows resulted). The only valid liveness signal is
+# window.find_claude_pid + process-ancestry self-vs-foreign detection.
 
-def test_ctl_wake_alive_unrotated_refuses(cfg, monkeypatch):
-    """P17: /ct-wake is in-window take-office only, never a spawn/resume/hunt.
-    A resident window that is alive and NOT rotated is still on duty (awake or
-    dormant makes no difference) -> refuse, zero side effects, one resident."""
-    from cortex import ctl, wake
-    monkeypatch.setattr(wake, "_window_alive", lambda c: True)
+def test_ctl_wake_live_foreign_window_refuses_even_with_sticky_retired_sid(cfg, monkeypatch):
+    """A live resident + a wake invoked from a FOREIGN window -> refuse, zero
+    side effects, one resident — regardless of how sticky/stale retired_sid is."""
+    from cortex import ctl, window
+    monkeypatch.setattr(window, "find_claude_pid", lambda c: 4321)
+    monkeypatch.setattr("cortex.lie_down._chains_to_ancestor",
+                        lambda pid, ancestor: False)  # foreign: no ancestry match
+    wake_state.set_retired_sid(cfg, "sticky-from-a-past-rotate")  # must not grant
     wake_state.set_awake(cfg, 1, None)
     msg = ctl.cmd_wake(cfg)
     assert msg == cfg["wake"]["ctl_wake_resident_text"]
     assert wake_state.is_awake(cfg) is True  # untouched -> still exactly one resident
 
 
-def test_ctl_wake_alive_dormant_unrotated_also_refuses(cfg, monkeypatch):
-    """Alive-but-dormant (not awake) un-rotated resident also refuses — P17
-    dropped the old ear-wake-a-dormant-resident path entirely."""
-    from cortex import ctl, wake
-    monkeypatch.setattr(wake, "_window_alive", lambda c: True)
+def test_ctl_wake_live_dormant_foreign_window_also_refuses(cfg, monkeypatch):
+    """Alive-but-dormant (not awake) resident, woken from a FOREIGN window,
+    still refuses — dormant-ness never overrides the foreign-window check."""
+    from cortex import ctl, window
+    monkeypatch.setattr(window, "find_claude_pid", lambda c: 4321)
+    monkeypatch.setattr("cortex.lie_down._chains_to_ancestor",
+                        lambda pid, ancestor: False)  # foreign
     assert wake_state.is_awake(cfg) is False
     msg = ctl.cmd_wake(cfg)
     assert msg == cfg["wake"]["ctl_wake_resident_text"]
     assert wake_state.is_awake(cfg) is False  # zero side effects
+
+
+def test_ctl_wake_live_dormant_self_window_grants(cfg, monkeypatch):
+    """Alive-but-dormant resident, woken from INSIDE that same window (self
+    re-wake) -> granted, exactly one resident afterward."""
+    from cortex import ctl, window
+    monkeypatch.setattr(window, "find_claude_pid", lambda c: 4321)
+    monkeypatch.setattr("cortex.lie_down._chains_to_ancestor",
+                        lambda pid, ancestor: ancestor == 4321)  # self
+    assert wake_state.is_awake(cfg) is False
+    ctl.cmd_wake(cfg)
+    assert wake_state.is_awake(cfg) is True
 
 
 # --- awake-gate watchdog-liveness heal (watchdog death during a wait) ---------

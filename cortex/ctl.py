@@ -32,22 +32,31 @@ def cmd_wake(cfg: dict) -> str:
     owns spawning. Registration is CAS-claimed by marrow's caller-side hook before
     this runs; here we drive the wake_state take-office.
 
-      prev rotated (retired_sid / rotate flag) -> take office.
-      prev dead (recorded resident's claude pid gone) -> take office, and the
-          fresh note carries the died_no_handoff catchup so this window
-          ghost-writes the handoff.
-      prev alive and un-rotated -> refuse (one line, zero side effects).
-    """
-    from cortex.wake import _window_alive
-    from cortex.lie_down import _kill_sentinel
+    Resident-first (codex P0 fix): `rotated`/`retired_sid` are NOT the grant
+    gate — `rotated` is one-shot (consumed by the next pacemaker wake) and
+    `retired_sid` is a PERSISTENT belt-and-braces marker (never cleared, records
+    only the last-ever retired sid) — neither tells you whether a resident is
+    on duty RIGHT NOW. The only live signal is whether the recorded resident's
+    claude process is actually alive this instant (window.find_claude_pid):
 
-    st = wake_state.load(cfg)
-    rotated = bool(st.get("rotated")) or bool(st.get("retired_sid"))
-    prev_alive = _window_alive(cfg)
-    if not rotated and prev_alive:
+      live resident, THIS ctl process is NOT its own descendant (a foreign
+          window woke while another is on duty) -> refuse, zero side effects.
+      live resident, THIS ctl process runs INSIDE it (self re-wake of a
+          dormant resident) -> take office.
+      no live resident (dead or none) -> take office. died_no_handoff fires
+          only when the dead resident did NOT cleanly retire: neither the
+          one-shot `rotated` flag is still pending (not yet consumed by a
+          pacemaker wake) NOR does its own transcript sid match the durable
+          `retired_sid` (that exact session was the one properly rotated).
+    """
+    import os
+    from cortex.lie_down import _chains_to_ancestor, _kill_sentinel
+
+    resident_pid = window.find_claude_pid(cfg)
+    if resident_pid is not None and not _chains_to_ancestor(os.getpid(), resident_pid):
         return str(cfg["wake"].get("ctl_wake_resident_text") or "").strip()
 
-    died_no_handoff = (not rotated) and (not prev_alive)
+    died_no_handoff = resident_pid is None and not _cleanly_retired(cfg)
 
     # Take office. set_awake BUMPS gen and clears next_wake_at atomically, so any
     # sentinel/tick armed for the old due finds its token stale and no-ops
@@ -69,6 +78,25 @@ def cmd_wake(cfg: dict) -> str:
         return _arm_line(cfg)
     finally:
         conn.close()
+
+
+def _cleanly_retired(cfg: dict) -> bool:
+    """True iff the dead resident properly rotated before it died — either the
+    one-shot `rotated` flag is still pending (set at rotate time, not yet
+    consumed by a pacemaker wake), or the dead resident's OWN transcript sid
+    matches the durable `retired_sid` marker (that exact session was the one a
+    prior lie_down(rotate=True) retired). `retired_sid` alone (without the sid
+    match) is NEVER sufficient — it is sticky forever once any rotate has ever
+    happened on this machine, so a bare presence check would treat every crash
+    after the first-ever rotate as a clean retirement (the P0 bug)."""
+    st = wake_state.load(cfg)
+    if bool(st.get("rotated")):
+        return True
+    from pathlib import Path
+    transcript_path = st.get("transcript")
+    sid = Path(str(transcript_path)).stem if transcript_path else None
+    retired_sid = wake_state.get_retired_sid(cfg)
+    return bool(sid) and sid == retired_sid
 
 
 def _record_wake_row(conn, now: datetime) -> int | None:
