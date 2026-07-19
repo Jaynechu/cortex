@@ -151,17 +151,18 @@ def test_rotate_retires_registration_immediately(cfg):
 
 def test_promote_pending_claim_writes_registration_and_clears_staging(cfg):
     wake_state.update(cfg, pending_claim={"sid": "newsid", "ts": "2026-01-01T00:00:00+00:00"})
-    ok = wake_state.promote_pending_claim(cfg)
+    ok = wake_state.promote_pending_claim(cfg, resident_pid=7777)
     assert ok is True
     d = wake_state.load(cfg)
     assert d["cortex_claude_sid"] == "newsid"
+    assert d["cortex_resident_pid"] == 7777  # own claude pid recorded
     assert "pending_claim" not in d
     assert "cortex_registered_at" in d
 
 
 def test_promote_pending_claim_no_staged_claim_is_noop(cfg):
     wake_state.update(cfg, cortex_claude_sid="already-here")
-    ok = wake_state.promote_pending_claim(cfg)
+    ok = wake_state.promote_pending_claim(cfg, resident_pid=7777)
     assert ok is False
     assert wake_state.load(cfg)["cortex_claude_sid"] == "already-here"
 
@@ -171,7 +172,7 @@ def test_promote_pending_claim_sid_mismatch_discards_without_promoting(cfg):
     discarded, not promoted — stale staging from an unrelated window."""
     wake_state.update(cfg, cortex_claude_sid="untouched",
                       pending_claim={"sid": "staged-sid", "ts": "2026-01-01T00:00:00+00:00"})
-    ok = wake_state.promote_pending_claim(cfg, sid="different-sid")
+    ok = wake_state.promote_pending_claim(cfg, resident_pid=7777, sid="different-sid")
     assert ok is False
     d = wake_state.load(cfg)
     assert d["cortex_claude_sid"] == "untouched"

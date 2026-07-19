@@ -366,9 +366,11 @@ def test_ctl_pause_resume(cfg, monkeypatch, capsys):
 
 def test_ctl_wake_clears_paused(cfg, monkeypatch):
     """P17: cmd_wake take-office (no live resident) unpauses (ct-pause documents
-    /ct-wake as its exit)."""
+    /ct-wake as its exit). P18: decision input = recorded resident pid liveness,
+    not a live-scan."""
     from cortex import ctl, window
-    monkeypatch.setattr(window, "find_claude_pid", lambda c: None)
+    monkeypatch.setattr(window, "claude_ancestor_pid", lambda p=None: None)
+    # no cortex_resident_pid recorded -> resident_alive False -> grant
     wake_state.set_paused(cfg, True)
     assert wake_state.is_paused(cfg) is True
     ctl.cmd_wake(cfg)
@@ -379,9 +381,10 @@ def test_ctl_wake_no_resident_takes_office(cfg, monkeypatch):
     """codex P0 fix: no live resident at all (dead or none) -> in-window
     take-office: sets awake, clears the ledger, cancels the pending sentinel,
     unpauses. No spawn/resume — this window IS the new resident. The
-    permanently-sticky `retired_sid` marker plays no role in this grant."""
+    permanently-sticky `retired_sid` marker plays no role in this grant.
+    P18: no recorded resident pid = no resident."""
     from cortex import ctl, window
-    monkeypatch.setattr(window, "find_claude_pid", lambda c: None)
+    monkeypatch.setattr(window, "claude_ancestor_pid", lambda p=None: None)
     wake_state.set_retired_sid(cfg, "some-other-session-from-ages-ago")
     wake_state.set_next_wake_at(cfg, "2099-01-01T00:00:00+10:00")
     wake_state.set_sentinel_pid(cfg, 99_999_999)  # dead pid, cleared not signalled
@@ -400,7 +403,9 @@ def test_ctl_wake_live_foreign_resident_refuses_zero_side_effects(cfg, monkeypat
     wake_state untouched. This is the exact bug: a stale/sticky retired_sid must
     never grant take-office over a genuinely live, foreign resident."""
     from cortex import ctl, window
-    monkeypatch.setattr(window, "find_claude_pid", lambda c: 4321)
+    wake_state.update(cfg, cortex_resident_pid=4321)  # recorded live resident
+    monkeypatch.setattr(window, "claude_ancestor_pid", lambda p=None: None)
+    monkeypatch.setattr(wake_state, "_pid_alive", lambda pid: True)
     monkeypatch.setattr("cortex.lie_down._chains_to_ancestor",
                         lambda pid, ancestor: False)  # foreign: no ancestry match
     wake_state.set_retired_sid(cfg, "stale-sid-from-a-past-rotate")  # sticky, irrelevant
@@ -414,10 +419,12 @@ def test_ctl_wake_live_foreign_resident_refuses_zero_side_effects(cfg, monkeypat
 
 def test_ctl_wake_live_dormant_resident_self_wake_grants(cfg, monkeypatch):
     """codex P0 fix (b): a live but DORMANT resident, woken from INSIDE that
-    same window (this ctl process IS the resident's own descendant) -> take
-    office is granted (self re-wake)."""
+    same window (this ctl process IS the resident's own chain) -> take
+    office is granted (self re-wake). P18: recorded pid alive + in caller chain."""
     from cortex import ctl, window
-    monkeypatch.setattr(window, "find_claude_pid", lambda c: 4321)
+    wake_state.update(cfg, cortex_resident_pid=4321)
+    monkeypatch.setattr(window, "claude_ancestor_pid", lambda p=None: 4321)
+    monkeypatch.setattr(wake_state, "_pid_alive", lambda pid: True)
     monkeypatch.setattr("cortex.lie_down._chains_to_ancestor",
                         lambda pid, ancestor: ancestor == 4321)  # self: chain matches
     assert wake_state.is_awake(cfg) is False
@@ -430,7 +437,7 @@ def test_ctl_wake_dead_unrotated_takes_office_with_ghost_handoff(cfg, monkeypatc
     `rotated` flag, dead sid does not match `retired_sid`) -> take office AND
     write a fresh note carrying the died_no_handoff catchup line."""
     from cortex import ctl, wake, window
-    monkeypatch.setattr(window, "find_claude_pid", lambda c: None)
+    monkeypatch.setattr(window, "claude_ancestor_pid", lambda p=None: None)
     wake_state.update(cfg, transcript="/t/crashed-session.jsonl")  # this dead sid...
     wake_state.set_retired_sid(cfg, "some-unrelated-old-sid")       # ...doesn't match
     calls = {}
@@ -452,7 +459,7 @@ def test_ctl_wake_dead_after_clean_rotate_no_ghost_handoff(cfg, monkeypatch):
     OWN transcript sid matches the durable retired_sid -> take office granted,
     but NO ghost handoff (the retiring window already wrote its own handoff)."""
     from cortex import ctl, wake, window
-    monkeypatch.setattr(window, "find_claude_pid", lambda c: None)
+    monkeypatch.setattr(window, "claude_ancestor_pid", lambda p=None: None)
     wake_state.update(cfg, transcript="/t/cleanly-retired-sid.jsonl")
     wake_state.set_retired_sid(cfg, "/t/cleanly-retired-sid.jsonl")  # exact sid match
     calls = {"assemble_called": False}
@@ -468,7 +475,7 @@ def test_ctl_wake_dead_pending_rotate_flag_no_ghost_handoff(cfg, monkeypatch):
     (the dead resident retired but no pacemaker wake has consumed the flag yet)
     -> also counts as cleanly retired, no ghost handoff."""
     from cortex import ctl, wake, window
-    monkeypatch.setattr(window, "find_claude_pid", lambda c: None)
+    monkeypatch.setattr(window, "claude_ancestor_pid", lambda p=None: None)
     wake_state.set_rotated(cfg)
     calls = {"assemble_called": False}
     monkeypatch.setattr(wake, "assemble_note",

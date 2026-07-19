@@ -275,6 +275,54 @@ def update(cfg: dict, **kv) -> dict:
         return d
 
 
+def get_resident_pid(cfg: dict) -> int | None:
+    """Recorded claude pid of the registered resident (written by claim_office),
+    or None. This is the ONE liveness signal — no tty/cwd scanning."""
+    try:
+        v = load(cfg).get("cortex_resident_pid")
+        return int(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def resident_alive(cfg: dict, caller_pid: int | None = None) -> bool:
+    """THE ONE liveness signal for "office is held right now". True iff the
+    RECORDED resident claude pid is alive (kill -0) AND is NOT in `caller_pid`'s
+    process chain (ancestor/descendant) — a live resident that IS the caller's
+    own chain is a self re-wake, not a foreign holder. No recorded pid = no
+    resident (False, claimable). Any read failure = fail-closed True (refuse to
+    grant). caller_pid defaults to os.getpid()."""
+    from cortex.lie_down import _chains_to_ancestor
+    if caller_pid is None:
+        caller_pid = os.getpid()
+    try:
+        pid = get_resident_pid(cfg)
+    except Exception:
+        return True
+    if pid is None:
+        return False
+    if not _pid_alive(pid):
+        return False
+    # Alive resident that runs INSIDE the caller's chain = self re-wake -> not a
+    # foreign holder. Chain in both directions (caller under resident, or
+    # resident under caller).
+    if _chains_to_ancestor(caller_pid, pid) or _chains_to_ancestor(pid, caller_pid):
+        return False
+    return True
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
 def get_session_id(cfg: dict) -> str | None:
     return load(cfg).get("session_id")
 
@@ -664,32 +712,80 @@ def get_retired_sid(cfg: dict) -> str | None:
 # staged sid over a live resident's registration.
 
 
-def promote_pending_claim(cfg: dict, sid: str | None = None) -> bool:
-    """Grant path: promote wake_state's staged pending_claim to the official
-    cortex_claude_sid registration, clearing pending_claim. `sid` (when given)
-    must match the staged sid or the promotion is skipped (stale staging from
-    an unrelated window) — pending_claim is still cleared either way, since a
-    stale/mismatched claim has no further use. No staged claim -> no-op, False
-    (caller falls back to leaving cortex_claude_sid as-is). Fail-closed on a
-    lock timeout (nothing promoted/cleared)."""
+def _resident_alive_under_lock(d: dict, caller_pid: int) -> bool:
+    """THE ONE RULE evaluated against an already-loaded state dict (caller holds
+    the strict lock). True iff recorded resident pid alive AND not in the
+    caller's process chain. No recorded pid = no resident (False)."""
+    from cortex.lie_down import _chains_to_ancestor
+    pid = d.get("cortex_resident_pid")
+    try:
+        pid = int(pid) if pid is not None else None
+    except (TypeError, ValueError):
+        pid = None
+    if pid is None or not _pid_alive(pid):
+        return False
+    if _chains_to_ancestor(caller_pid, pid) or _chains_to_ancestor(pid, caller_pid):
+        return False
+    return True
+
+
+def claim_office(cfg: dict, sid: str | None, via: str, resident_pid: int | None,
+                 caller_pid: int | None = None, force: bool = False) -> bool:
+    """THE ONE write path for cortex_claude_sid. Under the strict lock, apply THE
+    ONE RULE: a live resident whose claude pid is NOT in the caller's chain ->
+    refuse (no write, audit refuse, return False). Otherwise grant: record
+    cortex_claude_sid=sid + cortex_resident_pid=resident_pid, clear the staging
+    fields, stamp, audit grant, return True. `force` skips the refuse verdict but
+    still routes here + audits via=force. No sid -> no-op False. Fail-closed on a
+    lock/parse failure (nothing written, audit refuse, return False)."""
+    if not sid:
+        return False
+    if caller_pid is None:
+        caller_pid = os.getpid()
     try:
         with _strict_flock(cfg):
             d = _load_strict(cfg)
             _ensure_epoch(d)
-            claim = d.pop("pending_claim", None)
-            if not isinstance(claim, dict) or not claim.get("sid"):
-                _save(cfg, d)
+            if not force and _resident_alive_under_lock(d, caller_pid):
+                wake_audit(cfg, "claim", "refuse",
+                           f"via={via} sid={sid} caller_pid={caller_pid}")
                 return False
-            claimed_sid = str(claim["sid"])
-            if sid is not None and claimed_sid != str(sid):
-                _save(cfg, d)  # stale claim discarded, nothing promoted
-                return False
-            d["cortex_claude_sid"] = claimed_sid
+            d["cortex_claude_sid"] = str(sid)
+            if resident_pid is not None:
+                d["cortex_resident_pid"] = int(resident_pid)
+            d.pop("pending_claim", None)
+            d.pop("cortex_registration_pending", None)
             d["cortex_registered_at"] = datetime.now(timezone.utc).isoformat()
             _save(cfg, d)
+            wake_audit(cfg, "claim", "grant",
+                       f"via={via} sid={sid} resident_pid={resident_pid}")
             return True
     except StateValidationError:
+        wake_audit(cfg, "claim", "refuse", f"via={via} sid={sid} lock_fail")
         return False
+
+
+def promote_pending_claim(cfg: dict, resident_pid: int | None,
+                          sid: str | None = None, via: str = "ctl-wake",
+                          force: bool = False) -> bool:
+    """Grant path from cmd_wake: promote the staged pending_claim through
+    claim_office (the ONE write path, refuse rule enforced). `sid` (when given)
+    must match the staged sid or the promotion is skipped. No staged claim ->
+    no-op False. Fail-closed on a lock timeout."""
+    try:
+        with _strict_flock(cfg):
+            d = _load_strict(cfg)
+            _ensure_epoch(d)
+            claim = d.get("pending_claim")
+            claimed_sid = str(claim["sid"]) if isinstance(claim, dict) and claim.get("sid") else None
+    except StateValidationError:
+        return False
+    if not claimed_sid:
+        return False
+    if sid is not None and claimed_sid != str(sid):
+        discard_pending_claim(cfg)  # stale claim discarded, nothing promoted
+        return False
+    return claim_office(cfg, claimed_sid, via, resident_pid, force=force)
 
 
 def discard_pending_claim(cfg: dict) -> None:
@@ -722,6 +818,11 @@ def start_registration_handshake(cfg: dict) -> tuple[int, str]:
             _ensure_epoch(d)
             d["gen"] = int(d["gen"]) + 1
             d["cortex_registration_pending"] = True
+            # A fresh handshake = office is being handed over: drop the retiring
+            # resident's recorded pid so the fresh claim is not refused by THE ONE
+            # RULE against a resident that is on its way out (the fresh window
+            # records its OWN pid on claim).
+            d.pop("cortex_resident_pid", None)
             _save(cfg, d)
             return int(d["gen"]), str(d["state_id"])
     except StateValidationError:

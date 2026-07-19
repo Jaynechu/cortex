@@ -522,11 +522,35 @@ def _pid_cwd(pid: int) -> str | None:
     return None
 
 
+def claude_ancestor_pid(caller_pid: int | None = None) -> int | None:
+    """The `claude` process in the CALLER's own parent chain (the window /ct-wake
+    runs inside), or None. Walks ppid from caller_pid, matching against live
+    `pgrep -x claude` pids — records exactly the window that invoked us, never a
+    foreigner. caller_pid defaults to os.getpid()."""
+    from cortex.lie_down import _ppid_of, _PPID_WALK_MAX_DEPTH
+    if caller_pid is None:
+        caller_pid = os.getpid()
+    claude_pids = set(_pgrep_claude_pids())
+    if not claude_pids:
+        return None
+    current = caller_pid
+    for _ in range(_PPID_WALK_MAX_DEPTH):
+        if current in claude_pids:
+            return current
+        parent = _ppid_of(current)
+        if parent is None or parent <= 1:
+            return None
+        current = parent
+    return None
+
+
 def find_claude_pid(cfg: dict) -> int | None:
     """Discover the pid of the resident cortex window's `claude` process.
     (a) iTerm session tty -> ps -t <tty> for a `claude` command on that tty.
     (b) fallback: pgrep -x claude, keep the ones whose cwd == cortex_home.
-    Ambiguous (0 or >1 candidates) or undiscoverable -> None (never guess)."""
+    Ambiguous (0 or >1 candidates) or undiscoverable -> None (never guess).
+    NOTE (P18): no registration/wake DECISION may consume this — it stays only
+    for non-decision uses (e.g. hard_interrupt). Liveness = wake_state.resident_alive."""
     sid = wake_state.get_session_id(cfg)
     if sid:
         tty = _session_tty(sid)

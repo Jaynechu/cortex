@@ -213,6 +213,27 @@ def _fire_dead_window(conn, cfg: dict, why: str) -> str:
     return f"reconcile ({why}) -> wake fired (mode={result.get('mode')})"
 
 
+def _accidental_close_still_valid(cfg: dict, snap_gen: int | None) -> bool:
+    """Re-validate the accidental-close respawn under the strict lock right
+    before firing. Abort (False) if a take-office happened since the gate-eval:
+    gen moved past the tick's snapshot, a live resident is now recorded, or the
+    awake marker cleared. Fail-closed (abort) on any lock/parse trouble."""
+    try:
+        with wake_state._strict_flock(cfg):
+            d = wake_state._load_strict(cfg)
+            wake_state._ensure_epoch(d)
+            if snap_gen is not None and int(d.get("gen", -1)) != int(snap_gen):
+                return False
+            if not d.get("awake"):
+                return False
+            import os
+            if wake_state._resident_alive_under_lock(d, os.getpid()):
+                return False
+            return True
+    except wake_state.StateValidationError:
+        return False
+
+
 def _reconcile(conn, cfg: dict, st: dict, now) -> str | None:
     """Ledger reconcile (runs every tick, after night close). Returns a log line
     when it acts / short-circuits the rest of the tick, else None (let the normal
@@ -232,7 +253,10 @@ def _reconcile(conn, cfg: dict, st: dict, now) -> str | None:
 
     if wake_state.is_paused(cfg):
         return "paused (DND): reconcile + reaps + injections held"
-    if _window_alive(cfg):
+    # P18 ONE signal: a live RECORDED resident (e.g. a manual /ct-wake take-office
+    # window) is never a respawn candidate — hold. _window_alive stays only as a
+    # cosmetic secondary (iTerm session up) for the resume-hot fast path.
+    if wake_state.resident_alive(cfg) or _window_alive(cfg):
         return None  # alive -> never touch; normal flow handles it
     due = _parse_local(wake_state.get_next_wake_at(cfg), cfg)
     if due is not None and now >= due:
@@ -240,6 +264,12 @@ def _reconcile(conn, cfg: dict, st: dict, now) -> str | None:
     if st.get("awake") and due is None and wake_state.get_session_id(cfg):
         # An awake session whose window was closed with no scheduled wake: resume
         # immediately (1h prompt-cache tier — resume within ~5 min keeps it hot).
+        # Re-check under the strict lock right before firing: a /ct-wake
+        # take-office between the gate-eval above and here bumps gen + records a
+        # live resident, so the respawn must abort (TOCTOU guard).
+        snap_gen = st.get("gen") if isinstance(st.get("gen"), int) else None
+        if not _accidental_close_still_valid(cfg, snap_gen):
+            return "accidental-close aborted: resident took office mid-tick"
         return _fire_dead_window(conn, cfg, "accidental close of awake window")
     if due is not None:
         # Dead window, ledger not yet due -> hold; ledger is authoritative, no

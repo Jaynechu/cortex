@@ -26,7 +26,7 @@ def _now(cfg: dict) -> datetime:
     return datetime.now(ZoneInfo(cfg["core"]["timezone"]))
 
 
-def cmd_wake(cfg: dict) -> str:
+def cmd_wake(cfg: dict, force: bool = False) -> str:
     """In-window take-office (P17): /ct-wake runs INSIDE the target window (a
     manually opened cortex window). It never spawns/resumes/hunts — the pacemaker
     owns spawning.
@@ -42,33 +42,32 @@ def cmd_wake(cfg: dict) -> str:
     promote is a no-op either way; take-office still proceeds on the existing
     liveness semantics below, registration simply stays whatever it already was.
 
-    Resident-first (codex P0 fix): `rotated`/`retired_sid` are NOT the grant
-    gate — `rotated` is one-shot (consumed by the next pacemaker wake) and
-    `retired_sid` is a PERSISTENT belt-and-braces marker (never cleared, records
-    only the last-ever retired sid) — neither tells you whether a resident is
-    on duty RIGHT NOW. The only live signal is whether the recorded resident's
-    claude process is actually alive this instant (window.find_claude_pid):
+    Resident-first (P18 ONE signal): the grant gate is wake_state.resident_alive
+    — the RECORDED resident claude pid alive (kill -0) AND not in this ctl
+    process's chain. No live-scan (find_claude_pid retired from decisions),
+    `rotated`/`retired_sid` are NOT the gate.
 
-      live resident, THIS ctl process is NOT its own descendant (a foreign
-          window woke while another is on duty) -> refuse, zero side effects
-          (registration untouched, staged claim discarded).
-      live resident, THIS ctl process runs INSIDE it (self re-wake of a
-          dormant resident) -> take office, promote (idempotent — same sid).
-      no live resident (dead or none) -> take office, promote. died_no_handoff
-          fires only when the dead resident did NOT cleanly retire: neither the
-          one-shot `rotated` flag is still pending (not yet consumed by a
-          pacemaker wake) NOR does its own transcript sid match the durable
-          `retired_sid` (that exact session was the one properly rotated).
+      live foreign resident (recorded pid alive, not this ctl's chain) -> refuse,
+          zero side effects (registration untouched, staged claim discarded).
+      self re-wake (recorded pid alive + in this ctl's chain) or no live resident
+          -> take office; claim_office records THIS window's own claude pid+sid.
+      --force -> skip the refuse verdict, still route through claim_office
+          (audited via=force).
+      died_no_handoff fires only when the dead resident did NOT cleanly retire.
     """
     import os
-    from cortex.lie_down import _chains_to_ancestor, _kill_sentinel
+    from cortex.lie_down import _kill_sentinel
 
-    resident_pid = window.find_claude_pid(cfg)
-    if resident_pid is not None and not _chains_to_ancestor(os.getpid(), resident_pid):
+    resident_here = window.claude_ancestor_pid(os.getpid())
+    if not force and wake_state.resident_alive(cfg):
         wake_state.discard_pending_claim(cfg)
         return str(cfg["wake"].get("ctl_wake_resident_text") or "").strip()
 
-    died_no_handoff = resident_pid is None and not _cleanly_retired(cfg)
+    # "no live resident" = recorded pid absent or not alive (a self re-wake still
+    # has a live recorded pid, so it is NOT died_no_handoff).
+    rec_pid = wake_state.get_resident_pid(cfg)
+    no_live_resident = rec_pid is None or not wake_state._pid_alive(rec_pid)
+    died_no_handoff = no_live_resident and not _cleanly_retired(cfg)
 
     # Take office. set_awake BUMPS gen and clears next_wake_at atomically, so any
     # sentinel/tick armed for the old due finds its token stale and no-ops
@@ -81,7 +80,17 @@ def cmd_wake(cfg: dict) -> str:
         wid = _record_wake_row(conn, now)
         wake_state.take_rotated(cfg)  # consume the one-shot flag if set
         wake_state.set_awake(cfg, wid, str(tpath) if tpath else None)
-        wake_state.promote_pending_claim(cfg)
+        # Record THIS window as the resident: promote the staged pending_claim
+        # (its own claude sid) + record this window's own claude pid, all through
+        # the ONE write path (claim_office). No pending_claim staged -> fall back
+        # to registering by this window's transcript sid.
+        via = "force" if force else "ctl-wake"
+        promoted = wake_state.promote_pending_claim(
+            cfg, resident_here, via=via, force=force)
+        if not promoted:
+            sid = _tpath_sid(tpath)
+            if sid:
+                wake_state.claim_office(cfg, sid, via, resident_here, force=force)
         _kill_sentinel(cfg)
         # A human explicitly waking wants activity back — leave DND (ct-pause
         # documents /ct-wake as its exit).
@@ -91,6 +100,11 @@ def cmd_wake(cfg: dict) -> str:
         return _arm_line(cfg)
     finally:
         conn.close()
+
+
+def _tpath_sid(tpath) -> str | None:
+    from pathlib import Path
+    return Path(str(tpath)).stem if tpath else None
 
 
 def _cleanly_retired(cfg: dict) -> bool:
@@ -194,7 +208,9 @@ def cmd_resume(cfg: dict) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="cortex.ctl", description="Manual cortex control")
     sub = parser.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("wake", help="wake now (alive -> signal; dead -> fresh/resume)")
+    wp = sub.add_parser("wake", help="take office in this window (refuse if a live resident holds it)")
+    wp.add_argument("--force", action="store_true",
+                    help="override: take office even if a live resident holds it (audited)")
     sp = sub.add_parser("sleep", help="lie the live window down, or set the ledger")
     sp.add_argument("--until", default=None, help="wake at HH:MM (local)")
     sp.add_argument("--min", dest="minutes", type=float, default=None,
@@ -206,7 +222,7 @@ def main(argv: list[str] | None = None) -> int:
 
     cfg = config.load()
     if args.cmd == "wake":
-        line = cmd_wake(cfg)
+        line = cmd_wake(cfg, force=getattr(args, "force", False))
     elif args.cmd == "sleep":
         line = cmd_sleep(cfg, args.until, args.minutes, args.rotate)
     elif args.cmd == "pause":
