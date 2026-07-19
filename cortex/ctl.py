@@ -47,8 +47,9 @@ def cmd_wake(cfg: dict, force: bool = False) -> str:
     process's chain. No live-scan (find_claude_pid retired from decisions),
     `rotated`/`retired_sid` are NOT the gate.
 
-      live foreign resident (recorded pid alive, not this ctl's chain) -> refuse,
-          zero side effects (registration untouched, staged claim discarded).
+      live foreign resident (recorded pid alive, not this ctl's chain) -> refuse
+          with the P17 signed refusal text, zero side effects (registration
+          untouched, staged claim discarded). No spawn, no office change.
       self re-wake (recorded pid alive + in this ctl's chain) or no live resident
           -> take office; claim_office records THIS window's own claude pid+sid.
       --force -> skip the refuse verdict, still route through claim_office

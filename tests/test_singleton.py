@@ -431,6 +431,24 @@ def test_manual_take_office_then_two_ticks_no_respawn(cfg, monkeypatch):
     assert d2["cortex_resident_pid"] == 4321
 
 
+def test_ctl_wake_force_overrides_live_resident_takes_office(cfg, monkeypatch):
+    """--force: a live foreign resident is overridden — this window takes office,
+    routed through claim_office, audited via=force."""
+    from cortex import ctl, window
+    wake_state.update(cfg, cortex_resident_pid=4321, cortex_claude_sid="old-resident",
+                      pending_claim={"sid": "forcer", "ts": "2026-01-01T00:00:00+00:00"})
+    monkeypatch.setattr(window, "claude_ancestor_pid", lambda p=None: 5555)
+    monkeypatch.setattr(wake_state, "_pid_alive", lambda pid: True)
+    monkeypatch.setattr("cortex.lie_down._chains_to_ancestor",
+                        lambda pid, ancestor: False)
+    ctl.cmd_wake(cfg, force=True)
+    d = wake_state.load(cfg)
+    assert d["cortex_claude_sid"] == "forcer"
+    assert d["cortex_resident_pid"] == 5555
+    assert d["awake"] is True
+    assert "via=force" in wake_state.config.wake_audit_log_path(cfg).read_text()
+
+
 def test_accidental_close_aborts_if_resident_takes_office_mid_tick(cfg, monkeypatch):
     """TOCTOU: awake window, no ledger, no _window_alive -> would fire; but a live
     recorded resident (take-office between gate-eval and fire) aborts the respawn
