@@ -18,6 +18,7 @@ import os
 import signal
 import subprocess
 import time
+from datetime import datetime
 
 from cortex import config, wake_state
 
@@ -117,46 +118,70 @@ def wake_prompt(cfg: dict) -> str:
     return cfg["wake"].get("wake_prompt", "☀️")
 
 
-def _gen_token_suffix(token) -> str:
-    """Wire form of the cancellation-epoch token appended to a wake signal line:
-    ' {g<gen>:<state_id>}'. token=None -> "" (legacy token-less line, still
-    processed by the consumer). Kept minimal + trailing so the marker substring
-    match is unaffected."""
-    if not token:
-        return ""
-    gen, state_id = token
-    if gen is None:
-        return ""
-    return f" {{g{gen}:{state_id}}}"
+def _bell_template(cfg: dict) -> str:
+    return cfg["wake"].get("wake_bell_template", "☀️ {hm}")
+
+
+def bell_template_prefix(cfg: dict) -> str:
+    """Static text of the bell template BEFORE the {hm} placeholder — the shape
+    the consumer falls back to when the receipt is missing/unreadable. Persisted
+    into the receipt so the marrow side never needs cortex config."""
+    return _bell_template(cfg).split("{hm}", 1)[0]
 
 
 def wake_signal_line(cfg: dict, now, rearm: bool = False, token=None) -> str:
-    """The bell line: '<marker> HH:MM' (local time), optionally carrying the
-    cancellation-epoch token as a trailing ' {g<gen>:<sid>}' tag. The marrow
-    UserPromptSubmit hook detects the marker and injects the full wakeup note —
-    this line is a BELL ONLY, no note body, no read errand. It validates the
-    token against the live epoch at consumption (stale -> suppress). `rearm`
-    appends the ear-died suffix for the typed re-arm of an alive window whose ear
-    missed. The token tag goes AFTER the rearm suffix (trailing)."""
-    marker = cfg["wake"].get("wake_signal_marker", "[CORTEX-WAKE]")
-    line = f"{marker} {now.strftime('%H:%M')}"
-    if rearm:
-        line += cfg["wake"].get("rearm_suffix", " (ear died — rearm)")
-    line += _gen_token_suffix(token)
-    return line
+    """The VISIBLE bell line = human text only, from [wake].wake_bell_template
+    with {hm} -> local HH:MM (default '☀️ 00:55'). NO machine marker, NO epoch
+    token, NO rearm suffix on screen: all machine data (gen/state_id/rearm) is
+    written to the wake_state receipt sidecar (write_wake_receipt) at send time.
+    The marrow hook matches this exact on-screen text against the receipt. The
+    `rearm`/`token` args are kept for signature compatibility — they no longer
+    change the rendered text (they flow into the receipt instead)."""
+    return _bell_template(cfg).replace("{hm}", now.strftime("%H:%M"))
+
+
+def write_wake_receipt(cfg: dict, now, token=None, rearm: bool = False) -> None:
+    """Persist the pending bell receipt into wake_state under the shared flock,
+    at bell-send time. Records the exact visible bell text, gen, state_id, rearm
+    flag, an ISO timestamp, and the current template prefix (so the consumer can
+    shape-match without cortex config). Overwrites any prior receipt (stale
+    hygiene). Best-effort: a write failure never crashes the pacemaker — the
+    consumer then takes the shape fallback."""
+    from datetime import timezone
+
+    from cortex import wake_state
+    text = wake_signal_line(cfg, now)
+    gen = state_id = None
+    if token:
+        gen, state_id = token
+    receipt = {
+        "text": text,
+        "gen": int(gen) if gen is not None else None,
+        "state_id": str(state_id) if state_id is not None else None,
+        "rearm": bool(rearm),
+        "ts": datetime.now(timezone.utc).isoformat(),
+        # Both persisted so the consumer shape-matches without cortex config: the
+        # full template (to know whether it has an {hm} time placeholder — a fully
+        # STATIC template with no placeholder is valid) and its static prefix.
+        "template": _bell_template(cfg),
+        "template_prefix": bell_template_prefix(cfg),
+    }
+    try:
+        wake_state.update(cfg, wake_receipt=receipt)
+    except Exception:
+        pass
 
 
 def fresh_initial_prompt(cfg: dict, now, token=None) -> str:
-    """The baked first prompt for a brand-new/resumed cortex window: the
-    configured emoji + the bell marker line, e.g. '☀️ [CORTEX-WAKE] 00:55'.
-    Same marker as the ear bell, so the marrow UserPromptSubmit hook detects it
-    and injects the full wakeup note — the window gets its wake identity + note
-    in one stroke instead of the emoji alone being read as a bare chat message.
-    `token` (gen, state_id), when given, doubles as the registration handshake
-    token (wake_state.start_registration_handshake): the marrow hook claims
-    single-active-window registration off this SAME trailing tag, no second
-    wire format needed."""
-    return f"{wake_prompt(cfg)} {wake_signal_line(cfg, now, token=token)}"
+    """The baked first prompt for a brand-new/resumed cortex window: JUST the
+    visible bell line (human text, e.g. '☀️ 00:55'). The machine data for this
+    bell is written to the wake_state receipt via write_wake_receipt so the
+    marrow UserPromptSubmit hook recognizes the on-screen line and injects the
+    full wakeup note — the window gets its wake identity + note in one stroke
+    instead of the emoji being read as a bare chat message. `token` (gen,
+    state_id) doubles as the registration handshake token; it is carried in the
+    receipt, not the visible line."""
+    return wake_signal_line(cfg, now, token=token)
 
 
 def launch_command(cfg: dict, initial_prompt: str | None = None,
@@ -204,12 +229,15 @@ def _append_signal_line(cfg: dict, line: str) -> None:
 
 
 def append_wake_signal(cfg: dict, now, token=None) -> None:
-    """Append one bell line the armed Monitor ear picks up: '<marker> HH:MM'
-    (plus the cancellation-epoch token tag when `token` is given). The marker
-    (not this file) is what the marrow UserPromptSubmit hook detects to inject
-    the full wakeup note — a BELL ONLY, no note body, no read errand. The token
-    lets the consumer suppress a wake line that a newer epoch already superseded.
-    Best-effort: a write failure never crashes the pacemaker."""
+    """Append one VISIBLE bell line (human text, e.g. '☀️ HH:MM') the armed
+    Monitor ear picks up, and write its machine receipt (write_wake_receipt) so
+    the marrow UserPromptSubmit hook recognizes the on-screen line and injects
+    the full wakeup note — a BELL ONLY, no note body, no read errand. The receipt
+    carries the epoch token so the consumer can suppress a wake a newer epoch
+    superseded. Receipt written BEFORE the line lands, so the ear never surfaces
+    a bell whose receipt is not yet on disk. Best-effort: never crashes the
+    pacemaker."""
+    write_wake_receipt(cfg, now, token=token)
     _append_signal_line(cfg, wake_signal_line(cfg, now, token=token))
 
 
@@ -302,7 +330,11 @@ def claude_session_id(cfg: dict) -> str | None:
     from pathlib import Path
     from cortex import transcript as _transcript
 
-    marker = cfg.get("wake", {}).get("wake_signal_marker", "[CORTEX-WAKE]")
+    # Window-lineage marker = the visible bell template prefix (e.g. '☀️'): every
+    # window's first prompt now leads with it (fresh_initial_prompt). Falls back
+    # to the legacy marker only when the prefix is blank.
+    marker = bell_template_prefix(cfg).strip() or cfg.get(
+        "wake", {}).get("wake_signal_marker", "[CORTEX-WAKE]")
     lineage = _transcript.newest_window_lineage(cfg, marker)
     if lineage is not None:
         return lineage.stem
@@ -439,10 +471,12 @@ def inject_prompt(cfg: dict, text: str) -> bool:
 
 
 def type_wake_signal(cfg: dict, now) -> bool:
-    """Ear-died rearm (ladder 2a): type the bell line '<marker> HH:MM (ear died
-    — rearm)' into the ALIVE resident window. It flows through the marrow hook
-    like any wake (marker detected -> note injected -> session rearms). Returns
-    False if there is no resident session. Focus-guarded like every typing path."""
+    """Ear-died rearm (ladder 2a): type the VISIBLE bell line (human text) into
+    the ALIVE resident window and write its receipt with rearm=True. It flows
+    through the marrow hook like any wake (receipt matched -> note injected ->
+    session rearms). Returns False if there is no resident session. Focus-guarded
+    like every typing path."""
+    write_wake_receipt(cfg, now, rearm=True)
     return inject_prompt(cfg, wake_signal_line(cfg, now, rearm=True))
 
 

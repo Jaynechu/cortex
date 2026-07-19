@@ -189,13 +189,14 @@ def test_window_wake_respawn_delivers_note_as_prompt(cfg, monkeypatch):
     res = wake._window_wake(conn, cfg, "N", now, respawn=True)
     conn.close()
     assert res["mode"] == "window"
-    assert window.wake_prompt(cfg) in calls["prompt"]           # emoji present
-    assert cfg["wake"].get("wake_signal_marker", "[CORTEX-WAKE]") in calls["prompt"]  # bell marker present
-    # P14 Fix 3: every spawn bakes a registration-handshake token (gen:state_id)
-    # into the same trailing tag as the cancellation epoch — not a literal
-    # match against a second fresh_initial_prompt call (that would mint its
-    # OWN random token from a fresh handshake, not reproduce this one).
-    assert re.search(r"\{g\d+:[0-9a-fA-F]+\}", calls["prompt"])
+    # Visible baked prompt = human text only (template) — no marker/token on
+    # screen. The machine data (incl. the registration-handshake token) lives in
+    # the wake_state receipt written before the spawn.
+    assert calls["prompt"] == window.wake_signal_line(cfg, now)
+    assert re.search(r"\{g\d+:[0-9a-fA-F]+\}", calls["prompt"]) is None
+    r = wake_state.load(cfg)["wake_receipt"]
+    assert r["text"] == calls["prompt"]
+    assert isinstance(r["gen"], int) and r["state_id"]
     assert "signal" not in calls                # fresh path never appends a signal
     assert calls["watchdog"] is True
     d = wake_state.load(cfg)
@@ -540,17 +541,22 @@ def test_store_window_tokens_reaches_budget_line(cfg):
 # --- signal-file ear ----------------------------------------------------------
 
 def test_append_wake_signal_line_format(cfg):
-    """append_wake_signal writes exactly one BELL line: '<marker> HH:MM'. No note
-    body, no read errand — the marker alone is what the marrow hook detects to
-    inject the full note."""
+    """append_wake_signal writes exactly one VISIBLE bell line = human text only
+    ('☀️ HH:MM'), no machine marker on screen. The machine data goes to the
+    wake_state receipt instead."""
     from datetime import datetime as _dt
 
-    from cortex import window
+    from cortex import wake_state, window
 
     now = _dt(2026, 7, 11, 9, 5, tzinfo=timezone.utc)
-    window.append_wake_signal(cfg, now)
+    window.append_wake_signal(cfg, now, token=(3, "cafe"))
     text = config.wake_signal_log_path(cfg).read_text().strip()
-    assert text == "[CORTEX-WAKE] 09:05"
+    assert text == "☀️ 09:05"
+    r = wake_state.load(cfg)["wake_receipt"]
+    assert r["text"] == "☀️ 09:05"
+    assert r["gen"] == 3 and r["state_id"] == "cafe"
+    assert r["rearm"] is False
+    assert r["template_prefix"] == "☀️ "
 
 
 def test_append_wake_signal_appends_not_overwrites(cfg):
@@ -566,16 +572,31 @@ def test_append_wake_signal_appends_not_overwrites(cfg):
     assert len(lines) == 2
 
 
-def test_wake_signal_line_rearm_suffix(cfg):
-    """wake_signal_line(rearm=True) appends the ear-died suffix (ladder 2a)."""
+def test_wake_signal_line_is_human_text_only(cfg):
+    """The visible bell line is human text only (template) — no marker, no epoch
+    token, and NO rearm suffix on screen (rearm now lives in the receipt)."""
     from datetime import datetime as _dt
 
     from cortex import window
 
     now = _dt(2026, 7, 11, 9, 5, tzinfo=timezone.utc)
-    assert window.wake_signal_line(cfg, now) == "[CORTEX-WAKE] 09:05"
-    assert window.wake_signal_line(cfg, now, rearm=True) == \
-        "[CORTEX-WAKE] 09:05 (ear died — rearm)"
+    assert window.wake_signal_line(cfg, now) == "☀️ 09:05"
+    # rearm/token no longer change the RENDERED text — receipt carries them.
+    assert window.wake_signal_line(cfg, now, rearm=True) == "☀️ 09:05"
+    assert window.wake_signal_line(cfg, now, token=(2, "beef")) == "☀️ 09:05"
+
+
+def test_type_wake_signal_writes_rearm_receipt(cfg, monkeypatch):
+    """type_wake_signal writes a receipt with rearm=True + the visible text."""
+    from datetime import datetime as _dt
+
+    from cortex import wake_state, window
+
+    monkeypatch.setattr(window, "inject_prompt", lambda c, text: True)
+    now = _dt(2026, 7, 11, 9, 5, tzinfo=timezone.utc)
+    assert window.type_wake_signal(cfg, now) is True
+    r = wake_state.load(cfg)["wake_receipt"]
+    assert r["text"] == "☀️ 09:05" and r["rearm"] is True
 
 
 # --- wakeup note baked into the launch command --------------------------------
@@ -590,21 +611,41 @@ def test_wake_prompt_is_emoji_only(cfg):
     assert window.wake_prompt(cfg) == "GO"
 
 
-def test_fresh_initial_prompt_composes_emoji_and_bell_marker(cfg):
-    """fresh_initial_prompt bakes '<wake_prompt> <wake_signal_line>' — the
-    baked first prompt of a fresh/resumed window must carry the same bell
-    marker as the ear so the marrow hook detects it and injects the note."""
+def test_static_zwj_template_roundtrips_through_receipt(cfg):
+    """A fully STATIC template (no {hm}) with a multi-codepoint ZWJ emoji renders
+    verbatim and round-trips byte-exact through the wake_state receipt JSON."""
+    from datetime import datetime as _dt
+
+    from cortex import wake_state, window
+
+    static = "🧚‍♀️ 笨鸭换岗成功"
+    cfg["wake"]["wake_bell_template"] = static
+    now = _dt(2026, 7, 19, 9, 5, tzinfo=timezone.utc)
+    # No {hm}: the rendered line equals the static text verbatim.
+    assert window.wake_signal_line(cfg, now) == static
+    assert window.bell_template_prefix(cfg) == static  # no {hm} -> whole text
+    window.write_wake_receipt(cfg, now, token=(3, "cafe"))
+    r = wake_state.load(cfg)["wake_receipt"]
+    assert r["text"] == static and r["template"] == static
+    assert r["template_prefix"] == static
+    # ZWJ code points intact (U+1F9DA U+200D U+2640 U+FE0F).
+    assert [hex(ord(c)) for c in r["text"][:4]] == \
+        ["0x1f9da", "0x200d", "0x2640", "0xfe0f"]
+
+
+def test_fresh_initial_prompt_is_visible_bell_only(cfg):
+    """fresh_initial_prompt bakes JUST the visible bell line (human text) — no
+    marker on screen. The marrow hook recognizes it via the wake_state receipt."""
     from datetime import datetime, timezone
     from cortex import window
 
     now = datetime(2026, 7, 10, 0, 55, tzinfo=timezone.utc)
     prompt = window.fresh_initial_prompt(cfg, now)
-    assert prompt == "☀️ [CORTEX-WAKE] 00:55"
-    assert prompt == f"{window.wake_prompt(cfg)} {window.wake_signal_line(cfg, now)}"
+    assert prompt == "☀️ 00:55"
+    assert prompt == window.wake_signal_line(cfg, now)
 
-    cfg["wake"]["wake_prompt"] = "GO"
-    cfg["wake"]["wake_signal_marker"] = "[WAKE]"
-    assert window.fresh_initial_prompt(cfg, now) == "GO [WAKE] 00:55"
+    cfg["wake"]["wake_bell_template"] = "GO {hm}"
+    assert window.fresh_initial_prompt(cfg, now) == "GO 00:55"
 
 
 def test_launch_command_bakes_initial_prompt(cfg):
@@ -1209,11 +1250,12 @@ def test_window_wake_dead_resumes_when_sid_present(cfg, monkeypatch):
     conn.close()
     assert res["mode"] == "window"
     assert calls["resume_sid"] == "live-uuid"   # same conversation resumed
-    # P14 Fix 3: the resumed relaunch also bakes a fresh registration-handshake
-    # token (not a literal match against a second fresh_initial_prompt call).
-    assert window.wake_prompt(cfg) in calls["prompt"]
-    assert cfg["wake"].get("wake_signal_marker", "[CORTEX-WAKE]") in calls["prompt"]
-    assert re.search(r"\{g\d+:[0-9a-fA-F]+\}", calls["prompt"])
+    # The resumed relaunch bakes the visible bell (human text) only; its
+    # registration-handshake token lives in the wake_state receipt.
+    assert calls["prompt"] == window.wake_signal_line(cfg, now)
+    assert re.search(r"\{g\d+:[0-9a-fA-F]+\}", calls["prompt"]) is None
+    r = wake_state.load(cfg)["wake_receipt"]
+    assert r["text"] == calls["prompt"] and isinstance(r["gen"], int)
     note_text = wake_state.wakeup_note_path(cfg).read_text()
     assert "died without a handoff" not in note_text  # resume -> no catchup
 

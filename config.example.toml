@@ -83,10 +83,18 @@ ear_timeout_sec = 90           # recovery deadline for an alive-window wake to l
 # arm the ear, choose next wake) are injected by marrow's UserPromptSubmit hook
 # when this exact emoji is submitted in a cortex window.
 wake_prompt = "☀️"
-# Bell marker the marrow UserPromptSubmit hook detects to inject the full wakeup
-# note. The signal line is a BELL ONLY: "<marker> HH:MM" (local), no note body,
-# no read errand. rearm_suffix is appended when the ear died and the pacemaker
-# re-types the marker into an alive window (ladder 2a).
+# Visible bell = HUMAN TEXT ONLY (no machine marker, no epoch token). The
+# machine data (gen/state_id/rearm) is written to the wake_state receipt sidecar
+# at send time; the marrow hook exact-matches the on-screen line against it.
+# {hm} = local HH:MM; a fully STATIC template with no {hm} is also valid. Must
+# match marrow [cortex].wake_bell_template.
+wake_bell_template = "☀️ {hm}"
+# Pending-receipt time-to-live (minutes): the consumer ignores an older receipt
+# and the producer overwrites it on each new bell. Match marrow receipt_ttl_min.
+receipt_ttl_min = 15
+# LEGACY (transition only): the old inline marker + rearm suffix. New bells no
+# longer render these; kept so a straggler '[CORTEX-WAKE] HH:MM {g..}' line still
+# parses on the consumer side.
 wake_signal_marker = "[CORTEX-WAKE]"
 rearm_suffix = " (ear died — rearm)"
 # say() = the ONLY place cortex takes focus: it fronts the resident window and

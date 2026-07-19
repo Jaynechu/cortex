@@ -307,14 +307,20 @@ def test_sentinel_fire_target_mismatch_holds(cfg, monkeypatch):
 
 # ── legacy line tolerance (marrow-side parse mirrored here for the wire form) ──
 
-def test_wake_signal_line_token_roundtrip(cfg):
+def test_wake_receipt_token_roundtrip(cfg):
+    """The epoch token now lives in the wake_state receipt, not the visible line.
+    The on-screen bell is human text only."""
     from datetime import datetime
     from zoneinfo import ZoneInfo
-    from cortex import window
+    from cortex import wake_state, window
     now = datetime(2030, 1, 1, 9, 0, tzinfo=ZoneInfo(cfg["core"]["timezone"]))
     line = window.wake_signal_line(cfg, now, token=(7, "abcd1234"))
-    assert "{g7:abcd1234}" in line
-    assert cfg["wake"]["wake_signal_marker"] in line
-    # Token-less line carries no tag.
-    plain = window.wake_signal_line(cfg, now)
-    assert "{g" not in plain
+    assert "{g" not in line  # no token on screen
+    window.write_wake_receipt(cfg, now, token=(7, "abcd1234"))
+    r = wake_state.load(cfg)["wake_receipt"]
+    assert r["gen"] == 7 and r["state_id"] == "abcd1234"
+    assert r["text"] == line
+    # Token-less receipt carries null gen/state_id.
+    window.write_wake_receipt(cfg, now)
+    r2 = wake_state.load(cfg)["wake_receipt"]
+    assert r2["gen"] is None and r2["state_id"] is None

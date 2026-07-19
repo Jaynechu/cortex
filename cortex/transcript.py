@@ -135,12 +135,21 @@ def resident_transcript(cfg: dict) -> Path | None:
         p = Path(str(raw)).expanduser()
         if p.exists():
             return p
-    marker = str(cfg.get("wake", {}).get("wake_signal_marker") or "").strip()
+    marker = lineage_marker(cfg)
     if marker:
         lineage = newest_window_lineage(cfg, marker)
         if lineage is not None:
             return lineage
     return newest(cfg)
+
+
+def lineage_marker(cfg: dict) -> str:
+    """Marker leading a genuine cortex window's first prompt = the visible bell
+    template prefix (e.g. '☀️'; window.fresh_initial_prompt). Falls back to the
+    legacy wake_signal_marker only when the template prefix is blank."""
+    wcfg = cfg.get("wake", {})
+    prefix = str(wcfg.get("wake_bell_template") or "☀️ {hm}").split("{hm}", 1)[0].strip()
+    return prefix or str(wcfg.get("wake_signal_marker") or "").strip()
 
 
 # Leading decoration tolerated before a machine marker: whitespace + at most a
@@ -175,9 +184,11 @@ def _line_markers(cfg: dict) -> list[str]:
     is_machine_line (cortex_bridge.py): wake marker + tuck-in marker family."""
     wcfg = cfg.get("wake", {})
     out = []
-    m = str(wcfg.get("wake_signal_marker") or "").strip()
-    if m:
-        out.append(m)
+    # Visible bell prefix (e.g. '☀️') leads every wake bell down the ear now; the
+    # legacy marker is kept for straggler '[CORTEX-WAKE] …' lines in transition.
+    for m in (lineage_marker(cfg), str(wcfg.get("wake_signal_marker") or "").strip()):
+        if m and m not in out:
+            out.append(m)
     for m in wcfg.get("machine_line_markers") or config.DEFAULT_MACHINE_LINE_MARKERS:
         m = str(m).strip()
         if m and m not in out:

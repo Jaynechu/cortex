@@ -59,10 +59,19 @@ _DEFAULTS: dict[str, Any] = {
         "signal_log": "",
         "ear_timeout_sec": 90,
         "wake_prompt": "☀️",
-        # Bell marker line the marrow UserPromptSubmit hook detects to inject the
-        # full wakeup note. Signal is a BELL ONLY — no note body, no read errand.
-        # Rendered as "<marker> HH:MM" (local time). rearm_suffix is appended when
-        # the ear died and the pacemaker re-types the marker into an alive window.
+        # Visible bell line = human text ONLY (no machine marker, no epoch token).
+        # The machine data (marker/gen/state_id/rearm) is written to the
+        # wake_state receipt sidecar instead (window.write_wake_receipt); the
+        # marrow hook matches the on-screen line against that receipt. {hm} =
+        # local HH:MM. This static PREFIX (text before {hm}) is persisted into
+        # wake_state so the consumer can shape-match it without cortex config.
+        "wake_bell_template": "☀️ {hm}",
+        # Receipt time-to-live (minutes): the consumer ignores a pending receipt
+        # older than this, and the producer overwrites it on every new bell.
+        "receipt_ttl_min": 15,
+        # LEGACY (transition only): the old inline marker + rearm suffix. Kept so
+        # a straggler '[CORTEX-WAKE] HH:MM {g..}' line still parses. New bells no
+        # longer render these — the receipt carries all machine data.
         "wake_signal_marker": "[CORTEX-WAKE]",
         "rearm_suffix": " (ear died — rearm)",
         "say_sound": "Glass",

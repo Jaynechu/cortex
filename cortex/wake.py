@@ -466,6 +466,9 @@ def _spawn_wake(conn, cfg, now, resume: bool = False,
     prev_path = str(prev_path) if prev_path else None
     spawn_ts = time.time()
     reg_token = wake_state.start_registration_handshake(cfg)
+    # Write the pending receipt for the baked-in visible bell BEFORE spawning, so
+    # the marrow hook recognizes the fresh window's first (human-text) prompt.
+    window.write_wake_receipt(cfg, now, token=reg_token)
     try:
         window.respawn(cfg, initial_prompt=window.fresh_initial_prompt(cfg, now, token=reg_token),
                        resume_sid=resume_sid)
