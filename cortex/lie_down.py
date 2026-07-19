@@ -14,6 +14,7 @@ import argparse
 import json
 import os
 import signal
+import subprocess
 import sys
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -150,6 +151,15 @@ def lie_down(cfg: dict, force_slept: str | None = None, rotate: bool = False,
                     cfg, token, _mark_rotated(state.get("transcript"))))
             except wake_state.StateValidationError:
                 pass  # superseded -> the newer epoch owns the window, no rotate
+            if rotated:
+                # Registration dropped (P16): physically kill the retiring
+                # window's wake_signal ear tail so the ear disappears at rotate
+                # time and cannot reappear until the successor legally claims
+                # (marrow's fail-closed arm gate blocks any re-arm meanwhile).
+                # Only the retiring window's own / stale zombie tails exist now;
+                # the successor spawns later. Alarm sentinel/ledger/watchdog and
+                # every other wake_state key are untouched.
+                _kill_ear_tails(cfg)
         # Night flag: set AFTER rotate, BEFORE floor/sentinel — a conditional
         # CHILD of the claim gen (no bump, same as rotate) so a superseding user
         # reset suppresses it. The flag persists across wakes until the morning
@@ -283,6 +293,44 @@ def _sigterm(pid) -> None:
             os.kill(int(pid), signal.SIGTERM)
     except (ProcessLookupError, PermissionError, TypeError, ValueError):
         pass
+
+
+def _kill_ear_tails(cfg: dict) -> int:
+    """Kill live wake_signal ear tails (`tail … -f <signal_log>`) at rotate time
+    (P16). Ports marrow cortex_bridge.kill_orphan_ear_tails — the cortex venv
+    cannot import marrow. Match is narrowed to the exact resolved signal-log
+    path (pgrep -f) so unrelated tails are never touched; our own pid is skipped.
+    Best-effort — returns the count SIGTERMed, 0 on any failure."""
+    try:
+        signal_log = str(config.wake_signal_log_path(cfg))
+    except Exception:
+        return 0
+    if not signal_log:
+        return 0
+    try:
+        proc = subprocess.run(
+            ["pgrep", "-f", f"-f {signal_log}"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return 0
+    if proc.returncode not in (0, 1):
+        return 0
+    killed = 0
+    me = os.getpid()
+    for raw in (proc.stdout or "").split():
+        try:
+            pid = int(raw)
+        except ValueError:
+            continue
+        if pid <= 0 or pid == me:
+            continue
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+        killed += 1
+    return killed
 
 
 def _kill_sentinel(cfg: dict) -> None:
