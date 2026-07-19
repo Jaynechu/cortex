@@ -92,10 +92,6 @@ wake_bell_template = "☀️ {hm}"
 # Pending-receipt time-to-live (minutes): the consumer ignores an older receipt
 # and the producer overwrites it on each new bell. Match marrow receipt_ttl_min.
 receipt_ttl_min = 15
-# LEGACY (transition only): the old inline marker + rearm suffix. New bells no
-# longer render these; kept so a straggler '[CORTEX-WAKE] HH:MM {g..}' line still
-# parses on the consumer side.
-wake_signal_marker = "[CORTEX-WAKE]"
 rearm_suffix = " (ear died — rearm)"
 # say() = the ONLY place cortex takes focus: it fronts the resident window and
 # plays a system sound (name of a /System/Library/Sounds/*.aiff; "" = silent).
@@ -112,8 +108,8 @@ sentinel = true             # arm cortex.sentinel (one-shot exact-time wake) at 
 # "⏳ [NEW ROUND]" is the machine-line marker. {mins}/{user} optional.
 tuck_in_text = "⏳ [NEW ROUND]"
 # Markers identifying a NON-user turn (so they don't reset the silence timer and
-# downstream memory drops them). wake_signal_marker is added automatically.
-# Substring match: "[CMD" catches every ⚙️ [CMD ct-*] slash-command body.
+# downstream memory drops them). The bell prefix (wake_bell_template) is added
+# automatically. Substring match: "[CMD" catches every ⚙️ [CMD ct-*] slash-command body.
 machine_line_markers = ["[TUCK-IN]", "[NEW ROUND]", "[NIGHT]", "[FUSE]", "[CTL]", "[CMD"]
 wait_expiry_note = true      # every free-round tuck-in (silence-gate or wait(N)-expiry) appends a freshly rendered wakeup note (diff mode: only events since the last rendered note this wake)
 # Covert-delivery markers written to wake_signal.log (bell via ear Monitor; typed only if the

@@ -69,10 +69,6 @@ _DEFAULTS: dict[str, Any] = {
         # Receipt time-to-live (minutes): the consumer ignores a pending receipt
         # older than this, and the producer overwrites it on every new bell.
         "receipt_ttl_min": 15,
-        # LEGACY (transition only): the old inline marker + rearm suffix. Kept so
-        # a straggler '[CORTEX-WAKE] HH:MM {g..}' line still parses. New bells no
-        # longer render these — the receipt carries all machine data.
-        "wake_signal_marker": "[CORTEX-WAKE]",
         "rearm_suffix": " (ear died — rearm)",
         "say_sound": "Glass",
         # wait() clamp bounds (minutes). Own bounds, decoupled from the floor
@@ -96,8 +92,8 @@ _DEFAULTS: dict[str, Any] = {
         "tuck_in_text": "⏳ [NEW ROUND]",
         # Markers that identify a NON-user turn (wake bell / free-round / night /
         # fuse / ctl / slash-command line), so they never reset the silence timer
-        # and downstream memory drops them. wake_signal_marker is added
-        # automatically. Substring match, so "[CMD" catches every ⚙️ [CMD ct-*].
+        # and downstream memory drops them. The bell prefix (lineage_marker) is
+        # added automatically. Substring match, so "[CMD" catches every ⚙️ [CMD ct-*].
         "machine_line_markers": list(DEFAULT_MACHINE_LINE_MARKERS),
         # When a declared wait(N) expires, append a freshly rendered wakeup note
         # to the free-round marker (note content only, no behavioural nudge).

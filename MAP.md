@@ -47,7 +47,7 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
 - Alive → append bell → _signal_landed polls mtime 3s up to ear_timeout 90s.
 - _ear_miss_ladder (alive): type_wake_signal rearm → poll → land=ear; claude dead → _resume_or_fresh_dead; rearmed-unconfirmed → set_awake anyway.
 - Respawn failure (WindowError) = SOLE alert point → _alert_respawn_failed → marrow alerts row (audit_log fallback).
-- Signal line = BELL ONLY: append_wake_signal writes `<wake_signal_marker '[CORTEX-WAKE]'> HH:MM`; marrow UserPromptSubmit hook detects marker → injects full note. type_wake_signal adds rearm_suffix.
+- Signal line = BELL ONLY: append_wake_signal writes `wake_bell_template` human text (e.g. '☀️ HH:MM'), machine data (gen/state_id/rearm) goes to wake_state receipt sidecar; marrow UserPromptSubmit hook matches bell line against receipt → injects full note. type_wake_signal adds rearm_suffix.
 - _spawn_wake P0 timing: record NEW transcript only after _wait_new_transcript (~8s poll for jsonl newer than pre-spawn or mtime≥spawn_ts); timeout → record None never stale (stale drove endless respawn loop).
 - None hint + alive + no flag → ear.
 - Headless fallback: window path None → call_marrow_cortex (marrow venv, inner marrow.call_timeout_s 600s, outer +30s); bad rc/JSON tail → WakeError (wake.py:71-99,349-350).

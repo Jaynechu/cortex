@@ -81,8 +81,8 @@ _LINEAGE_MARKER_PREFIX_CHARS = 24
 
 def newest_window_lineage(cfg: dict, marker: str) -> Path | None:
     """The newest session jsonl in the transcript dir whose FIRST user message
-    carries the wake signal marker (config wake.wake_signal_marker, e.g.
-    '[CORTEX-WAKE]') within its first _LINEAGE_MARKER_PREFIX_CHARS chars — i.e.
+    carries the wake bell prefix marker (config wake.wake_bell_template prefix,
+    e.g. '☀️') within its first _LINEAGE_MARKER_PREFIX_CHARS chars — i.e.
     a genuine window-lineage session (every cortex window since dccb3d4 is
     launched with the marker baked into its first prompt), not a headless
     one-shot (marrow's sessionend digest also runs `claude -p` against this
@@ -145,11 +145,9 @@ def resident_transcript(cfg: dict) -> Path | None:
 
 def lineage_marker(cfg: dict) -> str:
     """Marker leading a genuine cortex window's first prompt = the visible bell
-    template prefix (e.g. '☀️'; window.fresh_initial_prompt). Falls back to the
-    legacy wake_signal_marker only when the template prefix is blank."""
+    template prefix (e.g. '☀️'; window.fresh_initial_prompt)."""
     wcfg = cfg.get("wake", {})
-    prefix = str(wcfg.get("wake_bell_template") or "☀️ {hm}").split("{hm}", 1)[0].strip()
-    return prefix or str(wcfg.get("wake_signal_marker") or "").strip()
+    return str(wcfg.get("wake_bell_template") or "☀️ {hm}").split("{hm}", 1)[0].strip()
 
 
 # Leading decoration tolerated before a machine marker: whitespace + at most a
@@ -163,7 +161,7 @@ _MARKER_LEAD_RE = re.compile(
 
 def _line_starts_with_marker(text: str, markers: list[str]) -> bool:
     """True iff ANY line of *text* begins with a machine marker after a tolerated
-    leading decoration run. Machine writes (wake bell '<emoji> [CORTEX-WAKE] …',
+    leading decoration run. Machine writes (wake bell '☀️ HH:MM',
     tuck-in block whose final line is '⏳ [NEW ROUND] …') always line-start their
     marker; a real user message merely quoting one mid-sentence never matches, so
     it still resets the silence timer (zero false positives on real speech)."""
@@ -184,11 +182,10 @@ def _line_markers(cfg: dict) -> list[str]:
     is_machine_line (cortex_bridge.py): wake marker + tuck-in marker family."""
     wcfg = cfg.get("wake", {})
     out = []
-    # Visible bell prefix (e.g. '☀️') leads every wake bell down the ear now; the
-    # legacy marker is kept for straggler '[CORTEX-WAKE] …' lines in transition.
-    for m in (lineage_marker(cfg), str(wcfg.get("wake_signal_marker") or "").strip()):
-        if m and m not in out:
-            out.append(m)
+    # Visible bell prefix (e.g. '☀️') leads every wake bell down the ear.
+    m = lineage_marker(cfg)
+    if m:
+        out.append(m)
     for m in wcfg.get("machine_line_markers") or config.DEFAULT_MACHINE_LINE_MARKERS:
         m = str(m).strip()
         if m and m not in out:

@@ -331,10 +331,8 @@ def claude_session_id(cfg: dict) -> str | None:
     from cortex import transcript as _transcript
 
     # Window-lineage marker = the visible bell template prefix (e.g. '☀️'): every
-    # window's first prompt now leads with it (fresh_initial_prompt). Falls back
-    # to the legacy marker only when the prefix is blank.
-    marker = bell_template_prefix(cfg).strip() or cfg.get(
-        "wake", {}).get("wake_signal_marker", "[CORTEX-WAKE]")
+    # window's first prompt now leads with it (fresh_initial_prompt).
+    marker = bell_template_prefix(cfg).strip()
     lineage = _transcript.newest_window_lineage(cfg, marker)
     if lineage is not None:
         return lineage.stem
