@@ -312,8 +312,57 @@ def _sigterm(pid) -> None:
 
 
 def _own_ear_tail_alive(cfg: dict) -> bool:
-    """True if a live wake_signal ear tail exists (the rotate precondition)."""
-    return bool(_ear_tail_pids(cfg))
+    """True if a live wake_signal ear tail whose process ancestry chains back to
+    THIS resident's claude process is still alive (the rotate precondition).
+    Every tail on the box shares the same signal-log path (_ear_tail_pids has no
+    per-window identity of its own), so ownership is established separately via
+    ps ppid-walk to the registered resident's claude pid (window.find_claude_pid)
+    — an orphan predecessor tail (parent died, reparented to launchd/init) or a
+    foreign window's tail must NEVER block rotate; only the residue sweep
+    (_kill_ear_tails) touches those."""
+    pids = _ear_tail_pids(cfg)
+    if not pids:
+        return False
+    from cortex import window
+    resident_pid = window.find_claude_pid(cfg)
+    if resident_pid is None:
+        return False  # no verified resident pid -> never block on an unowned tail
+    return any(_chains_to_ancestor(pid, resident_pid) for pid in pids)
+
+
+_PPID_WALK_MAX_DEPTH = 20  # bounded: never loop forever on a corrupt ps chain
+
+
+def _ppid_of(pid: int) -> int | None:
+    try:
+        proc = subprocess.run(
+            ["ps", "-o", "ppid=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    if proc.returncode != 0:
+        return None
+    out = (proc.stdout or "").strip()
+    try:
+        return int(out)
+    except ValueError:
+        return None
+
+
+def _chains_to_ancestor(pid: int, ancestor_pid: int) -> bool:
+    """True if `ancestor_pid` appears in `pid`'s parent chain (ps -o ppid= walk).
+    Stops at pid 1/0 (launchd/init) or a broken/missing link -> not owned.
+    Bounded depth so a corrupt chain can never spin forever."""
+    current = pid
+    for _ in range(_PPID_WALK_MAX_DEPTH):
+        if current == ancestor_pid:
+            return True
+        parent = _ppid_of(current)
+        if parent is None or parent <= 1:
+            return False
+        current = parent
+    return False
 
 
 def _rotate_refuse_text(cfg: dict) -> str:
