@@ -271,10 +271,9 @@ def main() -> int:
             return 0
 
         now = integration._now(cfg)
-        # Asleep-branch night backstop (two-stage): Stage 1 rings a wake bell so
-        # cortex runs its own night package; Stage 2 (bell already fired, still
-        # asleep + flag unset) hard-sets flag+rotate. A Stage-1 bell spawns its
-        # own wake tick, so short-circuit here to avoid opening a second window.
+        # Asleep-branch night bell: ring once so cortex runs its own night
+        # package; no forced teardown ever. The bell spawns its own wake tick,
+        # so short-circuit here to avoid opening a second window.
         nc, nc_short = _night_self_check(cfg, now)
         if nc is not None:
             print(f"{db.utcnow_iso()} {nc}", flush=True)
