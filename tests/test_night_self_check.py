@@ -1,10 +1,11 @@
-"""P14 Fix 2 — pacemaker night two-stage bell-ringer.
+"""P17 night: pacemaker night bell-ringer — two facts only (all-channel silence
++ the bell), NO forced teardown.
 
-Stage 1: in-window + all-channel-silent + asleep + no in-flight turn + not yet
-kicked -> mark night_kick once + send the night_due wake bell (short-circuit).
-Stage 2: bell already fired, flag still unset, still asleep -> hard fallback sets
-night flag + rotate marker atomically. Awake / in-flight / outside window / not
-silent enough / already-set -> no action.
+In-window + all-channel-silent + asleep + no in-flight turn + not yet kicked ->
+mark night_kick once + send the night_due wake bell (short-circuit). Bell already
+fired / awake / in-flight / outside window / not silent enough / already-set ->
+no action. There is no Stage-2 hard fallback: if the window never acts on the
+bell, nothing forces it (dead window handled at next due by ghost-handoff).
 """
 from __future__ import annotations
 
@@ -36,7 +37,7 @@ def _at(cfg, hh, mm=0):
 
 
 def _silent(monkeypatch, minutes):
-    monkeypatch.setattr(transcript, "user_silent_min", lambda cfg: minutes)
+    monkeypatch.setattr(transcript, "global_user_silent_min", lambda cfg: minutes)
 
 
 def _mtime_idle(monkeypatch, cfg, idle_min):
@@ -69,7 +70,7 @@ def test_in_night_window_wraps_midnight(cfg):
     assert pacemaker_tick._in_night_window(_at(cfg, 22), cfg) is True
 
 
-# --- Stage 1: bell ------------------------------------------------------------
+# --- the bell -----------------------------------------------------------------
 
 def test_stage1_sends_bell_once(cfg, monkeypatch):
     calls = _no_bell(monkeypatch)
@@ -89,26 +90,26 @@ def test_stage1_no_duplicate_bell(cfg, monkeypatch):
     calls = _no_bell(monkeypatch)
     _silent(monkeypatch, 120)
     _mtime_idle(monkeypatch, cfg, 30)
-    pacemaker_tick._night_self_check(cfg, _at(cfg, 23))   # Stage 1
+    pacemaker_tick._night_self_check(cfg, _at(cfg, 23))   # bell
     assert len(calls) == 1
-    # second tick: marker set + flag still unset -> Stage 2, no more bell
+    # second tick: marker set -> early return, no bell, no forced teardown
     msg, short = pacemaker_tick._night_self_check(cfg, _at(cfg, 23, 30))
     assert short is False
     assert len(calls) == 1                                # bell not re-sent
 
 
-# --- Stage 2: hard fallback ---------------------------------------------------
-
-def test_stage2_fallback_sets_flag_and_rotate(cfg, monkeypatch):
+def test_bell_fired_never_forces_teardown(cfg, monkeypatch):
+    """After the bell, a later still-asleep tick must NOT set the night flag or
+    rotate marker — the Stage-2 hard fallback is deleted (P17)."""
     _no_bell(monkeypatch)
     _silent(monkeypatch, 120)
     _mtime_idle(monkeypatch, cfg, 30)
-    pacemaker_tick._night_self_check(cfg, _at(cfg, 23))       # Stage 1 (bell)
-    msg, short = pacemaker_tick._night_self_check(cfg, _at(cfg, 0, 30))  # Stage 2
-    assert short is False and msg is not None and "fallback" in msg
+    pacemaker_tick._night_self_check(cfg, _at(cfg, 23))           # bell
+    msg, short = pacemaker_tick._night_self_check(cfg, _at(cfg, 0, 30))
+    assert (msg, short) == (None, False)
     d = wake_state.load(cfg)
-    assert d.get("mode") == "night"
-    assert d.get("rotated") is True
+    assert d.get("mode") is None
+    assert d.get("rotated") is None
 
 
 # --- no-action matrix ---------------------------------------------------------
@@ -195,25 +196,22 @@ def test_try_mark_night_kick_noop_when_flag_set(cfg):
     assert wake_state.try_mark_night_kick(cfg) is False
 
 
-def test_try_set_night_fallback_sets_flag_and_rotate(cfg):
-    assert wake_state.try_set_night_fallback(cfg) is True
-    d = wake_state.load(cfg)
-    assert d.get("mode") == "night" and d.get("rotated") is True
-
-
-def test_try_set_night_fallback_noop_when_awake(cfg):
-    wake_state.set_awake(cfg, 1, None)
-    assert wake_state.try_set_night_fallback(cfg) is False
-    assert wake_state.is_night_mode(cfg) is False
-
-
-def test_try_set_night_fallback_noop_when_already_set(cfg):
-    wake_state.update(cfg, mode="night")
-    assert wake_state.try_set_night_fallback(cfg) is False
-
-
 def test_clear_night_mode_clears_kick_marker(cfg):
     wake_state.update(cfg, mode="night", night_kick=True)
     assert wake_state.clear_night_mode(cfg) is True
     d = wake_state.load(cfg)
     assert d.get("mode") is None and d.get("night_kick") is None
+
+
+# --- regression: the hard fallback is fully gone ------------------------------
+
+def test_no_night_fallback_symbols_in_source():
+    """The Stage-2 hard fallback (night_auto_fallback / try_set_night_fallback)
+    is deleted repo-wide: no forged rotate marker can ever be set by the night
+    self-check again (P17)."""
+    import pathlib
+    src = pathlib.Path(pacemaker_tick.__file__).resolve().parent
+    for p in src.rglob("*.py"):
+        text = p.read_text(encoding="utf-8")
+        assert "night_auto_fallback" not in text, p
+        assert "try_set_night_fallback" not in text, p

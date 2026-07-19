@@ -298,10 +298,76 @@ def _scan_last_user_ts(chunk: bytes, markers: list[str]) -> float | None:
 def user_silent_min(cfg: dict) -> float | None:
     """Minutes since the last real user message (`last_user_message_mtime`), or
     None when it cannot be determined. The single silence source shared by the
-    watchdog poll and the tick awake gate."""
+    watchdog poll and the tick awake gate. WINDOW-LOCAL: reads only the resident
+    cortex transcript. For all-channel silence (night self-check) use
+    `global_user_silent_min`."""
     import time
     ts = last_user_message_mtime(cfg)
     return (time.time() - ts) / 60.0 if ts is not None else None
+
+
+def _marrow_db_last_user_ts(cfg: dict) -> float | None:
+    """Epoch seconds of the LAST user message across ALL channels (cli/tg/wx/ct),
+    read from marrow's events table READ-ONLY. Machine/injected lines are already
+    excluded at marrow's ingestion (transcript.rows_from_records drops harness +
+    machine-marker rows), so `role='user'` is a genuine user turn on every
+    channel. `timestamp` is ISO-8601 UTC (e.g. '2026-07-19T16:18:35.959Z').
+
+    Returns None on ANY failure — missing db file, locked, schema mismatch, no
+    user rows, or an unparseable timestamp. None is the caller's "unknown" and
+    must NEVER be silently substituted by a window-local source (that reintroduces
+    the window-only-silence bug)."""
+    import sqlite3
+    from datetime import datetime
+
+    db_path = config.marrow_db_path(cfg)
+    if not db_path.exists():
+        return None
+    uri = f"file:{db_path}?mode=ro"
+    try:
+        conn = sqlite3.connect(uri, uri=True, timeout=1.0)
+    except sqlite3.Error:
+        return None
+    try:
+        row = conn.execute(
+            "SELECT timestamp FROM events WHERE role='user' "
+            "ORDER BY timestamp DESC LIMIT 1"
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+    if not row or not row[0]:
+        return None
+    raw = str(row[0]).replace("Z", "+00:00")
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        from datetime import timezone
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
+def global_user_silent_min(cfg: dict) -> float | None:
+    """Minutes since the last user message across ALL channels (marrow db) — the
+    silence source for the night self-check. The user active on cli/tg/wx all
+    night must not be judged silent just because THIS cortex window's own
+    transcript is quiet.
+
+    result = minutes since max(marrow-db last user ts, resident-transcript last
+    user ts). The transcript term can only SHORTEN silence, never substitute for
+    the db: if the marrow-db query fails (missing / locked / schema mismatch /
+    no rows / bad ts) return None so the caller holds — NEVER fall back to
+    transcript-only (that silently reintroduces the window-only-silence bug)."""
+    import time
+    db_ts = _marrow_db_last_user_ts(cfg)
+    if db_ts is None:
+        return None
+    tx_ts = last_user_message_mtime(cfg)
+    latest = db_ts if tx_ts is None else max(db_ts, tx_ts)
+    return (time.time() - latest) / 60.0
 
 
 def window_tokens(cfg: dict) -> int:

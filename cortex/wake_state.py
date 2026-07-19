@@ -625,27 +625,6 @@ def try_set_night_mode_auto(cfg: dict) -> bool:
         return False
 
 
-def try_set_night_fallback(cfg: dict) -> bool:
-    """Stage-2 hard fallback: cortex never woke to run its own night package, so
-    pair the night flag WITH the rotate marker in ONE strict-lock hold (checking
-    awake==false + flag unset), so the next wake respawns a fresh light window
-    even without a handoff. Returns True when it set flag+rotate, False on no-op
-    (awake / already set) or fail-closed lock/parse failure. This is the only
-    flag-only path and it always couples flag with rotate."""
-    try:
-        with _strict_flock(cfg):
-            d = _load_strict(cfg)
-            _ensure_epoch(d)
-            if d.get("awake") or str(d.get("mode") or "") == "night":
-                return False
-            d["mode"] = "night"
-            d["rotated"] = True
-            _save(cfg, d)
-            return True
-    except StateValidationError:
-        return False
-
-
 def set_retired_sid(cfg: dict, transcript_path: str | None) -> None:
     """Durably record the claude session UUID (the transcript jsonl stem, same
     convention as window.claude_session_id) that was just retired by a
