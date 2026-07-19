@@ -2,8 +2,8 @@
 ledger paths the pacemaker uses, so a human can drive the resident window by
 hand without racing the tick.
 
-  wake            immediate wake via the standard run_wake pipeline (alive
-                  resident -> ear signal; dead -> rotated?fresh:resume)
+  wake            remote control: alive+awake -> on-duty text; alive+dormant ->
+                  ear-signal wake now; dead -> report, never spawn
   sleep           awake resident -> inject a lie_down instruction; else
                   (dead, or alive-but-dormant) set the ledger directly
   pause           DND: hold tick reconcile / watchdog reaps / injections
@@ -18,140 +18,68 @@ import sys
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from cortex import config, db, transcript, wake_state, window
-from cortex.pacemaker import integration
+from cortex import config, db, wake_state, window
 
 
 def _now(cfg: dict) -> datetime:
     return datetime.now(ZoneInfo(cfg["core"]["timezone"]))
 
 
-def cmd_wake(cfg: dict, force: bool = False) -> str:
-    """In-window take-office (P17): /ct-wake runs INSIDE the target window (a
-    manually opened cortex window). It never spawns/resumes/hunts — the pacemaker
-    owns spawning.
+def cmd_wake(cfg: dict) -> str:
+    """/ct-wake remote control: the caller window is an ordinary remote and NEVER
+    takes office. Three-way on the recorded resident (wake_state.resident_alive,
+    the ONE liveness signal — recorded claude pid alive via kill -0):
 
-    Registration (stage-then-promote, P17 gap fix): marrow's caller-side
-    PreToolUse hook has already STAGED the calling window's own claude sid as
-    wake_state's pending_claim before this runs (marrow, not cortex, has
-    reliable access to the caller's sid). This function is the sole
-    promoter/discarder — a refused wake discards the staged claim WITHOUT ever
-    touching cortex_claude_sid, so the true resident's registration and
-    is_cortex_session identity stay fully intact. No pending_claim staged
-    (e.g. ctl wake invoked outside a claude window, or the hook missed) ->
-    promote is a no-op either way; take-office still proceeds on the existing
-    liveness semantics below, registration simply stays whatever it already was.
+      alive + awake   -> on-duty text, ZERO side effects.
+      alive + dormant -> send a wake signal NOW (reuse the pacemaker fire path:
+          a forced ctl decision through run_wake -> the resident's ear signal,
+          exactly "the alarm firing early"). No spawn, no take-office here.
+      dead            -> report death + a diagnostics hint; DO NOT spawn (spawn
+          authority stays exclusively with the pacemaker schedule/reconcile).
 
-    Resident-first (P18 ONE signal): the grant gate is wake_state.resident_alive
-    — the RECORDED resident claude pid alive (kill -0) AND not in this ctl
-    process's chain. No live-scan (find_claude_pid retired from decisions),
-    `rotated`/`retired_sid` are NOT the gate.
-
-      live foreign resident (recorded pid alive, not this ctl's chain) -> refuse
-          with the P17 signed refusal text, zero side effects (registration
-          untouched, staged claim discarded). No spawn, no office change.
-      self re-wake (recorded pid alive + in this ctl's chain) or no live resident
-          -> take office; claim_office records THIS window's own claude pid+sid.
-      --force -> skip the refuse verdict, still route through claim_office
-          (audited via=force).
-      died_no_handoff fires only when the dead resident did NOT cleanly retire.
+    Manual take-office is abolished: env vars are birth-time-only, so a running
+    claude can never be retro-fitted into a full cortex. The ONLY registration
+    credential is the pacemaker spawn handshake (start_registration_handshake +
+    marrow's claim on the fresh window's first prompt); this function never
+    writes cortex_claude_sid.
     """
-    import os
-    from cortex.lie_down import _kill_sentinel
+    if not wake_state.resident_alive(cfg):
+        return _dead_text(cfg)
+    if wake_state.is_awake(cfg):
+        return str(cfg["wake"].get("ctl_wake_awake_text") or "").strip()
+    # A human explicitly waking wants activity back — leave DND (ct-pause
+    # documents /ct-wake as its exit).
+    wake_state.set_paused(cfg, False)
+    _signal_dormant_wake(cfg)
+    return str(cfg["wake"].get("ctl_wake_signal_text") or "").strip()
 
-    resident_here = window.claude_ancestor_pid(os.getpid())
-    if not force and wake_state.resident_alive(cfg):
-        wake_state.discard_pending_claim(cfg)
-        return str(cfg["wake"].get("ctl_wake_resident_text") or "").strip()
 
-    # "no live resident" = recorded pid absent or not alive (a self re-wake still
-    # has a live recorded pid, so it is NOT died_no_handoff).
-    rec_pid = wake_state.get_resident_pid(cfg)
-    no_live_resident = rec_pid is None or not wake_state._pid_alive(rec_pid)
-    died_no_handoff = no_live_resident and not _cleanly_retired(cfg)
+def _signal_dormant_wake(cfg: dict) -> None:
+    """Fire a wake NOW at a live-but-dormant resident by reusing the pacemaker
+    fire path: a forced ctl decision through wake.run_wake, which routes to the
+    resident's signal-file ear (respawn=False) — the same injection the sentinel
+    tick would perform, no new mechanism. Best-effort: a window failure falls
+    back to headless inside run_wake, and any error never wedges the caller."""
+    from cortex import wake
 
-    # Take office. set_awake BUMPS gen and clears next_wake_at atomically, so any
-    # sentinel/tick armed for the old due finds its token stale and no-ops
-    # (sentinel fire-time epoch check) — the alarm is cancelled atomically vs the
-    # tick. _kill_sentinel is best-effort cleanup on top of that guard.
     conn = db.connect(cfg)
     try:
         now = _now(cfg)
-        tpath = transcript.newest(cfg)
-        wid = _record_wake_row(conn, now)
-        wake_state.take_rotated(cfg)  # consume the one-shot flag if set
-        wake_state.set_awake(cfg, wid, str(tpath) if tpath else None)
-        # Record THIS window as the resident: promote the staged pending_claim
-        # (its own claude sid) + record this window's own claude pid, all through
-        # the ONE write path (claim_office). No pending_claim staged -> fall back
-        # to registering by this window's transcript sid.
-        via = "force" if force else "ctl-wake"
-        promoted = wake_state.promote_pending_claim(
-            cfg, resident_here, via=via, force=force)
-        if not promoted:
-            sid = _tpath_sid(tpath)
-            if sid:
-                wake_state.claim_office(cfg, sid, via, resident_here, force=force)
-        _kill_sentinel(cfg)
-        # A human explicitly waking wants activity back — leave DND (ct-pause
-        # documents /ct-wake as its exit).
-        wake_state.set_paused(cfg, False)
-        if died_no_handoff:
-            _ghost_handoff_hint(conn, cfg, now)
-        return _arm_line(cfg)
+        decision = {"wake": True, "reasons": [], "gated_by": [],
+                    "wake_reasons": "ctl",
+                    "explanation": f"{now.strftime('%H:%M')} ctl remote wake"}
+        try:
+            wake.run_wake(conn, cfg, decision, now=now)
+        except Exception:  # noqa: BLE001 — a signal failure must not wedge ctl
+            pass
     finally:
         conn.close()
 
 
-def _tpath_sid(tpath) -> str | None:
-    from pathlib import Path
-    return Path(str(tpath)).stem if tpath else None
-
-
-def _cleanly_retired(cfg: dict) -> bool:
-    """True iff the dead resident properly rotated before it died — either the
-    one-shot `rotated` flag is still pending (set at rotate time, not yet
-    consumed by a pacemaker wake), or the dead resident's OWN transcript sid
-    matches the durable `retired_sid` marker (that exact session was the one a
-    prior lie_down(rotate=True) retired). `retired_sid` alone (without the sid
-    match) is NEVER sufficient — it is sticky forever once any rotate has ever
-    happened on this machine, so a bare presence check would treat every crash
-    after the first-ever rotate as a clean retirement (the P0 bug)."""
-    st = wake_state.load(cfg)
-    if bool(st.get("rotated")):
-        return True
-    from pathlib import Path
-    transcript_path = st.get("transcript")
-    sid = Path(str(transcript_path)).stem if transcript_path else None
-    retired_sid = wake_state.get_retired_sid(cfg)
-    return bool(sid) and sid == retired_sid
-
-
-def _record_wake_row(conn, now: datetime) -> int | None:
-    """Log this take-office as an activation wake row so the note's Last-wake
-    segment counts it. Best-effort."""
-    try:
-        return integration.log_activation_wake_row(conn, now, "ctl-wake")
-    except Exception:  # noqa: BLE001
-        return None
-
-
-def _ghost_handoff_hint(conn, cfg: dict, now: datetime) -> None:
-    """Dead prev window left no handoff: write a fresh note carrying the existing
-    died_no_handoff catchup line so this window ghost-writes the handoff. Reuses
-    the note/window plumbing — no new mechanism. Best-effort."""
-    try:
-        from cortex.wake import assemble_note
-        note_text = assemble_note(conn, cfg, now, died_no_handoff=True)
-        window.write_note(cfg, note_text)
-    except Exception:  # noqa: BLE001
-        pass
-
-
-def _arm_line(cfg: dict) -> str:
-    tmpl = str(cfg["wake"].get("ctl_wake_arm_text") or "").strip()
-    signal_log = str(config.wake_signal_log_path(cfg))
-    return tmpl.replace("{signal_log}", signal_log)
+def _dead_text(cfg: dict) -> str:
+    tmpl = str(cfg["wake"].get("ctl_wake_dead_text") or "").strip()
+    backup_hint = str(config.wake_audit_log_path(cfg))
+    return tmpl.replace("{backup_hint}", backup_hint)
 
 
 def _resolve_minutes(cfg: dict, until: str | None, minutes: float | None) -> float:
@@ -209,9 +137,7 @@ def cmd_resume(cfg: dict) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="cortex.ctl", description="Manual cortex control")
     sub = parser.add_subparsers(dest="cmd", required=True)
-    wp = sub.add_parser("wake", help="take office in this window (refuse if a live resident holds it)")
-    wp.add_argument("--force", action="store_true",
-                    help="override: take office even if a live resident holds it (audited)")
+    sub.add_parser("wake", help="remote wake: signal the dormant resident, or report on-duty/dead")
     sp = sub.add_parser("sleep", help="lie the live window down, or set the ledger")
     sp.add_argument("--until", default=None, help="wake at HH:MM (local)")
     sp.add_argument("--min", dest="minutes", type=float, default=None,
@@ -223,7 +149,7 @@ def main(argv: list[str] | None = None) -> int:
 
     cfg = config.load()
     if args.cmd == "wake":
-        line = cmd_wake(cfg, force=getattr(args, "force", False))
+        line = cmd_wake(cfg)
     elif args.cmd == "sleep":
         line = cmd_sleep(cfg, args.until, args.minutes, args.rotate)
     elif args.cmd == "pause":

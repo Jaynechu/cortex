@@ -113,16 +113,19 @@ _DEFAULTS: dict[str, Any] = {
         "rotate_refuse_text":
             "Rotate refused: your wake-signal monitor is still running. "
             "TaskStop it first, then call lie_down(rotate=true) again.",
-        # /ct-wake take-office arm instruction (one line, printed by cmd_wake on
-        # a granted take-office). {signal_log} = resolved wake-signal path. The
-        # window arms a Monitor tailing it, then starts the round.
-        "ctl_wake_arm_text":
-            "take-office granted — arm a Monitor tailing {signal_log} "
-            "(tail -n 0 -f {signal_log}), then start the round.",
-        # /ct-wake refusal when a resident window is still alive and un-rotated.
-        "ctl_wake_resident_text":
-            "resident still on duty — /ct-clear there first (or close it, "
-            "then wake).",
+        # /ct-wake remote-control one-line outputs (printed by cmd_wake). The
+        # caller window is an ordinary remote; it never takes office.
+        # resident alive + awake -> already on duty, nothing done.
+        "ctl_wake_awake_text":
+            "resident on duty — nothing to do.",
+        # resident alive + dormant -> a wake signal was sent, it wakes in place.
+        "ctl_wake_signal_text":
+            "wake signal sent — resident waking in place.",
+        # resident dead -> report death, do NOT spawn (pacemaker owns spawning).
+        # {backup_hint} = resolved backup/diagnostic path.
+        "ctl_wake_dead_text":
+            "resident is dead — pacemaker will respawn on schedule/reconcile; "
+            "no window opened here. Diagnostics: {backup_hint}",
     },
     # marrow repo invocation for the wake call (separate venv/deps, C3).
     "marrow": {
