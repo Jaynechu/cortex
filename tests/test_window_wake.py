@@ -1102,278 +1102,11 @@ def test_lie_down_clamps_next_wake_min_to_floor(cfg):
         expected, (_dt.now(tz) + timedelta(minutes=22)).strftime("%H:%M"))
 
 
-# --- resume vs fresh (item 6) -------------------------------------------------
-
-def _write_marker_jsonl(tdir, stem: str, marker: str = "[CORTEX-WAKE]") -> None:
-    """A minimal session jsonl whose first user message is the baked window
-    wake prompt ('<emoji> <marker> HH:MM') — a genuine window-lineage session."""
-    line = json.dumps({"message": {"role": "user", "content": f"☀️ {marker} 01:00"}})
-    (tdir / f"{stem}.jsonl").write_text(line + "\n")
-
-
-def _write_digest_jsonl(tdir, stem: str, marker: str = "[CORTEX-WAKE]") -> None:
-    """A minimal session jsonl shaped like marrow's sessionend digest: a
-    headless `claude -p` run whose first user message is a large archived
-    blob that QUOTES the marker deep inside it (not near its start) — must be
-    rejected as a window-lineage candidate despite containing the substring."""
-    blob = ("===== BEGIN ORIGINAL TRANSCRIPT (archived data) =====\n"
-            f"some prior window said {marker} somewhere in here\n"
-            "===== END =====")
-    line = json.dumps({"message": {"role": "user", "content": blob}})
-    (tdir / f"{stem}.jsonl").write_text(line + "\n")
-
-
-def test_claude_session_id_from_recorded_hint_when_no_transcript_file(cfg):
-    """No transcript file exists at all (e.g. a wiped/relocated transcript
-    dir) -> claude_session_id falls back to the recorded hint. None when
-    neither exists."""
-    from cortex import window
-
-    assert window.claude_session_id(cfg) is None
-    wake_state.update(cfg, transcript="/x/projects/cwd/abc-123.jsonl")
-    assert window.claude_session_id(cfg) == "abc-123"
-
-
-def test_claude_session_id_prefers_newest_over_stale_recorded_hint(cfg):
-    """Live-confirmed regression: the recorded hint can be STALE-BUT-PRESENT
-    (a leftover from a previous cycle, never cleared) rather than just None.
-    In the died-window/no-rotate-flag scenario the newest window-lineage
-    session jsonl is ALWAYS the dead session's own archive — nothing writes to
-    the dir after it dies — so it must win over any recorded hint, stale or
-    not, whenever a marker-bearing transcript file exists."""
-    from cortex import window
-
-    wake_state.update(cfg, transcript="/x/projects/cwd/stale-hint-uuid.jsonl")
-    tdir = transcript.transcript_dir(cfg)
-    tdir.mkdir(parents=True, exist_ok=True)
-    _write_marker_jsonl(tdir, "dead-session-uuid")
-
-    assert window.claude_session_id(cfg) == "dead-session-uuid"  # newest wins
-
-
-def test_claude_session_id_falls_back_to_newest_transcript_when_hint_none(cfg):
-    """The recorded hint is a best-effort ~8s poll after spawn; the claude TUI
-    can take 30s+ to create its session jsonl in real timing, so the hint is
-    routinely None. When that happens, claude_session_id must resolve the
-    NEWEST window-lineage session jsonl in the transcript dir — in the
-    died-window scenario that IS the dead session's own archive."""
-    from cortex import window
-
-    tdir = transcript.transcript_dir(cfg)
-    tdir.mkdir(parents=True, exist_ok=True)
-    _write_marker_jsonl(tdir, "dead-session-uuid")
-
-    assert wake_state.load(cfg).get("transcript") is None  # no recorded hint
-    assert window.claude_session_id(cfg) == "dead-session-uuid"
-
-
-def test_claude_session_id_none_when_no_hint_and_no_transcript(cfg):
-    """No recorded hint and no transcript file at all -> None (existing fresh
-    fallback), never a fabricated UUID."""
-    from cortex import window
-
-    assert window.claude_session_id(cfg) is None
-
-
-def test_claude_session_id_skips_headless_digest_picks_older_marker_session(cfg):
-    """Third-layer live regression: the transcript dir also holds HEADLESS
-    session jsonls (marrow's sessionend digest spawns `claude -p` against the
-    same cwd -> same projects dir). A digest archive can be the mtime-newest
-    file yet is not a window-lineage session -> must be skipped in favour of
-    an OLDER marker-bearing (real window) session, never resumed onto the
-    live window."""
-    from cortex import window
-
-    tdir = transcript.transcript_dir(cfg)
-    tdir.mkdir(parents=True, exist_ok=True)
-    _write_marker_jsonl(tdir, "real-window-session")
-    import time as _time
-    _time.sleep(0.02)
-    _write_digest_jsonl(tdir, "digest-session")  # newer mtime, but headless
-
-    assert window.claude_session_id(cfg) == "real-window-session"
-
-
-def test_claude_session_id_none_when_only_digest_jsonls_present(cfg):
-    """Only digest/headless jsonls in the dir (no marker-bearing candidate at
-    all) -> falls through to the recorded hint, then None — never resumes a
-    headless archive."""
-    from cortex import window
-
-    tdir = transcript.transcript_dir(cfg)
-    tdir.mkdir(parents=True, exist_ok=True)
-    _write_digest_jsonl(tdir, "digest-only")
-
-    assert window.claude_session_id(cfg) is None
-    wake_state.update(cfg, transcript="/x/projects/cwd/hint-uuid.jsonl")
-    assert window.claude_session_id(cfg) == "hint-uuid"  # hint fallback still works
-
-
-def test_launch_command_resume_variant(cfg):
-    """launch_command bakes `--resume <sid>` when resume_sid is given."""
-    from cortex import window
-
-    cmd = window.launch_command(cfg, "☀️", resume_sid="abc-123")
-    assert "--resume 'abc-123'" in cmd
-    assert cmd.rstrip().endswith("'☀️'")
-    plain = window.launch_command(cfg, "☀️")
-    assert "--resume" not in plain
-
-
-def test_window_wake_dead_resumes_when_sid_present(cfg, monkeypatch):
-    """Item 6: a simply-dead resident (no rotate flag) with a recorded session
-    UUID and NO transcript file on disk (newest() unavailable) -> resume via
-    the recorded-hint fallback (respawn resume_sid set), no catchup line in
-    the note. The relaunch prompt is the SAME composed emoji+marker prompt as
-    a fresh spawn so the resumed window also gets its wake identity + note."""
-    from cortex import wake, watchdog, window
-
-    conn = db.connect(cfg)
-    conn.execute(
-        "INSERT INTO ct_wake_log (ts, wake, dry_run, explanation) VALUES (?,1,0,?)",
-        (db.utcnow_iso(), "resume"))
-    conn.commit()
-
-    wake_state.update(cfg, transcript="/x/projects/cwd/live-uuid.jsonl")
-    calls = {}
-    monkeypatch.setattr(wake, "_window_alive", lambda c: False)  # dead resident
-    monkeypatch.setattr(window, "respawn",
-                        lambda c, initial_prompt=None, resume_sid=None:
-                        (calls.__setitem__("resume_sid", resume_sid),
-                         calls.__setitem__("prompt", initial_prompt)))
-    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, prev, ts: "/t/new.jsonl")
-    monkeypatch.setattr(watchdog, "spawn", lambda c: None)
-
-    from datetime import datetime as _dt
-    now = _dt.now(timezone.utc)
-    res = wake._window_wake(conn, cfg, "N", now)
-    conn.close()
-    assert res["mode"] == "window"
-    assert calls["resume_sid"] == "live-uuid"   # same conversation resumed
-    # The resumed relaunch bakes the visible bell (human text) only; its
-    # registration-handshake token lives in the wake_state receipt.
-    assert calls["prompt"] == window.wake_signal_line(cfg, now)
-    assert re.search(r"\{g\d+:[0-9a-fA-F]+\}", calls["prompt"]) is None
-    r = wake_state.load(cfg)["wake_receipt"]
-    assert r["text"] == calls["prompt"] and isinstance(r["gen"], int)
-    note_text = wake_state.wakeup_note_path(cfg).read_text()
-    assert "died without a handoff" not in note_text  # resume -> no catchup
-
-
-def test_window_wake_dead_resumes_from_newest_jsonl_when_hint_none(cfg, monkeypatch):
-    """Real-timing regression: the recorded hint is None (the 8s spawn poll
-    timed out before the 30s+ transcript creation), but a session jsonl exists
-    in the transcript dir (the dead session's own archive) -> claude_session_id
-    must still resolve it, and _window_wake must resume (not fresh-spawn)."""
-    from cortex import wake, watchdog, window
-
-    conn = db.connect(cfg)
-    conn.execute(
-        "INSERT INTO ct_wake_log (ts, wake, dry_run, explanation) VALUES (?,1,0,?)",
-        (db.utcnow_iso(), "resume"))
-    conn.commit()
-
-    assert wake_state.load(cfg).get("transcript") is None  # no recorded hint
-    tdir = transcript.transcript_dir(cfg)
-    tdir.mkdir(parents=True, exist_ok=True)
-    _write_marker_jsonl(tdir, "dead-session-uuid")
-
-    calls = {}
-    monkeypatch.setattr(wake, "_window_alive", lambda c: False)  # dead resident
-    monkeypatch.setattr(window, "respawn",
-                        lambda c, initial_prompt=None, resume_sid=None:
-                        (calls.__setitem__("resume_sid", resume_sid),
-                         calls.__setitem__("launch_command",
-                                           window.launch_command(c, initial_prompt, resume_sid))))
-    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, prev, ts: "/t/new.jsonl")
-    monkeypatch.setattr(watchdog, "spawn", lambda c: None)
-
-    from datetime import datetime as _dt
-    res = wake._window_wake(conn, cfg, "N", _dt.now(timezone.utc))
-    conn.close()
-    assert res["mode"] == "window"
-    assert calls["resume_sid"] == "dead-session-uuid"
-    assert "--resume 'dead-session-uuid'" in calls["launch_command"]
-
-
-def test_window_wake_dead_resumes_newest_over_stale_recorded_hint(cfg, monkeypatch):
-    """Live-retest regression: --resume fired but resumed the STALE recorded
-    hint instead of the dead window's real newest archive. A leftover recorded
-    hint (from a previous cycle, never cleared) must NOT win when a real
-    marker-bearing transcript file exists -> the window-lineage lookup takes
-    priority end-to-end through _window_wake."""
-    from cortex import wake, watchdog, window
-
-    conn = db.connect(cfg)
-    conn.execute(
-        "INSERT INTO ct_wake_log (ts, wake, dry_run, explanation) VALUES (?,1,0,?)",
-        (db.utcnow_iso(), "resume"))
-    conn.commit()
-
-    wake_state.update(cfg, transcript="/x/projects/cwd/stale-hint-uuid.jsonl")
-    tdir = transcript.transcript_dir(cfg)
-    tdir.mkdir(parents=True, exist_ok=True)
-    _write_marker_jsonl(tdir, "dead-session-real-archive")
-
-    calls = {}
-    monkeypatch.setattr(wake, "_window_alive", lambda c: False)  # dead resident
-    monkeypatch.setattr(window, "respawn",
-                        lambda c, initial_prompt=None, resume_sid=None:
-                        (calls.__setitem__("resume_sid", resume_sid),
-                         calls.__setitem__("launch_command",
-                                           window.launch_command(c, initial_prompt, resume_sid))))
-    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, prev, ts: "/t/new.jsonl")
-    monkeypatch.setattr(watchdog, "spawn", lambda c: None)
-
-    from datetime import datetime as _dt
-    res = wake._window_wake(conn, cfg, "N", _dt.now(timezone.utc))
-    conn.close()
-    assert res["mode"] == "window"
-    assert calls["resume_sid"] == "dead-session-real-archive"  # newest, not the stale hint
-    assert "--resume 'dead-session-real-archive'" in calls["launch_command"]
-
-
-def test_window_wake_dead_skips_newer_digest_resumes_older_window_session(cfg, monkeypatch):
-    """Third-layer live regression end-to-end: a headless sessionend-digest
-    archive is the mtime-newest jsonl in the dir, but _window_wake must never
-    resume it (would expose its full worker prompt in the window) — it must
-    resume the OLDER real window-lineage session instead."""
-    from cortex import wake, watchdog, window
-
-    conn = db.connect(cfg)
-    conn.execute(
-        "INSERT INTO ct_wake_log (ts, wake, dry_run, explanation) VALUES (?,1,0,?)",
-        (db.utcnow_iso(), "resume"))
-    conn.commit()
-
-    tdir = transcript.transcript_dir(cfg)
-    tdir.mkdir(parents=True, exist_ok=True)
-    _write_marker_jsonl(tdir, "real-window-session")
-    import time as _time
-    _time.sleep(0.02)
-    _write_digest_jsonl(tdir, "digest-session")  # newer mtime, headless
-
-    calls = {}
-    monkeypatch.setattr(wake, "_window_alive", lambda c: False)  # dead resident
-    monkeypatch.setattr(window, "respawn",
-                        lambda c, initial_prompt=None, resume_sid=None:
-                        (calls.__setitem__("resume_sid", resume_sid),
-                         calls.__setitem__("launch_command",
-                                           window.launch_command(c, initial_prompt, resume_sid))))
-    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, prev, ts: "/t/new.jsonl")
-    monkeypatch.setattr(watchdog, "spawn", lambda c: None)
-
-    from datetime import datetime as _dt
-    res = wake._window_wake(conn, cfg, "N", _dt.now(timezone.utc))
-    conn.close()
-    assert res["mode"] == "window"
-    assert calls["resume_sid"] == "real-window-session"
-    assert "--resume 'real-window-session'" in calls["launch_command"]
-
+# --- fresh-only wake (P17: resume-revival deleted) ----------------------------
 
 def test_window_wake_dead_no_sid_fresh_with_catchup(cfg, monkeypatch):
-    """Item 6 fallback: a dead resident with NO recorded UUID -> fresh spawn
-    (resume_sid None) AND the died-no-handoff catchup line in the note."""
+    """A dead resident (no rotate flag) always fresh-spawns (P17: no resume) AND
+    the died-no-handoff catchup line lands in the note."""
     from cortex import wake, watchdog, window
 
     conn = db.connect(cfg)
@@ -1382,12 +1115,12 @@ def test_window_wake_dead_no_sid_fresh_with_catchup(cfg, monkeypatch):
         (db.utcnow_iso(), "fresh"))
     conn.commit()
 
-    calls = {}
+    calls = {"respawn": 0}
     monkeypatch.setattr(wake, "_window_alive", lambda c: False)  # dead, no transcript
     monkeypatch.setattr(wake, "_handoff_written_this_window", lambda c: False)
     monkeypatch.setattr(window, "respawn",
-                        lambda c, initial_prompt=None, resume_sid=None:
-                        calls.__setitem__("resume_sid", resume_sid))
+                        lambda c, initial_prompt=None:
+                        calls.__setitem__("respawn", calls["respawn"] + 1))
     monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, prev, ts: "/t/new.jsonl")
     monkeypatch.setattr(watchdog, "spawn", lambda c: None)
 
@@ -1395,7 +1128,7 @@ def test_window_wake_dead_no_sid_fresh_with_catchup(cfg, monkeypatch):
     res = wake._window_wake(conn, cfg, "N", _dt.now(timezone.utc))
     conn.close()
     assert res["mode"] == "window"
-    assert calls["resume_sid"] is None          # no UUID -> fresh spawn
+    assert calls["respawn"] == 1
     note_text = wake_state.wakeup_note_path(cfg).read_text()
     assert "died without a handoff" in note_text  # fresh fallback -> catchup
 
@@ -1410,11 +1143,12 @@ def test_window_wake_plan_rotate_flag_is_fresh(cfg, monkeypatch):
     assert wake_state.take_rotated(cfg) is False  # consumed by the plan call
 
 
-def test_window_wake_plan_dead_no_flag_is_resume(cfg, monkeypatch):
-    """_window_wake_plan: dead window with no rotate flag -> 'resume'."""
+def test_window_wake_plan_dead_no_flag_is_fresh(cfg, monkeypatch):
+    """P17: pacemaker wake is always fresh — a dead window with no rotate flag
+    is 'fresh', not 'resume' (the resume-revival outcome is gone)."""
     from cortex import wake, window
 
     wake_state.set_session_id(cfg, "sid-dead")
     monkeypatch.setattr(window, "is_running", lambda: True)
     monkeypatch.setattr(window, "_session_alive", lambda sid: False)  # session gone
-    assert wake._window_wake_plan(cfg) == "resume"
+    assert wake._window_wake_plan(cfg) == "fresh"

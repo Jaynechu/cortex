@@ -86,23 +86,39 @@ def _record_tokens(conn, cfg: dict, state: dict, force_slept: str | None) -> int
 
 
 def lie_down(cfg: dict, force_slept: str | None = None, rotate: bool = False,
-             next_wake_min: float | None = None, mode: str | None = None) -> dict:
+             next_wake_min: float | None = None, mode: str | None = None,
+             human_override: bool = False) -> dict:
     """End the current wake. `next_wake_min` picks the next internal wake:
-    an explicit minutes-from-now (clamped to the day or night band), or None = a
-    uniform "dice" draw within the floor window (proxy paths: watchdog auto, stale
-    reap, fuse — session-facing dice retired, N required at the MCP/CLI layer).
-    `rotate` respawns a fresh window next wake; it no longer lowers the clamp
-    floor. `mode='night'` = the night package: rotate is forced (light window),
-    the explicit next_wake_min clamps to [night.floor_min, night.floor_max], and
-    the persistent night flag is set as a child of this claim's epoch."""
+    an explicit minutes-from-now (clamped to the day/night/rotate band), or None
+    = a uniform "dice" draw within the floor window (proxy paths: watchdog auto,
+    stale reap, fuse — session-facing dice retired, N required at the MCP/CLI
+    layer). `rotate` respawns a fresh window next wake and lowers the clamp floor
+    to 0 (immediate successor allowed). `mode='night'` = the night package: rotate
+    is forced (light window), the explicit next_wake_min clamps to
+    [night.floor_min, night.floor_max], and the persistent night flag is set as a
+    child of this claim's epoch. `human_override` (explicit ctl minutes) passes
+    next_wake_min unclamped."""
     from cortex.pacemaker.triggers import clamp_next_wake_minutes
 
     night = mode == "night"
     if night:
         rotate = True  # night package always frees context with a fresh window
+    # Rotate precondition (P17): refuse a rotate while THIS window's own
+    # wake-signal ear tail is still alive — a live monitor task replays its
+    # completion notification when the rotated window resumes. Refuse BEFORE
+    # claim_lie_down so a refused call consumes no claim and leaves the wake
+    # fully intact; the session TaskStops the monitor and calls again. Only the
+    # single registered window may arm the ear (marrow fail-closed gate), so any
+    # live tail on the resolved signal path is this window's own. Plain
+    # (non-rotate) sleep never refuses — its ear must stay alive.
+    if rotate and _own_ear_tail_alive(cfg):
+        return {"skipped": "rotate_refused", "force_slept": force_slept,
+                "rotated": False, "next_wake": None,
+                "refused": _rotate_refuse_text(cfg)}
     if next_wake_min is not None:
         next_wake_min = clamp_next_wake_minutes(
-            next_wake_min, cfg, rotate=rotate, night=night)
+            next_wake_min, cfg, rotate=rotate, night=night,
+            human_override=human_override)
     # Atomic awake claim: the watchdog (60s poll) and the tick awake-branch can
     # both run silence_action in the same window; only the caller that clears the
     # awake marker here proceeds, so the ct_wake_log update + floor redraw fire
@@ -295,29 +311,36 @@ def _sigterm(pid) -> None:
         pass
 
 
-def _kill_ear_tails(cfg: dict) -> int:
-    """Kill live wake_signal ear tails (`tail … -f <signal_log>`) at rotate time
-    (P16). Ports marrow cortex_bridge.kill_orphan_ear_tails — the cortex venv
-    cannot import marrow. Match is narrowed to the exact resolved signal-log
-    path (pgrep -f) so unrelated tails are never touched; our own pid is skipped.
-    Best-effort — returns the count SIGTERMed, 0 on any failure."""
+def _own_ear_tail_alive(cfg: dict) -> bool:
+    """True if a live wake_signal ear tail exists (the rotate precondition)."""
+    return bool(_ear_tail_pids(cfg))
+
+
+def _rotate_refuse_text(cfg: dict) -> str:
+    return str(cfg.get("wake", {}).get("rotate_refuse_text") or "").strip()
+
+
+def _ear_tail_pids(cfg: dict) -> list[int]:
+    """PIDs of live wake_signal ear tails (`tail … -f <signal_log>`). Match is
+    narrowed to the exact resolved signal-log path (pgrep -f) so unrelated tails
+    are never touched; our own pid is skipped. [] on any failure."""
     try:
         signal_log = str(config.wake_signal_log_path(cfg))
     except Exception:
-        return 0
+        return []
     if not signal_log:
-        return 0
+        return []
     try:
         proc = subprocess.run(
             ["pgrep", "-f", f"-f {signal_log}"],
             capture_output=True, text=True, timeout=5,
         )
     except (subprocess.SubprocessError, OSError):
-        return 0
+        return []
     if proc.returncode not in (0, 1):
-        return 0
-    killed = 0
+        return []
     me = os.getpid()
+    pids = []
     for raw in (proc.stdout or "").split():
         try:
             pid = int(raw)
@@ -325,6 +348,17 @@ def _kill_ear_tails(cfg: dict) -> int:
             continue
         if pid <= 0 or pid == me:
             continue
+        pids.append(pid)
+    return pids
+
+
+def _kill_ear_tails(cfg: dict) -> int:
+    """Best-effort residue sweep at rotate time (P17): SIGTERM any live
+    wake_signal ear tail. The rotate precondition (own-tail-alive refusal) is the
+    real guarantee; this only mops up orphan / stale zombie tails. Returns the
+    count SIGTERMed, 0 on any failure."""
+    killed = 0
+    for pid in _ear_tail_pids(cfg):
         try:
             os.kill(pid, signal.SIGTERM)
         except (ProcessLookupError, PermissionError):
@@ -371,10 +405,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--mode", default=None, choices=("night",),
                         help="'night' = night package (forces rotate, night "
                              "floor band, sets the persistent night flag)")
+    parser.add_argument("--human-override", action="store_true",
+                        help="explicit ctl minutes pass unclamped (no day/night "
+                             "band floor)")
     args = parser.parse_args(argv)
     cfg = config.load()
     result = lie_down(cfg, force_slept=args.force_slept, rotate=args.rotate,
-                      next_wake_min=args.next_wake_min, mode=args.mode)
+                      next_wake_min=args.next_wake_min, mode=args.mode,
+                      human_override=args.human_override)
     print(json.dumps(result, ensure_ascii=False))  # surface next_wake harmlessly
     return 0
 

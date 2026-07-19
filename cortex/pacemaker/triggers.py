@@ -106,17 +106,24 @@ def clamp_window_minutes(minutes: float, config: dict) -> float:
 
 
 def clamp_next_wake_minutes(minutes: float, config: dict, rotate: bool = False,
-                            night: bool = False) -> float:
+                            night: bool = False, human_override: bool = False) -> float:
     """Clamp a lie_down(next_wake_min=N) choice. Day = [wake.next_wake_min,
     wake.next_wake_max]; night = [night.floor_min, night.floor_max] (the
-    low-frequency roaming band under the flag). The `rotate` flag no longer lowers
-    the floor — the day floor is already low enough — but is kept in the signature
-    because lie_down passes it and rotate remains a real (window-respawn) decision.
-    Proxy paths pass None and skip this clamp."""
+    low-frequency roaming band under the flag); rotate = [0, wake.next_wake_max]
+    (floor 0 so a rotate can start the successor window immediately — the next
+    tick fires it). Precedence: night wins over rotate (night forces rotate but
+    keeps the night band, never the 0 floor). `human_override` (explicit ctl
+    minutes) passes unclamped. Proxy paths pass None and skip this clamp."""
+    if human_override:
+        return minutes
     if night:
         ncfg = config.get("night", {})
         lo = ncfg.get("floor_min", 120)
         hi = ncfg.get("floor_max", 360)
+    elif rotate:
+        wcfg = config.get("wake", {})
+        hi = wcfg.get("next_wake_max", 240)
+        lo = 0
     else:
         wcfg = config.get("wake", {})
         hi = wcfg.get("next_wake_max", 240)

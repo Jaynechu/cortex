@@ -146,31 +146,27 @@ def test_spawn_launches_when_recorded_pid_dead(cfg, monkeypatch):
 
 # --- ctl.cmd_wake already-on-duty guard (double-wake prevention) --------------
 
-def test_ctl_wake_alive_awake_is_noop(cfg, monkeypatch):
-    """A resident window that is alive AND awake is already on duty: cmd_wake
-    must NOT drive run_wake (which would re-set_awake + spawn a 2nd watchdog)."""
+def test_ctl_wake_alive_unrotated_refuses(cfg, monkeypatch):
+    """P17: /ct-wake is in-window take-office only, never a spawn/resume/hunt.
+    A resident window that is alive and NOT rotated is still on duty (awake or
+    dormant makes no difference) -> refuse, zero side effects, one resident."""
     from cortex import ctl, wake
     monkeypatch.setattr(wake, "_window_alive", lambda c: True)
     wake_state.set_awake(cfg, 1, None)
-
-    def _boom(*a, **k):
-        raise AssertionError("run_wake must not run for an already-awake resident")
-    monkeypatch.setattr("cortex.wake.run_wake", _boom)
     msg = ctl.cmd_wake(cfg)
-    assert "already awake" in msg
-    assert wake_state.is_awake(cfg) is True  # still exactly one resident
+    assert msg == cfg["wake"]["ctl_wake_resident_text"]
+    assert wake_state.is_awake(cfg) is True  # untouched -> still exactly one resident
 
 
-def test_ctl_wake_alive_dormant_still_wakes(cfg, monkeypatch):
-    """Alive-but-dormant (not awake) still takes the standard ear wake path."""
+def test_ctl_wake_alive_dormant_unrotated_also_refuses(cfg, monkeypatch):
+    """Alive-but-dormant (not awake) un-rotated resident also refuses — P17
+    dropped the old ear-wake-a-dormant-resident path entirely."""
     from cortex import ctl, wake
     monkeypatch.setattr(wake, "_window_alive", lambda c: True)
-    ran = {"n": 0}
-    monkeypatch.setattr("cortex.wake.run_wake",
-                        lambda conn, c, decision, now=None:
-                        ran.__setitem__("n", ran["n"] + 1) or {"mode": "window"})
-    ctl.cmd_wake(cfg)
-    assert ran["n"] == 1  # dormant resident IS woken
+    assert wake_state.is_awake(cfg) is False
+    msg = ctl.cmd_wake(cfg)
+    assert msg == cfg["wake"]["ctl_wake_resident_text"]
+    assert wake_state.is_awake(cfg) is False  # zero side effects
 
 
 # --- awake-gate watchdog-liveness heal (watchdog death during a wait) ---------

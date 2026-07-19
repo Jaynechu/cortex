@@ -171,10 +171,10 @@ def test_reconcile_accidental_close_resumes(cfg, monkeypatch):
     assert msg.startswith("fired:")
 
 
-def test_fire_dead_window_accidental_close_respects_retired_sid(cfg, monkeypatch):
-    """Reconcile's accidental-close fire shares the exact same choke point as
-    ctl.cmd_wake's dead-branch (_window_wake -> _resume_or_fresh_dead) — a
-    retired_sid match must force fresh spawn there too, never a resume."""
+def test_fire_dead_window_accidental_close_always_fresh(cfg, monkeypatch):
+    """P17: reconcile's accidental-close fire shares the fresh-only choke point
+    (_window_wake -> _fresh_with_catchup) — a retired_sid or any other dead-
+    window state always fresh-spawns via _spawn_wake, never a resume."""
     from cortex import transcript, wake, window
     cfg["gates"]["night"] = {"start": "23:00", "end": "23:00", "cap": 0}  # disabled
     cfg["pacemaker"]["dry_run"] = False
@@ -186,14 +186,14 @@ def test_fire_dead_window_accidental_close_respects_retired_sid(cfg, monkeypatch
     monkeypatch.setattr(transcript, "newest_window_lineage", lambda cfg, marker: None)
     captured = {}
     monkeypatch.setattr(wake, "_spawn_wake",
-                        lambda conn, c, now, resume=False, **kw:
-                        captured.update(resume=resume) or {"mode": "window"})
+                        lambda conn, c, now, **kw:
+                        captured.update(called=True) or {"mode": "window"})
     conn = db.connect(cfg)
     try:
         pacemaker_tick._fire_dead_window(conn, cfg, "accidental close of awake window")
     finally:
         conn.close()
-    assert captured.get("resume") is False  # never resumes the retired sid
+    assert captured.get("called") is True  # fresh spawn, no resume path exists
 
 
 def test_reconcile_paused_holds_everything(cfg, monkeypatch):
@@ -364,41 +364,52 @@ def test_ctl_pause_resume(cfg, monkeypatch, capsys):
     assert wake_state.is_paused(cfg) is False
 
 
-def test_ctl_wake_clears_paused(cfg, monkeypatch):
-    """P1-A: cmd_wake always drives the standard run_wake pipeline (never a
-    hand-rolled signal-only path) — stub run_wake itself, the way test_wake.py
-    exercises run_wake's internals directly."""
+def test_ctl_wake_clears_paused(cfg):
+    """P17: cmd_wake take-office (prev rotated) unpauses (ct-pause documents
+    /ct-wake as its exit)."""
     from cortex import ctl
-    monkeypatch.setattr("cortex.wake.run_wake",
-                        lambda conn, c, decision, now=None: {"mode": "window"})
+    wake_state.set_rotated(cfg)
     wake_state.set_paused(cfg, True)
     assert wake_state.is_paused(cfg) is True
     ctl.cmd_wake(cfg)
     assert wake_state.is_paused(cfg) is False
 
 
-def test_ctl_wake_sets_awake_via_standard_pipeline(cfg, monkeypatch):
-    """P1-A: cmd_wake on an alive-but-dormant resident must mark awake + start
-    the watchdog (via the standard run_wake -> _window_wake ear path), not
-    just append a bell signal. Exercise the real internals (no run_wake stub)
-    with only the machine-touching leaves stubbed, mirroring test_wake.py."""
-    from cortex import ctl, wake, watchdog, window
-    from cortex.transcript import transcript_dir
-    cfg["wake"]["ear_timeout_sec"] = 3  # keep the poll loop bounded/fast
-    wake_state.set_session_id(cfg, "SID-1")
-    monkeypatch.setattr(wake, "_window_wake_plan", lambda c: "ear")
-    monkeypatch.setattr(wake, "_window_alive", lambda c: True)
-    monkeypatch.setattr(watchdog, "spawn", lambda c: 12345)  # no real subprocess
-
-    def fake_append_signal(c, now, token=None):
-        # simulate the ear landing: transcript grows so _signal_landed sees it
-        p = transcript_dir(c) / "fake.jsonl"
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text("{}")
-    monkeypatch.setattr(window, "append_wake_signal", fake_append_signal)
+def test_ctl_wake_rotated_takes_office(cfg):
+    """P17: prev rotated (retired_sid / rotate flag) -> in-window take-office:
+    sets awake, clears the ledger, cancels the pending sentinel, unpauses. No
+    spawn/resume — this window IS the new resident."""
+    from cortex import ctl
+    wake_state.set_rotated(cfg)
+    wake_state.set_next_wake_at(cfg, "2099-01-01T00:00:00+10:00")
+    wake_state.set_sentinel_pid(cfg, 99_999_999)  # dead pid, cleared not signalled
     assert wake_state.is_awake(cfg) is False
+    line = ctl.cmd_wake(cfg)
+    assert wake_state.is_awake(cfg) is True
+    assert wake_state.get_next_wake_at(cfg) is None  # pending alarm cancelled
+    assert wake_state.get_sentinel_pid(cfg) is None
+    assert "wake_signal" in line or "signal_log" not in line  # arm line rendered
+    assert "{signal_log}" not in line  # template placeholder actually substituted
+
+
+def test_ctl_wake_dead_takes_office_with_ghost_handoff(cfg, monkeypatch):
+    """P17: prev dead (no rotate, recorded resident's claude pid gone) -> take
+    office AND write a fresh note carrying the died_no_handoff catchup line so
+    this window ghost-writes the handoff."""
+    from cortex import ctl, wake, window
+    monkeypatch.setattr(wake, "_window_alive", lambda c: False)
+    calls = {}
+
+    def fake_assemble_note(conn, c, now, **kw):
+        calls["died_no_handoff"] = kw.get("died_no_handoff")
+        return "GHOST NOTE"
+    monkeypatch.setattr(wake, "assemble_note", fake_assemble_note)
+    monkeypatch.setattr(window, "write_note",
+                        lambda c, text: calls.__setitem__("note", text))
     ctl.cmd_wake(cfg)
-    assert wake_state.is_awake(cfg) is True  # P1-A: standard path marks awake
+    assert wake_state.is_awake(cfg) is True
+    assert calls["died_no_handoff"] is True
+    assert calls["note"] == "GHOST NOTE"
 
 
 def test_ctl_sleep_dead_window_sets_ledger(cfg):
@@ -449,33 +460,6 @@ def test_ctl_sleep_live_window_no_rotate_omits_rotate_true(cfg, monkeypatch):
     assert "rotate=false" in captured["line"]
     assert "rotate=true" not in captured["line"]
 
-
-def test_ctl_wake_live_window_renders_fresh_note(cfg, monkeypatch):
-    """P2-2: `wake` on a live window must render+write a fresh note before
-    signalling, not append the bell onto a stale note from a previous wake."""
-    from cortex import ctl, wake, watchdog, window
-    from cortex.transcript import transcript_dir
-    cfg["wake"]["ear_timeout_sec"] = 3  # keep the poll loop bounded/fast
-    wake_state.set_session_id(cfg, "SID-1")
-    monkeypatch.setattr(wake, "_window_wake_plan", lambda c: "ear")
-    monkeypatch.setattr(wake, "_window_alive", lambda c: True)
-    monkeypatch.setattr(watchdog, "spawn", lambda c: 12345)  # no real subprocess
-    calls = {"note": None}
-
-    def fake_assemble_note(conn, cfg, now, **kw):
-        text = "FRESH NOTE TEXT"
-        return (text, None) if kw.get("return_cutoff") else text
-    monkeypatch.setattr(wake, "assemble_note", fake_assemble_note)
-    monkeypatch.setattr(window, "write_note",
-                        lambda c, text: calls.__setitem__("note", text))
-
-    def fake_append_signal(c, now, token=None):
-        p = transcript_dir(c) / "fake.jsonl"
-        p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text("{}")
-    monkeypatch.setattr(window, "append_wake_signal", fake_append_signal)
-    ctl.cmd_wake(cfg)
-    assert calls["note"] == "FRESH NOTE TEXT"
 
 
 # --- ImportError guard --------------------------------------------------------

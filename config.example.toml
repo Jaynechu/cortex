@@ -117,6 +117,13 @@ wait_expiry_note = true      # every free-round tuck-in (silence-gate or wait(N)
 # hook (fuse -> [cortex].fuse_prompt_text; ctl -> [cortex].ctl_sleep_text from the mins/rotate args).
 fuse_marker = "⚙️ [FUSE]"
 ctl_sleep_marker = "⚙️ [CTL]"
+# lie_down(rotate=True) refuses while this window's own wake-signal ear tail is still alive
+# (its live monitor task replays on resume). Stop the monitor first, then rotate. Plain lie_down never refuses.
+rotate_refuse_text = "Rotate refused: your wake-signal monitor is still running. TaskStop it first, then call lie_down(rotate=true) again."
+# /ct-wake take-office arm instruction (one line printed by cmd_wake on a granted take-office). {signal_log} = resolved path.
+ctl_wake_arm_text = "take-office granted — arm a Monitor tailing {signal_log} (tail -n 0 -f {signal_log}), then start the round."
+# /ct-wake refusal when a resident window is still alive and un-rotated.
+ctl_wake_resident_text = "resident still on duty — /ct-clear there first (or close it, then wake)."
 
 # Per-wake watchdog thresholds (spawned at injection, killed at lie_down).
 [wake.watchdog]

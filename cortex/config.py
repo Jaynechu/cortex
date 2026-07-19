@@ -106,6 +106,23 @@ _DEFAULTS: dict[str, Any] = {
         # ctl marker line carries).
         "fuse_marker": "⚙️ [FUSE]",
         "ctl_sleep_marker": "⚙️ [CTL]",
+        # Refusal returned by lie_down(rotate=True) while THIS window's own
+        # wake-signal ear tail is still alive: a live monitor task replays its
+        # completion notification when the rotated window resumes. Stop it first,
+        # then rotate. Plain (non-rotate) lie_down never refuses.
+        "rotate_refuse_text":
+            "Rotate refused: your wake-signal monitor is still running. "
+            "TaskStop it first, then call lie_down(rotate=true) again.",
+        # /ct-wake take-office arm instruction (one line, printed by cmd_wake on
+        # a granted take-office). {signal_log} = resolved wake-signal path. The
+        # window arms a Monitor tailing it, then starts the round.
+        "ctl_wake_arm_text":
+            "take-office granted — arm a Monitor tailing {signal_log} "
+            "(tail -n 0 -f {signal_log}), then start the round.",
+        # /ct-wake refusal when a resident window is still alive and un-rotated.
+        "ctl_wake_resident_text":
+            "resident still on duty — /ct-clear there first (or close it, "
+            "then wake).",
     },
     # marrow repo invocation for the wake call (separate venv/deps, C3).
     "marrow": {

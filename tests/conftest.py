@@ -122,13 +122,15 @@ def _no_real_sentinel(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _no_real_ear_kill(monkeypatch):
-    """The rotate path kills the wake_signal ear tail via pgrep (P16). pgrep is a
-    blocked machine-touching binary; the kill is a best-effort side effect no
-    rotate/night test cares about. Stub it to a no-op so those tests stay green;
-    test_lie_down_ear_kill overrides subprocess.run locally to exercise the real
-    helper. Mirrors _no_real_sentinel."""
+    """The rotate path probes/kills the wake_signal ear tail via pgrep (P16/P17):
+    _ear_tail_pids (shared by the rotate precondition and the residue-sweep kill)
+    and _kill_ear_tails both touch pgrep, a blocked machine-touching binary. No
+    rotate/night test cares about a real tail being alive, so both are stubbed to
+    "no tail" so those tests stay green; test_lie_down_ear_kill overrides
+    subprocess.run locally to exercise the real helpers. Mirrors _no_real_sentinel."""
     try:
         import cortex.lie_down as _l
+        monkeypatch.setattr(_l, "_ear_tail_pids", lambda cfg: [])
         monkeypatch.setattr(_l, "_kill_ear_tails", lambda cfg: 0)
     except ImportError:
         pass

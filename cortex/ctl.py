@@ -18,7 +18,7 @@ import sys
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from cortex import config, db, wake_state, window
+from cortex import config, db, transcript, wake_state, window
 from cortex.pacemaker import integration
 
 
@@ -27,38 +27,75 @@ def _now(cfg: dict) -> datetime:
 
 
 def cmd_wake(cfg: dict) -> str:
-    from cortex.wake import run_wake, _window_alive
-    # A human explicitly waking wants activity back — clear DND first.
-    wake_state.set_paused(cfg, False)
-    # Already-on-duty guard (singleton invariant): a resident window that is both
-    # alive AND awake is already on duty — re-driving run_wake would re-set_awake
-    # and spawn a second watchdog. The live session already has the human's
-    # attention; refuse rather than double-activate. (Alive-but-dormant still
-    # wakes: that is the intended ear path below.)
-    if _window_alive(cfg) and wake_state.is_awake(cfg):
-        return "wake: already awake on duty -> no-op (one resident)"
-    # Always drive the standard wake pipeline (run_wake -> _window_wake_plan
-    # + _window_wake), including the alive-resident ear path: it renders a
-    # fresh note, sets the awake marker and starts the watchdog, and falls
-    # back to headless on any AppleScript failure. Do not re-implement any
-    # of that here — a hand-rolled signal-only path would skip set_awake and
-    # the watchdog, letting the next tick double-wake and the eventual
-    # lie_down hit claim_lie_down's "not awake" no-op.
+    """In-window take-office (P17): /ct-wake runs INSIDE the target window (a
+    manually opened cortex window). It never spawns/resumes/hunts — the pacemaker
+    owns spawning. Registration is CAS-claimed by marrow's caller-side hook before
+    this runs; here we drive the wake_state take-office.
+
+      prev rotated (retired_sid / rotate flag) -> take office.
+      prev dead (recorded resident's claude pid gone) -> take office, and the
+          fresh note carries the died_no_handoff catchup so this window
+          ghost-writes the handoff.
+      prev alive and un-rotated -> refuse (one line, zero side effects).
+    """
+    from cortex.wake import _window_alive
+    from cortex.lie_down import _kill_sentinel
+
+    st = wake_state.load(cfg)
+    rotated = bool(st.get("rotated")) or bool(st.get("retired_sid"))
+    prev_alive = _window_alive(cfg)
+    if not rotated and prev_alive:
+        return str(cfg["wake"].get("ctl_wake_resident_text") or "").strip()
+
+    died_no_handoff = (not rotated) and (not prev_alive)
+
+    # Take office. set_awake BUMPS gen and clears next_wake_at atomically, so any
+    # sentinel/tick armed for the old due finds its token stale and no-ops
+    # (sentinel fire-time epoch check) — the alarm is cancelled atomically vs the
+    # tick. _kill_sentinel is best-effort cleanup on top of that guard.
     conn = db.connect(cfg)
     try:
         now = _now(cfg)
-        decision = {"wake": True, "reasons": [], "gated_by": [],
-                    "wake_reasons": "ctl",
-                    "explanation": f"{now.strftime('%H:%M')} manual ctl wake"}
-        result = run_wake(conn, cfg, decision, now=now)
-        if result.get("mode") != "window":
-            next_floor = integration.lie_down(conn, cfg)
-            wake_state.set_next_wake_at(
-                cfg, next_floor.isoformat() if next_floor else None)
-        rotated = "fresh" if wake_state.load(cfg).get("rotated") else "resume/spawn"
-        return f"wake: {rotated} (mode={result.get('mode')})"
+        tpath = transcript.newest(cfg)
+        wid = _record_wake_row(conn, now)
+        wake_state.take_rotated(cfg)  # consume the one-shot flag if set
+        wake_state.set_awake(cfg, wid, str(tpath) if tpath else None)
+        _kill_sentinel(cfg)
+        # A human explicitly waking wants activity back — leave DND (ct-pause
+        # documents /ct-wake as its exit).
+        wake_state.set_paused(cfg, False)
+        if died_no_handoff:
+            _ghost_handoff_hint(conn, cfg, now)
+        return _arm_line(cfg)
     finally:
         conn.close()
+
+
+def _record_wake_row(conn, now: datetime) -> int | None:
+    """Log this take-office as an activation wake row so the note's Last-wake
+    segment counts it. Best-effort."""
+    try:
+        return integration.log_activation_wake_row(conn, now, "ctl-wake")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _ghost_handoff_hint(conn, cfg: dict, now: datetime) -> None:
+    """Dead prev window left no handoff: write a fresh note carrying the existing
+    died_no_handoff catchup line so this window ghost-writes the handoff. Reuses
+    the note/window plumbing — no new mechanism. Best-effort."""
+    try:
+        from cortex.wake import assemble_note
+        note_text = assemble_note(conn, cfg, now, died_no_handoff=True)
+        window.write_note(cfg, note_text)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _arm_line(cfg: dict) -> str:
+    tmpl = str(cfg["wake"].get("ctl_wake_arm_text") or "").strip()
+    signal_log = str(config.wake_signal_log_path(cfg))
+    return tmpl.replace("{signal_log}", signal_log)
 
 
 def _resolve_minutes(cfg: dict, until: str | None, minutes: float | None) -> float:
@@ -85,7 +122,10 @@ def cmd_sleep(cfg: dict, until: str | None, minutes: float | None, rotate: bool)
         # ([cortex].ctl_sleep_text), rendered from the mins/rotate args this line
         # carries — she never SEES the instruction, only the short marker.
         marker = str(cfg["wake"].get("ctl_sleep_marker") or "⚙️ [CTL]").strip()
-        marker_line = f"{marker} mins={int(mins)} rotate={'true' if rotate else 'false'}"
+        # human=true: an explicit ctl minutes choice, so the rendered lie_down
+        # passes it unclamped (marrow ctl_sleep_text -> lie_down human_override).
+        marker_line = (f"{marker} mins={int(mins)} "
+                       f"rotate={'true' if rotate else 'false'} human=true")
         rung = window.deliver_covert_marker(cfg, marker_line)
         if rung != "none":
             return (f"sleep: instruction delivered ({rung}) "

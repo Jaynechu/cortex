@@ -147,10 +147,26 @@ def test_clamp_next_wake_minutes_bounds():
     assert clamp_next_wake_minutes(999, config) == 240      # above ceiling -> 240
 
 
-def test_clamp_next_wake_minutes_rotate_no_longer_lowers_floor():
-    # rotate=True no longer lowers the floor: the day floor (next_wake_min) is
-    # already low enough. rotate uses the SAME [next_wake_min, next_wake_max].
+def test_clamp_next_wake_minutes_rotate_band_floor_zero():
+    # P17: rotate=True uses [0, next_wake_max] — floor 0 so a rotate can start
+    # the successor window immediately (the next tick fires it).
     config = base_config()
     assert clamp_next_wake_minutes(30, config, rotate=True) == 30    # in-range kept
-    assert clamp_next_wake_minutes(10, config, rotate=True) == 21    # below floor -> 21
-    assert clamp_next_wake_minutes(999, config, rotate=True) == 240
+    assert clamp_next_wake_minutes(0, config, rotate=True) == 0      # 0 passes through
+    assert clamp_next_wake_minutes(999, config, rotate=True) == 240  # above ceiling -> 240
+
+
+def test_clamp_next_wake_minutes_night_precedence_over_rotate():
+    # night forces rotate but keeps the night band -> night must NOT inherit the
+    # rotate 0 floor.
+    config = base_config()
+    config["night"] = {"floor_min": 120, "floor_max": 360}
+    assert clamp_next_wake_minutes(0, config, rotate=True, night=True) == 120
+    assert clamp_next_wake_minutes(500, config, rotate=True, night=True) == 360
+
+
+def test_clamp_next_wake_minutes_human_override_unclamped():
+    config = base_config()
+    assert clamp_next_wake_minutes(3, config, human_override=True) == 3
+    assert clamp_next_wake_minutes(9999, config, human_override=True) == 9999
+    assert clamp_next_wake_minutes(3, config, rotate=True, human_override=True) == 3
