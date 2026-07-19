@@ -153,8 +153,9 @@ _DEFAULTS: dict[str, Any] = {
               # all-channel silence at kick time. Rendered via the night_due kick.
               "package_due_text":
                   "🌙 Night window reached ({silent_h}h silent). Pack up for "
-                  "the night: write handoff, then lie_down(next_wake_min=N, "
-                  'mode="night").'},
+                  "the night: write handoff,  stop ALL running background "
+                  "tasks (TaskList → TaskStop each), then "
+                  'lie_down(next_wake_min=N, mode="night").'},
     "knowledgec": {"stream_name": "/app/usage"},
     "knowledgec.categories": {"default": "uncategorized"},
     "geofence": {"enabled": False},
