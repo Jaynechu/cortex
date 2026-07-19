@@ -120,6 +120,20 @@ def _no_real_sentinel(monkeypatch):
         pass
 
 
+@pytest.fixture(autouse=True)
+def _no_real_ear_kill(monkeypatch):
+    """The rotate path kills the wake_signal ear tail via pgrep (P16). pgrep is a
+    blocked machine-touching binary; the kill is a best-effort side effect no
+    rotate/night test cares about. Stub it to a no-op so those tests stay green;
+    test_lie_down_ear_kill overrides subprocess.run locally to exercise the real
+    helper. Mirrors _no_real_sentinel."""
+    try:
+        import cortex.lie_down as _l
+        monkeypatch.setattr(_l, "_kill_ear_tails", lambda cfg: 0)
+    except ImportError:
+        pass
+
+
 @pytest.fixture
 def marrow_conn(tmp_path):
     conn = db.connect_path(tmp_path / "marrow.db")

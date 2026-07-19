@@ -10,6 +10,11 @@ import pytest
 
 from cortex import config, lie_down, wake_state
 
+# Grab the real helper at import time — conftest's autouse _no_real_ear_kill
+# stubs lie_down._kill_ear_tails to a no-op for every test; the two tests that
+# exercise the real helper call this reference directly instead.
+_REAL_KILL = lie_down._kill_ear_tails
+
 
 @pytest.fixture
 def cfg(tmp_path):
@@ -50,7 +55,7 @@ def test_kill_ear_tails_narrows_to_signal_log_and_skips_self(cfg, monkeypatch):
     killed = []
     monkeypatch.setattr(lie_down.subprocess, "run", fake_run)
     monkeypatch.setattr(lie_down.os, "kill", lambda pid, sig: killed.append(pid))
-    n = lie_down._kill_ear_tails(cfg)
+    n = _REAL_KILL(cfg)
     # pgrep narrowed to the exact resolved signal-log path
     assert seen["cmd"][:2] == ["pgrep", "-f"]
     assert signal_log in seen["cmd"][2]
@@ -68,7 +73,7 @@ def test_kill_ear_tails_leaves_alarm_and_wake_state_untouched(cfg, monkeypatch):
     monkeypatch.setattr(
         lie_down.subprocess, "run",
         lambda *a, **kw: subprocess.CompletedProcess(a[0] if a else [], 1, stdout="", stderr=""))
-    lie_down._kill_ear_tails(cfg)
+    _REAL_KILL(cfg)
     after = wake_state.load(cfg)
     assert after.get("sentinel_pid") == 999
     assert after.get("next_wake_at") == "2099-01-01T00:00:00+00:00"
