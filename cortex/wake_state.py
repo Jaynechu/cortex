@@ -296,13 +296,31 @@ def is_awake(cfg: dict) -> bool:
 
 
 def set_awake(cfg: dict, wake_log_id: int | None, transcript: str | None,
-              expected_gen: int | None = None, bump: bool = True) -> tuple[int, str] | None:
+              expected_gen: int | None = None, bump: bool = True,
+              expected_token: tuple[int, str] | None = None,
+              session_id: str | None = None) -> tuple[int, str] | None:
     """Activate a wake (asleep -> awake). BUMPS gen by default (a fresh wake is a
-    new epoch that invalidates the sleeping window's alarm token). When
-    `expected_gen` is given the flip is CONDITIONAL: if the live gen has moved on
-    (a newer lie_down / user reset re-armed since the wake decision), abort and
-    return None. Returns the new (gen, state_id) on success, None if the
-    conditional flip lost.
+    new epoch that invalidates the sleeping window's alarm token). Returns the new
+    (gen, state_id) on success, None if the conditional flip lost.
+
+    Two conditional forms (codex adversarial-review Fix 4):
+      expected_token=(gen, state_id) -- the FULL token, validated via
+        _token_current (gen AND state_id). Use this for any spawn-path caller: a
+        gen-only check tolerates the delete/recreate ABA (wake_state.json wiped
+        and recreated back to the SAME gen with a NEW state_id passes a gen-only
+        compare, letting a stale actor overwrite the recreated state -- marrow's
+        receipt consumer already validates both fields, so a gen-only cortex
+        check disagreed with marrow). Prefer this over expected_gen.
+      expected_gen=<int> -- LEGACY gen-only check, kept only for the ear path's
+        pre-existing call shape (not itself part of this fix; still gen-only by
+        design there). Superseded by expected_token when both are given.
+
+    session_id, when given, is committed in the SAME atomic section as the awake
+    flip (Fix 2): the spawn path no longer persists the new resident session id
+    separately before this CAS is known to succeed, so a stale/superseded spawn
+    can never leave its session id recorded as the resident's while a newer
+    epoch's spawn (or the prior resident) is what's actually live. None leaves
+    session_id untouched (the ear/rearm callers, which never spawn a new window).
 
     next_wake_at is the durable ledger: a successful wake means it fired, so it is
     cleared here (re-armed by the next lie_down) in the same atomic section so an
@@ -312,7 +330,10 @@ def set_awake(cfg: dict, wake_log_id: int | None, transcript: str | None,
         with _strict_flock(cfg):
             d = _load_strict(cfg)
             _ensure_epoch(d)
-            if expected_gen is not None and int(d["gen"]) != int(expected_gen):
+            if expected_token is not None and not _token_current(d, expected_token):
+                return None
+            if expected_token is None and expected_gen is not None \
+                    and int(d["gen"]) != int(expected_gen):
                 return None
             old_gen = int(d["gen"])
             if bump:
@@ -323,6 +344,8 @@ def set_awake(cfg: dict, wake_log_id: int | None, transcript: str | None,
                      wake_log_id=wake_log_id, transcript=transcript,
                      wait_spent=False, user_replied_this_wake=False,
                      tuck_pending=None, last_note_ts=None)
+            if session_id is not None:
+                d["session_id"] = session_id
             _save(cfg, d)
             result = int(d["gen"]), str(d["state_id"])
     except StateValidationError:

@@ -280,7 +280,15 @@ def test_window_unrotated_resume_stays_non_fresh(monkeypatch, rot_cfg):
 def test_window_wake_rotate_respawns(monkeypatch, marrow_conn, rot_cfg):
     """Full window-branch: a rotated window (same local day) respawns fresh.
     The handoff now injects at SessionStart (marrow), not in the note."""
-    monkeypatch.setattr(wake, "_window_wake_plan", lambda cfg: "fresh")
+    # run_wake calls _classify_wake directly now (codex adversarial-review Fix 1:
+    # classification is a single lock-protected call returning (plan,
+    # rotate_driven)), not the back-compat _window_wake_plan wrapper.
+    # rotate_driven=True here means a real rotate flag must be observably set
+    # (peek_rotated) too -- the belt-and-braces guard checks it independently.
+    monkeypatch.setattr(wake, "_classify_wake", lambda cfg: ("fresh", True))
+    from cortex import wake_state as _wake_state
+    monkeypatch.setattr(_wake_state, "peek_rotated", lambda c: True)
+    monkeypatch.setattr(_wake_state, "take_rotated", lambda c: True)
     captured = {}
     def fake_window_wake(conn, cfg, note_text, now, respawn=False, **kw):
         captured["text"] = note_text
@@ -312,7 +320,8 @@ def test_rotate_flag_makes_next_wake_fresh(monkeypatch, marrow_conn, rot_cfg):
 
 def test_window_wake_unrotated_no_handoff(monkeypatch, marrow_conn, rot_cfg):
     """Un-rotated same-day wake: no handoff in the note."""
-    monkeypatch.setattr(wake, "_window_wake_plan", lambda cfg: "ear")
+    # run_wake calls _classify_wake directly now (see test_window_wake_rotate_respawns).
+    monkeypatch.setattr(wake, "_classify_wake", lambda cfg: ("ear", False))
     captured = {}
     monkeypatch.setattr(wake, "_window_wake",
                         lambda conn, cfg, t, now, respawn=False, **kw:

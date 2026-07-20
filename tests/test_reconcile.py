@@ -130,10 +130,10 @@ def test_lie_down_rotate_spawn_failure_retirement_still_lands(cfg, monkeypatch):
 
 
 def test_spawn_successor_idempotent_when_rotate_flag_already_consumed(cfg, monkeypatch):
-    """No double-spawn: the rotate flag is consumed atomically by
-    _window_wake_plan's take_rotated() inside run_wake, so if the flag is already
-    gone here (a racing reconcile beat us / the successor is already spawning)
-    _spawn_successor skips run_wake."""
+    """No double-spawn: the rotate flag is consumed atomically by run_wake's
+    deferred take_rotated() (after the fresh successor is verified live), so if
+    the flag is already gone here (a racing reconcile beat us / the successor is
+    already spawning) _spawn_successor skips run_wake."""
     from cortex import wake
     # No rotated flag set -> already consumed by whoever spawned the successor.
     assert wake_state.load(cfg).get("rotated") is None
@@ -148,7 +148,7 @@ def test_spawn_successor_idempotent_when_rotate_flag_already_consumed(cfg, monke
     assert fired["n"] == 0  # rotate flag already consumed -> no second spawn
 
 
-def test_run_wake_two_concurrent_spawn_entrants_only_one_spawns(cfg, monkeypatch):
+def test_run_wake_two_concurrent_spawn_entrants_only_one_spawns(cfg, monkeypatch, tmp_path):
     """07-20 live race repro: a SIGKILLed resident (simulated crash, no rotate) +
     a concurrent ctl wake both pass the "no resident" check before either used to
     spawn (two unlocked steps) -> two identical windows landed. Two threads both
@@ -160,11 +160,19 @@ def test_run_wake_two_concurrent_spawn_entrants_only_one_spawns(cfg, monkeypatch
     under the serialization lock, must see the winner's now-live window and skip."""
     import threading
     import time as _time
+    from pathlib import Path
     from cortex import transcript, wake, watchdog, window
 
     monkeypatch.setattr(transcript, "newest_window_lineage", lambda cfg, marker: None)
     spawn_calls = {"n": 0}
     lock_for_calls = threading.Lock()
+    # A REAL file (unlike a bare "/t/new.jsonl" string) so transcript.mtime's
+    # p.stat() (called by the loser's "ear" branch) never raises FileNotFoundError
+    # in the background thread -- mirrors production, where the winner's spawn
+    # really creates this file before _wait_new_transcript returns its path.
+    new_transcript_path = tmp_path / "new.jsonl"
+    new_transcript_path.write_text("{}")
+    NEW_TRANSCRIPT = str(new_transcript_path)
 
     def _respawn_stub(c, initial_prompt=None, resume_sid=None):
         with lock_for_calls:
@@ -178,8 +186,26 @@ def test_run_wake_two_concurrent_spawn_entrants_only_one_spawns(cfg, monkeypatch
     # serialization lock the loser sees it live and skips.
     monkeypatch.setattr(wake, "_window_alive",
                         lambda c: bool(wake_state.get_session_id(c)))
-    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, prev, ts: "/t/new.jsonl")
+    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, prev, ts: NEW_TRANSCRIPT)
+    # transcript.newest must agree with the recorded hint the winner's commit
+    # just wrote (both resolve to the SAME real file in production -- the spawn
+    # actually creates it before _wait_new_transcript returns it). Without this,
+    # the loser's in-lock classification (now running strictly AFTER the winner,
+    # since classify+dispatch is fully serialized -- Fix 1) sees a recorded
+    # transcript hint the on-disk "newest" lookup never confirms, misreads that
+    # as a /clear (prev != cur) and classifies "fresh" -> a SECOND spawn.
+    monkeypatch.setattr(transcript, "newest", lambda c: Path(NEW_TRANSCRIPT))
     monkeypatch.setattr(watchdog, "spawn", lambda c: None)
+    # Fix 1 (codex adversarial-review): classification now runs INSIDE the spawn
+    # lock, so the loser's classification happens AFTER it acquires the lock --
+    # i.e. after the winner already recorded a session id above. Its
+    # classification then reaches window.is_running()/_session_alive (a real
+    # osascript call, blocked by conftest's process guard) instead of the
+    # no-sid-yet short-circuit it hit under the old classify-before-lock
+    # ordering. Stub these so the loser's re-classification stays in-process.
+    monkeypatch.setattr(window, "is_running", lambda: True)
+    monkeypatch.setattr(window, "_session_alive", lambda sid: True)
+    monkeypatch.setattr(window, "find_claude_pid", lambda c: 4242)
 
     def _fire():
         conn = db.connect(cfg)

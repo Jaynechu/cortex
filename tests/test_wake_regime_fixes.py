@@ -138,12 +138,15 @@ def test_run_wake_fresh_spawn_success_consumes_rotate_flag(cfg, monkeypatch):
 
 
 def test_run_wake_concurrent_rotate_second_entrant_skips(cfg, monkeypatch):
-    """Fix 1 concurrent-rotate: a second fresh entrant plans 'fresh' while the
-    flag is still set (outside the lock), but by the time it acquires the spawn
-    lock the WINNER has already consumed the flag. The re-peek under the lock then
-    sees no rotate flag -> the entrant SKIPS rather than double-spawning a second
-    fresh successor. Modelled by peek_rotated returning True at plan time and
-    False on the in-lock re-peek."""
+    """Fix 1 concurrent-rotate (codex adversarial-review hardening): classify +
+    dispatch now happen in ONE lock-protected call (_classify_wake), so there is
+    no longer a second, later peek_rotated() sample that could observe a
+    different answer than the classification itself. Modelled directly: an
+    entrant whose _classify_wake call returns rotate_driven=True, but a
+    concurrent winner (simulated) has ALREADY consumed the flag by the time the
+    belt-and-braces in-lock guard checks peek_rotated() -> this entrant still
+    must skip rather than double-spawn (the guard is defense-in-depth even
+    though the single-classify structure makes the gap unreachable in practice)."""
     from cortex import note, symlinks, wake, watchdog, window
 
     _seed_wake_row(cfg, "rot-concurrent")
@@ -159,12 +162,11 @@ def test_run_wake_concurrent_rotate_second_entrant_skips(cfg, monkeypatch):
         lambda c, initial_prompt=None, resume_sid=None: spawns.__setitem__("n", spawns["n"] + 1))
     monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, prev, ts: "/t/new.jsonl")
 
-    # peek_rotated is consulted three times: (1) _window_wake_plan classification,
-    # (2) run_wake's rotate_claim capture, (3) the in-lock re-peek. The winner
-    # consumes the flag between (2) and (3), so the first two see it set and the
-    # in-lock re-peek sees it gone -> this entrant skips.
-    peeks = iter([True, True, False])
-    monkeypatch.setattr(wake_state, "peek_rotated", lambda c: next(peeks))
+    # ONE classification call (inside the lock) reports rotate_driven=True...
+    monkeypatch.setattr(wake, "_classify_wake", lambda c: ("fresh", True))
+    # ...but a concurrent winner (simulated externally) already consumed the flag
+    # by the time the in-lock belt-and-braces guard checks it.
+    monkeypatch.setattr(wake_state, "peek_rotated", lambda c: False)
 
     decision = {"wake": True, "reasons": [], "wake_reasons": "ctl"}
     conn = db.connect(cfg)
@@ -176,6 +178,43 @@ def test_run_wake_concurrent_rotate_second_entrant_skips(cfg, monkeypatch):
 
     assert spawns["n"] == 0                       # loser skipped the fresh spawn
     assert res.get("skipped") == "spawn_race_lost"
+
+
+def test_classify_wake_called_exactly_once_per_run_wake(cfg, monkeypatch):
+    """Fix 1 core invariant: run_wake calls _classify_wake EXACTLY ONCE per wake
+    (never a second classification/peek pass outside the lock) -- the prior
+    two-read design (classify, then a second later peek_rotated() for
+    rotate_claim) is what let a rotate loser observe a different answer than its
+    own classification."""
+    from cortex import note, symlinks, wake, watchdog, window
+
+    wake_state.set_rotated(cfg)
+    _seed_wake_row(cfg, "single-classify")
+
+    monkeypatch.setattr(symlinks, "ensure_all", lambda c: None)
+    monkeypatch.setattr(note, "seed_baseline", lambda *a, **k: None)
+    monkeypatch.setattr(wake, "_render_daybrief", lambda c: None)
+    monkeypatch.setattr(watchdog, "spawn", lambda c: None)
+    monkeypatch.setattr(window, "respawn",
+                        lambda c, initial_prompt=None, resume_sid=None: "sid-new")
+    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, prev, ts: "/t/new.jsonl")
+
+    calls = {"n": 0}
+    real_classify = wake._classify_wake
+
+    def _spy(c):
+        calls["n"] += 1
+        return real_classify(c)
+    monkeypatch.setattr(wake, "_classify_wake", _spy)
+
+    decision = {"wake": True, "reasons": [], "wake_reasons": "ctl"}
+    conn = db.connect(cfg)
+    try:
+        wake.run_wake(conn, cfg, decision, now=datetime.now(timezone.utc),
+                      caller=wake.call_marrow_cortex)
+    finally:
+        conn.close()
+    assert calls["n"] == 1
 
 
 # ── Fix 2: readiness returns verified or raises ───────────────────────────────
@@ -266,11 +305,13 @@ def test_resume_fallback_types_bell_when_no_model_turn(cfg, monkeypatch):
     """Fix 3: the resumed conversation produces NO new assistant line within the
     timeout (the prior session had no armed Monitor for the harness to report),
     so cortex types ONE machine-tagged bell (via type_wake_signal) carrying the
-    epoch token in its receipt."""
+    epoch token in its receipt. baseline is the PRE-LAUNCH count (passed in
+    explicitly, never re-captured inside the function -- codex adversarial-review
+    Fix 3)."""
     from cortex import wake, window
 
     cfg["wake"]["resume_turn_timeout_sec"] = 0.02
-    _write_assistant_lines(cfg, "resume-uuid", 1)  # baseline, never grows
+    _write_assistant_lines(cfg, "resume-uuid", 1)  # never grows past baseline
 
     typed = {}
     monkeypatch.setattr(window, "type_wake_signal",
@@ -278,12 +319,8 @@ def test_resume_fallback_types_bell_when_no_model_turn(cfg, monkeypatch):
     monkeypatch.setattr(wake.time, "sleep", lambda s: None)
 
     token = (5, "cafe")
-    conn = db.connect(cfg)
-    try:
-        wake._resume_fallback_bell(conn, cfg, datetime.now(timezone.utc),
-                                   token, "resume-uuid")
-    finally:
-        conn.close()
+    wake._resume_fallback_bell(cfg, datetime.now(timezone.utc),
+                               token, "resume-uuid", baseline=1)
     assert typed["token"] == token  # bell typed with the epoch token
 
 
@@ -312,12 +349,8 @@ def test_resume_fallback_stays_silent_when_model_turn_appears(cfg, monkeypatch):
 
     monkeypatch.setattr(wake.time, "sleep", _sleep)
 
-    conn = db.connect(cfg)
-    try:
-        wake._resume_fallback_bell(conn, cfg, datetime.now(timezone.utc),
-                                   (5, "cafe"), "resume-uuid")
-    finally:
-        conn.close()
+    wake._resume_fallback_bell(cfg, datetime.now(timezone.utc),
+                               (5, "cafe"), "resume-uuid", baseline=1)
     assert typed["called"] is False  # model turn seen -> silent, no bell
 
 
@@ -394,6 +427,9 @@ def test_fresh_spawn_receipt_carries_epoch_token(cfg, monkeypatch):
     assert r["state_id"] == d["state_id"]
     assert d["gen"] == r["gen"]   # live gen == receipt gen (not bumped)
     assert d["awake"] is True
+    # Fix 2: the new session id is committed atomically with the awake flip
+    # (set_awake's session_id= param) -- window.respawn itself never persists it.
+    assert d["session_id"] == "sid-new"
 
 
 def test_fresh_spawn_epoch_advanced_rejects_activation(cfg, monkeypatch):
@@ -405,6 +441,7 @@ def test_fresh_spawn_epoch_advanced_rejects_activation(cfg, monkeypatch):
     from cortex import wake, watchdog, window
 
     _seed_wake_row(cfg, "fresh-race")
+    wake_state.set_session_id(cfg, "prior-live-sid")  # the newer epoch's own resident
     watchdog_started = {"n": 0}
     monkeypatch.setattr(watchdog, "spawn",
                         lambda c: watchdog_started.__setitem__("n", watchdog_started["n"] + 1))
@@ -413,7 +450,7 @@ def test_fresh_spawn_epoch_advanced_rejects_activation(cfg, monkeypatch):
     def _respawn(c, initial_prompt=None, resume_sid=None):
         # A newer epoch lands during startup (e.g. a user message reset).
         wake_state.bump_gen(cfg)
-        return "sid-new"
+        return "sid-new"  # this stale spawn's own (never-committed) sid
     monkeypatch.setattr(window, "respawn", _respawn)
 
     gen_before = wake_state.current_epoch(cfg)[0]
@@ -432,6 +469,10 @@ def test_fresh_spawn_epoch_advanced_rejects_activation(cfg, monkeypatch):
     assert d.get("awake") is not True
     assert d["gen"] == gen_before + 1          # only the racing bump advanced it
     assert watchdog_started["n"] == 0          # watchdog NOT started on reject
+    # Fix 2: the stale spawn's sid ("sid-new") must NEVER overwrite the newer
+    # epoch's own live resident -- window.respawn no longer persists it itself,
+    # and the rejected CAS means set_awake's session_id= param never landed.
+    assert d["session_id"] == "prior-live-sid"
 
 
 # ── Fix 5: machine-origin tag on the wake note ────────────────────────────────
@@ -466,3 +507,183 @@ def test_note_render_machine_tag_config_toggle(cfg):
     finally:
         conn.close()
     assert not text.startswith("[AUTOMATED WAKE SIGNAL")
+
+
+# ===========================================================================
+# codex adversarial-review, round 2: deterministic interleaving tests for the
+# four high findings against c553d52 (rotate sampling gap / stale sid
+# persistence / pre-readiness assistant turn / state_id ABA). Each test drives
+# the exact interleave the finding describes, not just the end-state assertion.
+# ===========================================================================
+
+def test_interleave_rotate_sampling_gap_no_double_spawn(cfg, monkeypatch):
+    """Finding 1 interleave: classification must be ONE lock-protected read, not
+    two (plan, then a LATER separate peek_rotated() for rotate_claim). Drives the
+    exact gap: entrant A's _classify_wake call reports rotate_driven=True: a
+    concurrent winner (simulated) then consumes the flag BEFORE A's belt-and-
+    braces re-check -- A must see the flag gone and skip, never double-spawning.
+    (The single-classify structure makes this gap structurally unreachable in
+    production; this test exercises the surviving guard directly.)"""
+    from cortex import note, symlinks, wake, watchdog, window
+
+    _seed_wake_row(cfg, "interleave-rotate")
+    wake_state.set_rotated(cfg)
+
+    monkeypatch.setattr(symlinks, "ensure_all", lambda c: None)
+    monkeypatch.setattr(note, "seed_baseline", lambda *a, **k: None)
+    monkeypatch.setattr(wake, "_render_daybrief", lambda c: None)
+    monkeypatch.setattr(watchdog, "spawn", lambda c: None)
+
+    spawns = {"n": 0}
+    monkeypatch.setattr(
+        window, "respawn",
+        lambda c, initial_prompt=None, resume_sid=None: spawns.__setitem__("n", spawns["n"] + 1))
+    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, prev, ts: "/t/new.jsonl")
+
+    # _classify_wake runs for real (sees the real flag -> ("fresh", True)), but a
+    # concurrent winner (modelled directly) consumes the flag the INSTANT after
+    # classification returns, before this entrant's in-lock re-peek runs.
+    real_classify = wake._classify_wake
+
+    def _classify_then_race(c):
+        result = real_classify(c)
+        wake_state.take_rotated(c)  # the "winner" consumes it right here
+        return result
+    monkeypatch.setattr(wake, "_classify_wake", _classify_then_race)
+
+    decision = {"wake": True, "reasons": [], "wake_reasons": "ctl"}
+    conn = db.connect(cfg)
+    try:
+        res = wake.run_wake(conn, cfg, decision, now=datetime.now(timezone.utc),
+                            caller=wake.call_marrow_cortex)
+    finally:
+        conn.close()
+
+    assert spawns["n"] == 0                       # never double-spawned
+    assert res.get("skipped") == "spawn_race_lost"
+
+
+def test_interleave_stale_sid_never_overwrites_live_resident(cfg, monkeypatch):
+    """Finding 2 interleave: the epoch advances WHILE the window is booting
+    (between _wait_ready succeeding and the caller's set_awake CAS). Drives the
+    exact ordering: respawn() returns a verified sid WITHOUT persisting it; a
+    'concurrent' actor (simulated inside the respawn stub, i.e. strictly between
+    epoch capture and the CAS) commits ITS OWN new resident sid and bumps gen;
+    the original (now-stale) spawn's CAS must reject and its sid must never reach
+    wake_state -- the live resident stays the concurrent actor's sid throughout."""
+    from cortex import wake, watchdog, window
+
+    _seed_wake_row(cfg, "interleave-sid")
+    monkeypatch.setattr(watchdog, "spawn", lambda c: None)
+    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, prev, ts: "/t/new.jsonl")
+
+    def _respawn_then_concurrent_actor_wins(c, initial_prompt=None, resume_sid=None):
+        # Interleave point: THIS stale actor's window just became ready (respawn
+        # about to return its verified sid) -- but before it can commit, a
+        # concurrent actor (e.g. a user reset spawning its own fresh window) wins
+        # the race: it commits its own session id + bumps the epoch first.
+        wake_state.set_awake(cfg, None, "/concurrent/winner.jsonl",
+                             session_id="concurrent-winner-sid")
+        return "stale-actor-sid"  # verified-ready, but never committed
+    monkeypatch.setattr(window, "respawn", _respawn_then_concurrent_actor_wins)
+
+    token = wake_state.current_epoch(cfg)  # captured BEFORE the interleaved respawn
+    conn = db.connect(cfg)
+    try:
+        # Directly exercise the CAS ordering _spawn_wake relies on: capture token
+        # (already done above), respawn (interleaves the concurrent winner in),
+        # then the conditional commit with the STALE token.
+        new_sid = window.respawn(cfg, resume_sid=None)
+        new_epoch = wake_state.set_awake(
+            cfg, None, "/stale/actor.jsonl", expected_token=token, bump=False,
+            session_id=new_sid)
+    finally:
+        conn.close()
+
+    assert new_epoch is None  # the stale actor's CAS rejected
+    d = wake_state.load(cfg)
+    # The live resident is STILL the concurrent winner's -- the stale actor's sid
+    # ("stale-actor-sid") never touched wake_state at all.
+    assert d["session_id"] == "concurrent-winner-sid"
+    assert d["transcript"] == "/concurrent/winner.jsonl"
+
+
+def test_interleave_pre_readiness_assistant_turn_counts_as_growth(cfg, monkeypatch):
+    """Finding 3 interleave: a harness-driven assistant turn is written DURING
+    the `claude --resume` launch/readiness window (a real, multi-second window),
+    i.e. strictly BETWEEN the pre-launch baseline capture and respawn() returning
+    -- not after. The baseline must already be captured before this turn lands,
+    so the fallback-bell poll sees it as growth immediately and never fires."""
+    from cortex import wake, watchdog, window
+
+    _seed_wake_row(cfg, "interleave-preready")
+    wake_state.update(cfg, transcript="/x/projects/cwd/resume-uuid.jsonl")
+    monkeypatch.setattr(watchdog, "spawn", lambda c: None)
+    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, prev, ts: "/t/new.jsonl")
+    monkeypatch.setattr(window, "claude_session_id", lambda c: "resume-uuid")
+
+    typed = {"called": False}
+    monkeypatch.setattr(window, "type_wake_signal",
+                        lambda c, now, token=None: typed.__setitem__("called", True))
+
+    def _respawn_writes_turn_during_readiness(c, initial_prompt=None, resume_sid=None):
+        # The interleave: a harness-driven assistant turn lands WHILE the window
+        # is still coming up -- i.e. after _spawn_wake captured resume_baseline
+        # but before respawn() (which wraps _wait_ready) returns.
+        _write_assistant_lines(cfg, "resume-uuid", 1)
+        return "resumed-iterm-sid"
+    monkeypatch.setattr(window, "respawn", _respawn_writes_turn_during_readiness)
+
+    conn = db.connect(cfg)
+    try:
+        res = wake._spawn_wake(conn, cfg, datetime.now(timezone.utc), resume=True)
+    finally:
+        conn.close()
+
+    assert res is not None and res["mode"] == "window"
+    assert typed["called"] is False  # growth already present -> no bell fired
+    assert wake_state.load(cfg)["awake"] is True  # awake flip still committed
+
+
+def test_interleave_state_id_aba_rejects_recreated_state(cfg, monkeypatch):
+    """Finding 4 interleave: wake_state.json is DELETED and RECREATED (e.g. a
+    corrupt-state repair, or a wipe) landing back on the SAME gen but a NEW
+    state_id, strictly BETWEEN the token capture and the CAS. A gen-only compare
+    would pass (ABA) and let the stale actor overwrite the recreated state; the
+    FULL (gen, state_id) token must reject it."""
+    from cortex import wake, watchdog, window
+
+    _seed_wake_row(cfg, "interleave-aba")
+    monkeypatch.setattr(watchdog, "spawn", lambda c: None)
+    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, prev, ts: "/t/new.jsonl")
+
+    token = wake_state.current_epoch(cfg)  # (gen, original_state_id)
+
+    def _respawn_recreates_state_same_gen(c, initial_prompt=None, resume_sid=None):
+        # Interleave: delete + recreate the state file BETWEEN token capture and
+        # the CAS, landing back on the SAME gen with a DIFFERENT state_id (the
+        # ABA wake_state.json's _ensure_epoch re-seeds on first touch after a
+        # wipe -- a fresh random state_id, same starting gen 0/whatever it was).
+        wake_state.wake_state_path(cfg).unlink(missing_ok=True)
+        new_gen, new_state_id = wake_state.current_epoch(cfg)  # re-seeds the file
+        assert new_gen == token[0]              # same gen (the ABA condition)
+        assert new_state_id != token[1]          # different identity
+        return "stale-sid"
+    monkeypatch.setattr(window, "respawn", _respawn_recreates_state_same_gen)
+
+    conn = db.connect(cfg)
+    try:
+        new_sid = window.respawn(cfg, resume_sid=None)
+        # The stale actor's CAS uses the ORIGINAL token (captured before the
+        # interleaved delete/recreate) -- gen matches the recreated file's gen,
+        # but state_id does not.
+        new_epoch = wake_state.set_awake(
+            cfg, None, "/stale/actor.jsonl", expected_token=token, bump=False,
+            session_id=new_sid)
+    finally:
+        conn.close()
+
+    assert new_epoch is None  # rejected despite the gen-only match (ABA closed)
+    d = wake_state.load(cfg)
+    assert d.get("session_id") != "stale-sid"   # stale actor never committed
+    assert d.get("awake") is not True

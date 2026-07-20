@@ -348,15 +348,25 @@ def respawn(cfg: dict, initial_prompt: str | None = None,
     returns the new resident sid. Reused for rotate/rebirth (fresh) and the
     dead-window recovery (resume).
 
-    Readiness is VERIFIED before the sid is persisted (Fix 2): _wait_ready raises
+    Readiness is VERIFIED before the sid is returned (Fix 2): _wait_ready raises
     WindowError if the TUI never comes up (a bad/gone --resume sid, or `claude`
-    exiting at once, leaves a bare shell). On that failure the just-spawned
-    session id is NOT recorded as the resident -- the caller (_spawn_wake) turns
-    the WindowError into a None return so a dead resume falls back to a fresh
-    spawn instead of recording a bare shell as an awake resident."""
+    exiting at once, leaves a bare shell). On that failure NOTHING is persisted --
+    the caller (_spawn_wake) turns the WindowError into a None return so a dead
+    resume falls back to a fresh spawn instead of recording a bare shell as an
+    awake resident.
+
+    codex adversarial-review Fix 2: this function no longer persists the sid
+    itself. The prior version called wake_state.set_session_id() unconditionally
+    right here, BEFORE the caller's epoch CAS (_spawn_wake's set_awake) had a
+    chance to reject a stale spawn -- so a spawn a newer epoch went on to cancel
+    had ALREADY overwritten the live resident's session pointer by the time the
+    CAS ran, leaving liveness checks / the watchdog / the next injection all
+    targeting the cancelled window. The verified sid is now only ever committed
+    by the caller, atomically WITH the awake flip, under wake_state.set_awake's
+    expected_token CAS -- a rejected CAS leaves the prior (still-live) sid
+    completely untouched."""
     sid = _spawn(cfg, initial_prompt, resume_sid)
-    _wait_ready(sid, cfg)  # raises WindowError on timeout -> sid not persisted
-    wake_state.set_session_id(cfg, sid)
+    _wait_ready(sid, cfg)  # raises WindowError on timeout -> nothing persisted
     return sid
 
 

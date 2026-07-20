@@ -327,25 +327,36 @@ def wake_id_of(now: datetime) -> str:
     return f"{now.strftime('%Y%m%dT%H%M%S')}-{os.getpid()}"
 
 
-def _window_wake_plan(cfg) -> str:
-    """Classify how the resident window should be woken. Three outcomes:
-      "fresh"  — a deliberate new brain: the rotate flag is set (night package /
-                 explicit rotate / rebirth / token-cap fresh) OR the transcript
-                 rolled to a different session since the last wake (a /clear).
+def _classify_wake(cfg) -> tuple[str, bool]:
+    """Classify how the resident window should be woken, in ONE protected read.
+    Returns (plan, rotate_driven):
+      plan="fresh"  — a deliberate new brain: EITHER the rotate flag is set
+                 (night package / explicit rotate / rebirth / token-cap fresh;
+                 rotate_driven=True) OR the transcript rolled to a different
+                 session since the last wake (a /clear; rotate_driven=False).
                  A brand-new session; the handoff (or died_no_handoff catchup)
                  carries context forward.
-      "resume" — the window/claude simply DIED (crash / manual close) with NO
+      plan="resume" — the window/claude simply DIED (crash / manual close) with NO
                  rotate flag: relaunch `claude --resume <sid>` so the SAME
                  conversation comes back with full context (no handoff catchup).
                  A resume attempt that fails to land falls back to "fresh" with
                  the died_no_handoff catchup — see _window_wake — so a dead
                  window always ends in a live awake cortex, never nothing.
-      "ear"    — the window is alive and unrotated: use the signal-file ear.
+      plan="ear"    — the window is alive and unrotated: use the signal-file ear.
 
-    The rotate flag is PEEKED here (peek_rotated), never consumed: Fix 1 defers
-    the one-shot consume (take_rotated) to AFTER the fresh successor is verified
-    live, so a failed spawn keeps the flag for the retry. Safe to call more than
-    once per wake (peek is idempotent)."""
+    rotate_driven is TRUE only when THIS SAME call observed the rotate flag set
+    -- it is never re-derived from a second, later peek_rotated() call (codex
+    adversarial-review Fix 1: a second read outside the lock left a window where
+    the winner's take_rotated() landed between this call's plan and a later
+    re-peek, so a rotate loser kept plan=="fresh" with rotate_driven appearing
+    False and bypassed the concurrent-rotate skip guard -> a second fresh spawn).
+    The caller (run_wake) must call this EXACTLY ONCE per wake, under the spawn
+    lock (_spawn_serialized), and carry the returned rotate_driven through to both
+    the skip guard and the deferred take_rotated consume -- never peek again.
+
+    The rotate flag itself is PEEKED here (peek_rotated), never consumed: Fix 1
+    defers the one-shot consume (take_rotated) to AFTER the fresh successor is
+    verified live, so a failed spawn keeps the flag for the retry."""
     from cortex import transcript, wake_state, window
 
     if wake_state.peek_rotated(cfg):
@@ -357,12 +368,12 @@ def _window_wake_plan(cfg) -> str:
         # -- it is the belt-and-braces guard every resume path checks even after
         # the one-shot flag is finally consumed.
         wake_state.update(cfg, transcript=None)
-        return "fresh"  # deliberate rotate/rebirth/token-cap -> new brain
+        return "fresh", True  # deliberate rotate/rebirth/token-cap -> new brain
     sid = wake_state.get_session_id(cfg)
     if not sid or not window.is_running() or not window._session_alive(sid):
-        return "resume"  # window died / gone -> bring the same conversation back
+        return "resume", False  # window died/gone -> bring the same conversation back
     if window.find_claude_pid(cfg) is None:
-        return "resume"  # session alive but claude died -> resume same conversation
+        return "resume", False  # session alive but claude died -> resume same conversation
     prev = wake_state.load(cfg).get("transcript")
     cur = transcript.newest(cfg)
     cur = str(cur) if cur else None
@@ -372,8 +383,17 @@ def _window_wake_plan(cfg) -> str:
     # != None would re-trigger a respawn every tick (the loop this fix removes).
     # Only a real transcript-to-transcript mismatch is a deliberate /clear.
     if prev is None:
-        return "ear"
-    return "fresh" if cur != prev else "ear"
+        return "ear", False
+    return ("fresh", False) if cur != prev else ("ear", False)
+
+
+def _window_wake_plan(cfg) -> str:
+    """Back-compat/standalone wrapper: the plan string alone, for callers (tests,
+    _window_rotated) that only need the fresh/resume/ear classification, not the
+    rotate_driven distinction run_wake's lock-protected dispatch requires. Safe to
+    call more than once (peek is idempotent) -- but run_wake itself must use
+    _classify_wake exactly once, under the lock (see its docstring)."""
+    return _classify_wake(cfg)[0]
 
 
 def _window_rotated(cfg) -> bool:
@@ -463,14 +483,35 @@ def _spawn_wake(conn, cfg, now, resume: bool = False,
     fresh-with-catchup on a resume failure, _window_wake -> headless on a fresh
     failure).
 
-    Epoch cancellation (Fix 4): the (gen, state_id) token is captured BEFORE the
-    slow window spawn and carried into the wake receipt; set_awake is CONDITIONAL
-    on that gen. If a user reset / lie_down / newer wake advances the epoch during
-    the ~30-90s startup, the stale spawn's set_awake rejects (returns None): the
-    awake marker is NOT overwritten, next_wake_at is NOT clobbered, the watchdog
-    is NOT started, and the outcome is audited. The window is physically up
-    regardless, so a real result dict is still returned (a None would drive an
+    Epoch cancellation (Fix 4): the (gen, state_id) FULL token is captured BEFORE
+    the slow window spawn and carried into the wake receipt; set_awake's CAS
+    validates BOTH fields (expected_token), not gen alone -- a gen-only compare
+    tolerates a wake_state.json delete/recreate landing back on the same gen with
+    a new state_id, letting a stale actor overwrite the recreated state; marrow's
+    own receipt consumer already validates both fields. If a user reset /
+    lie_down / newer wake advances the epoch during the ~30-90s startup, the
+    stale spawn's set_awake rejects (returns None): the awake marker is NOT
+    overwritten, the new session id is NOT recorded as resident (Fix 2), the
+    watchdog is NOT started, and the outcome is audited. The window is physically
+    up regardless, so a real result dict is still returned (a None would drive an
     unwanted fresh respawn on top of a window the newer epoch already owns).
+
+    Session id commit (Fix 2): window.respawn() only VERIFIES readiness and
+    returns the new sid -- it no longer persists it. The sid is committed here,
+    IN THE SAME atomic section as the awake flip (set_awake's session_id= param),
+    conditional on the same expected_token. A rejected CAS therefore leaves the
+    prior (still-live) resident's session id completely untouched, instead of the
+    old two-step (persist sid unconditionally, then maybe reject the awake flip)
+    which let a cancelled spawn's sid overwrite the newer epoch's live resident
+    before the CAS even ran.
+
+    Resume fallback-bell ordering (Fix 3): the assistant-line baseline is
+    captured BEFORE `claude --resume` is launched (a harness-driven turn written
+    during launch/readiness must count as growth, not get absorbed into the
+    baseline), the awake flip commits immediately once the window is verified
+    ready (so a harness turn landing during the fallback-bell poll sees the
+    session already marked awake, not asleep), and only THEN does the bell poll
+    run, comparing against that pre-launch baseline.
 
     The recorded transcript hint must be the NEW session's jsonl — captured only
     after it actually appears (bounded poll) — never the pre-spawn newest, which
@@ -481,52 +522,64 @@ def _spawn_wake(conn, cfg, now, resume: bool = False,
     prev_path = transcript.newest(cfg)
     prev_path = str(prev_path) if prev_path else None
     spawn_ts = time.time()
-    # Fix 4: capture the alarm epoch before spawning so a newer epoch landing
-    # during startup can cancel this stale spawn's state overwrite. A capture
-    # failure (lock/parse) -> no token (set_awake stays unconditional, the
-    # pre-token behaviour) rather than wedging the wake.
+    # Fix 4: capture the FULL alarm epoch token before spawning so a newer epoch
+    # landing during startup can cancel this stale spawn's state overwrite. A
+    # capture failure (lock/parse) -> no token (set_awake stays unconditional,
+    # the pre-token behaviour) rather than wedging the wake.
     try:
         token = wake_state.current_epoch(cfg)
     except wake_state.StateValidationError:
         token = None
-    expected_gen = token[0] if token else None
     if resume_sid:
         # Resume: clean launch. The conversation is the identity; no bell typed,
         # no receipt written -- the harness's own background-shell notice wakes
         # the model. The Fix-3 fallback bell (below) is the only thing that ever
         # types into a resumed window, and only when no self-driven turn appears.
         initial_prompt = None
+        # Fix 3: baseline BEFORE launch, so a harness-driven turn written during
+        # the resume/readiness window (which can legitimately take real seconds)
+        # counts as growth against this baseline, never gets silently absorbed by
+        # capturing the baseline only after the window already came up.
+        resume_baseline = _assistant_line_count(cfg, resume_sid)
     else:
         # Fresh: the visible bell is the first prompt; write its receipt (with the
         # epoch token, Fix 4) BEFORE spawning so the marrow hook recognizes the
         # new window's first line AND suppresses it if a newer epoch superseded.
         window.write_wake_receipt(cfg, now, token=token)
         initial_prompt = window.fresh_initial_prompt(cfg, now)
+        resume_baseline = None
     try:
-        window.respawn(cfg, initial_prompt=initial_prompt, resume_sid=resume_sid)
+        new_sid = window.respawn(cfg, initial_prompt=initial_prompt, resume_sid=resume_sid)
     except window.WindowError as e:
         _alert_respawn_failed(conn, wake_id_of(now), str(e)[:180])
         return None
-    if resume_sid:
-        _resume_fallback_bell(conn, cfg, now, token, resume_sid)
     new_path = _wait_new_transcript(cfg, prev_path, spawn_ts)
-    # Fix 4: conditional flip, WITHOUT bumping the epoch. The wake receipt (fresh
-    # window's baked bell, or the resume fallback bell) carries this same captured
-    # gen G; a bump here would advance the live gen to G+1 and the marrow hook's
-    # equality check (wake_token_current) would then read the receipt as stale and
-    # SUPPRESS the note. bump=False keeps live gen == the receipt's G so a genuine
-    # wake is processed, while expected_gen=G still rejects a spawn a NEWER epoch
-    # (user reset / lie_down) advanced past G during the slow startup: None = do
-    # NOT overwrite state, do NOT start the watchdog, audit, and return the
-    # (physically live) window so the caller does not respawn on top of it.
+    # Fix 2 + Fix 4: ONE atomic commit -- awake flip, wake_log_id, transcript hint,
+    # AND the new resident session id, all conditional on the SAME expected_token,
+    # WITHOUT bumping the epoch. The wake receipt (fresh window's baked bell, or
+    # the resume fallback bell below) carries this same captured (gen, state_id);
+    # a bump here would advance the live gen past the receipt's and the marrow
+    # hook's equality check (wake_token_current) would then read the receipt as
+    # stale and SUPPRESS the note. bump=False keeps live gen == the receipt's gen
+    # so a genuine wake is processed, while expected_token still rejects a spawn a
+    # NEWER epoch (user reset / lie_down) advanced past during the slow startup:
+    # None = do NOT overwrite state (session id included), do NOT start the
+    # watchdog, do NOT type the resume fallback bell (a superseded window is not
+    # this actor's to keep nudging), audit, and return the (physically live)
+    # window so the caller does not respawn on top of it.
     new_epoch = wake_state.set_awake(
         cfg, _wake_log_id(conn, now, wake_reasons), new_path,
-        expected_gen=expected_gen, bump=False)
+        expected_token=token, bump=False, session_id=new_sid)
     if new_epoch is None:
         _audit_wake(conn, wake_id_of(now),
                     "spawn set_awake lost race (epoch superseded) -> marker not set")
         return {"mode": "window", "session_id": None, "text": None}
     watchdog.spawn(cfg)
+    if resume_sid:
+        # Fix 3: the awake flip is already committed; the fallback-bell poll now
+        # only decides whether a nudge is needed, comparing against the PRE-LAUNCH
+        # baseline captured above (never re-captured after launch).
+        _resume_fallback_bell(cfg, now, token, resume_sid, resume_baseline)
     return {"mode": "window", "session_id": None, "text": None}
 
 
@@ -557,7 +610,7 @@ def _assistant_line_count(cfg, resume_sid: str) -> int:
         return 0
 
 
-def _resume_fallback_bell(conn, cfg, now, token, resume_sid: str) -> None:
+def _resume_fallback_bell(cfg, now, token, resume_sid: str, baseline: int) -> None:
     """Fix 3 safety net: a resumed window normally wakes itself via the CC
     harness's own background-shell notice (its armed ear Monitor had no
     completion record) -- that alone drives a full model turn. But if the prior
@@ -570,11 +623,19 @@ def _resume_fallback_bell(conn, cfg, now, token, resume_sid: str) -> None:
     receipt). On timeout with no new model turn, type ONE ordinary bell line
     (ear-style, machine-tagged, via type_wake_signal) so the resumed window still
     gets its note. The bell carries the epoch token in its receipt (Fix 4) like
-    the ear path, so a superseded wake is suppressed by the marrow hook."""
+    the ear path, so a superseded wake is suppressed by the marrow hook.
+
+    `baseline` MUST be the assistant-line count captured BEFORE `claude --resume`
+    was launched (codex adversarial-review Fix 3): capturing it here, after launch
+    +readiness, let a harness-driven turn written during that (real, multi-second)
+    window land inside the baseline itself, so growth was never observed and the
+    bell fired at the full timeout regardless -- duplicating the wake every time.
+    The caller (_spawn_wake) also commits the awake flip BEFORE calling this, so a
+    harness turn landing during this poll sees the session already marked awake
+    (a wait()/lie_down() call mid-poll is not wrongly rejected as "not awake")."""
     from cortex import window
 
     timeout = float(cfg["wake"].get("resume_turn_timeout_sec", 180))
-    baseline = _assistant_line_count(cfg, resume_sid)
     waited = 0.0
     while waited < timeout:
         time.sleep(min(_RESUME_TURN_POLL_STEP_S, timeout - waited))
@@ -649,13 +710,16 @@ def _window_wake(conn, cfg, note_text, now, respawn: bool = False,
         return None
     tpath = transcript.newest(cfg)
     # Wake-row commit AFTER the conditional set_awake succeeds (P2 fix): this is
-    # the one set_awake call with a real reject path (expected_gen — a user
+    # the one set_awake call with a real reject path (expected_token — a user
     # message flipping awake first between the ear signal and here). Writing
     # the activation row BEFORE the transition is known to succeed would leave
     # a phantom row (the row belongs to a wake that never actually happened,
     # while the user's own wake gets its own row) when set_awake loses the race.
+    # Fix 4: pass the FULL (gen, state_id) token (already captured as `token`
+    # above) rather than gen alone -- a gen-only check tolerates a wake_state.json
+    # delete/recreate landing back on the same gen with a new state_id.
     new_epoch = wake_state.set_awake(cfg, None, str(tpath) if tpath else None,
-                                     expected_gen=sleep_gen)
+                                     expected_token=token)
     if new_epoch is not None:
         _bind_wake_log_id(conn, cfg, now, wake_reasons, new_epoch)
     watchdog.spawn(cfg)
@@ -869,77 +933,66 @@ def run_wake(
     # (tests / headless callers) always runs the marrow-subprocess path below.
     if cfg["wake"].get("mode", "window") == "window" and caller is call_marrow_cortex:
         from cortex import wake_state
-        # Classify the wake once (peeks the rotate flag; Fix 1 consumes it only
-        # after a fresh successor is live). "fresh" = deliberate new brain
-        # (rotate/rebirth): re-assemble the handoff note here. "resume"
-        # = a window that simply died: relaunch --resume, same context, plain
-        # note — _window_wake/_resume_or_fresh_dead falls back to a fresh spawn
-        # (with the died_no_handoff catchup note) when no resumable sid exists or
-        # the resume spawn itself fails. "ear" = alive resident, signal-file ear.
-        plan = _window_wake_plan(cfg)
-        # Whether THIS fresh plan is driven by the one-shot rotate flag (Fix 1) as
-        # opposed to a transcript /clear mismatch. Only a rotate-driven fresh
-        # participates in the deferred flag consume + concurrent-rotate skip guard;
-        # a /clear-driven fresh has no flag to claim and must always spawn.
-        rotate_claim = plan == "fresh" and wake_state.peek_rotated(cfg)
-        window_text = note_text
-        window_cutoff = note_cutoff
-        if plan == "fresh":
-            window_text, window_cutoff = assemble_note(
-                conn, cfg, now, decision=decision, fresh=True,
-                wake_kind="rotate", return_cutoff=True)
-            timer.mark("rotate_note")
         # Wake-row reasons: a pacemaker-decided wake (scheduled) already has its
         # decision row from run_tick -> reuse it (None). A non-tick wake (ctl /
         # reconcile / user) carries an explicit tag in decision["wake_reasons"]
         # so the chokepoint logs a fresh activation row (BUG A: those wakes wrote
         # no wake=1 row, so "Last wake" skipped every real wake since noon).
         wake_reasons = decision.get("wake_reasons")
-        if plan == "ear":
-            # No spawn on this branch (alive resident, signal-file ear) -> no
-            # serialization needed, same as before.
-            win = _window_wake(conn, cfg, window_text, now, respawn=False,
-                               wake_reasons=wake_reasons)
-        else:
-            # fresh/resume both spawn a window -> the whole claim+check+spawn
-            # critical section is serialized (07-20 live race: pacemaker tick
-            # reconcile and ctl wake both passed the "no resident" check before
-            # either spawned, landing two identical resume windows). Re-check
-            # liveness under the lock before spawning a RESUME: the winner's
-            # _spawn_wake records the new session (set_awake) before releasing this
-            # lock, so a loser arriving after sees _window_alive()=True and skips.
-            #
-            # Fix 1 (rotate claim + spawn serialized): the one-shot rotate flag is
-            # PEEKED during classification (never consumed there). It is consumed
-            # (take_rotated) only AFTER a fresh successor is verified live, inside
-            # this same lock, so a spawn failure keeps the flag for the retry and a
-            # concurrent rotate can never double-spawn: a loser re-peeks under the
-            # lock and, if the winner already consumed the flag, no longer sees a
-            # fresh rotate. A "fresh"/rotate spawn is deliberate -- the retiring
-            # window is still alive by design (not killed), so _window_alive is not
-            # a valid skip signal there; the flag claim is the single-shot guard.
-            with _spawn_serialized(cfg):
-                if plan == "resume" and _window_alive(cfg):
-                    win = {"mode": "window", "session_id": None, "text": None,
-                          "skipped": "spawn_race_lost"}
-                elif rotate_claim and not wake_state.peek_rotated(cfg):
-                    # This fresh plan was rotate-driven, but a concurrent rotate
-                    # winner already consumed the flag and spawned the fresh
-                    # successor under the lock -> this entrant skips (no
-                    # double-spawn). A /clear-driven fresh never enters here.
-                    win = {"mode": "window", "session_id": None, "text": None,
-                          "skipped": "spawn_race_lost"}
-                else:
-                    win = _window_wake(conn, cfg, window_text, now,
-                                       respawn=(plan == "fresh"),
-                                       wake_reasons=wake_reasons)
-                    # Consume the rotate flag ONLY now the fresh successor is live
-                    # (rotate-driven fresh, win a real result dict -- not None/skip).
-                    # A None (window failure) or skip leaves the flag set for the
-                    # retry to own; a /clear-driven fresh has no flag to consume.
-                    if (rotate_claim and win is not None
-                            and not win.get("skipped")):
-                        wake_state.take_rotated(cfg)
+
+        # codex adversarial-review Fix 1: classification (_classify_wake) now
+        # happens EXACTLY ONCE, INSIDE the spawn lock, and its rotate_driven
+        # result is carried straight through -- never re-derived via a second,
+        # later peek_rotated() call. The prior version classified OUTSIDE the
+        # lock, then sampled peek_rotated() a second time for rotate_claim: an
+        # entrant pausing between those two reads while the winner's
+        # take_rotated() landed in between kept plan=="fresh" with rotate_claim
+        # appearing False (the flag already gone) -> bypassed the loser guard
+        # -> a second fresh spawn, two residents. Wrapping classify+dispatch in
+        # ONE lock hold removes the gap entirely: "ear" also moves inside (no
+        # separate un-serialized fast path), since a second classification call
+        # for "ear" was exactly the reintroduced race window.
+        with _spawn_serialized(cfg):
+            plan, rotate_driven = _classify_wake(cfg)
+            window_text = note_text
+            window_cutoff = note_cutoff
+            if plan == "fresh":
+                window_text, window_cutoff = assemble_note(
+                    conn, cfg, now, decision=decision, fresh=True,
+                    wake_kind="rotate", return_cutoff=True)
+                timer.mark("rotate_note")
+            if plan == "ear":
+                win = _window_wake(conn, cfg, window_text, now, respawn=False,
+                                   wake_reasons=wake_reasons)
+            elif plan == "resume" and _window_alive(cfg):
+                # Re-check liveness under the lock before spawning a RESUME: the
+                # winner's _spawn_wake records the new session (set_awake) before
+                # releasing this lock, so a loser arriving after sees
+                # _window_alive()=True and skips (07-20 live race: pacemaker tick
+                # reconcile and ctl wake both passed the "no resident" check
+                # before either spawned, landing two identical resume windows).
+                win = {"mode": "window", "session_id": None, "text": None,
+                      "skipped": "spawn_race_lost"}
+            elif rotate_driven and not wake_state.peek_rotated(cfg):
+                # Defense-in-depth only (should be unreachable under the
+                # single-classify-under-lock structure above): rotate_driven came
+                # from THIS SAME classification call, so the flag it observed is
+                # still this entrant's to claim -- no other holder of this lock
+                # could have consumed it in between. Kept as a belt-and-braces
+                # guard, never the primary defense.
+                win = {"mode": "window", "session_id": None, "text": None,
+                      "skipped": "spawn_race_lost"}
+            else:
+                win = _window_wake(conn, cfg, window_text, now,
+                                   respawn=(plan == "fresh"),
+                                   wake_reasons=wake_reasons)
+                # Consume the rotate flag ONLY now the fresh successor is live
+                # (rotate-driven fresh, win a real result dict -- not None/skip).
+                # A None (window failure) or skip leaves the flag set for the
+                # retry to own; a /clear-driven fresh has no flag to consume.
+                if (rotate_driven and win is not None
+                        and not win.get("skipped")):
+                    wake_state.take_rotated(cfg)
         if win is not None and win.get("skipped") == "spawn_race_lost":
             # The winner already seeded the baseline / marked awake — this
             # entrant touches nothing further, just reports the outcome.
