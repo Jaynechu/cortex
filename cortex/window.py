@@ -245,6 +245,23 @@ _launch_command = launch_command  # back-compat alias
 
 def _spawn(cfg: dict, initial_prompt: str | None = None,
           resume_sid: str | None = None) -> str:
+    # Source-level spawn barrier: the single genuine window-creation choke point
+    # (both ensure_window and respawn route here). Under pytest, an unmocked test
+    # reaching this would launch a REAL iTerm window + `claude` (burning credits,
+    # spamming the desktop). Fail loudly instead — belt-and-braces with the
+    # conftest subprocess guard, covering future tests and out-of-repo callers the
+    # fixture cannot reach.
+    if os.environ.get("PYTEST_CURRENT_TEST"):
+        raise WindowError(
+            "refusing real window spawn under pytest: no test may launch a real "
+            "iTerm window + claude (burns credits, spams the desktop). Your test "
+            "reached window._spawn unmocked. Fix: stub the spawn boundary, e.g. "
+            "monkeypatch.setattr(window, 'respawn', lambda cfg, initial_prompt="
+            "None, resume_sid=None: 'test-sid'); if the wake takes the ear path "
+            "also stub window.append_wake_signal + wake._signal_landed. The "
+            "conftest autouse fixture _block_real_processes already blocks "
+            "osascript/claude subprocess calls; this barrier catches the window-"
+            "creation path that fixture cannot reach.")
     name = _esc(cfg["wake"].get("session_name", "cortex"))
     launch = _esc(launch_command(cfg, initial_prompt, resume_sid))
     # No `activate` — spawning must not steal keyboard focus. Creating a window

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from cortex import config, watchdog, wake_state
+from cortex import config, watchdog, wake, wake_state
 import cortex.lie_down as lie_down_mod
 
 
@@ -89,3 +89,55 @@ def test_fuse_timeout_with_handoff_forces_without_marker(cfg, monkeypatch):
     watchdog._fuse(cfg, grace=0.0)
     assert len(forced) == 1
     assert forced[0] is None  # handoff written -> clean proxy, no catchup marker
+
+
+def test_run_dead_window_retires_no_proxy_sleep(cfg, monkeypatch):
+    # An accidentally-closed window: ledger still awake, but the window is dead.
+    # The watchdog must retire immediately WITHOUT firing any proxy lie_down
+    # (silence_action / _fuse), so reconcile's rescue branch owns the revival.
+    wake_state.update(cfg, awake=True)
+    monkeypatch.setattr(watchdog.time, "sleep", lambda *_a, **_k: None)
+    monkeypatch.setattr(wake, "_window_alive", lambda c: False)
+
+    forced = []
+    monkeypatch.setattr(lie_down_mod, "lie_down",
+                        lambda cfg, force_slept=None: forced.append(force_slept))
+    # If the guard let control reach fuse/silence, these would run; make them
+    # loud so a regression is obvious.
+    monkeypatch.setattr(watchdog, "_fuse",
+                        lambda *a, **k: pytest.fail("fuse ran on dead window"))
+    monkeypatch.setattr(watchdog, "silence_action",
+                        lambda *a, **k: pytest.fail("silence ran on dead window"))
+
+    rc = watchdog.run(cfg)
+    assert rc == 0
+    assert forced == []  # no proxy lie_down for a dead window
+
+
+def test_run_alive_window_reaches_idle_gate(cfg, monkeypatch):
+    # An alive window keeps current behaviour: the poll proceeds to the idle gate.
+    wake_state.update(cfg, awake=True)
+    monkeypatch.setattr(watchdog.time, "sleep", lambda *_a, **_k: None)
+    monkeypatch.setattr(wake, "_window_alive", lambda c: True)
+    monkeypatch.setattr(watchdog.transcript, "user_silent_min", lambda c: 0.0)
+    monkeypatch.setattr(watchdog.transcript, "window_tokens", lambda c: 0)
+
+    class _FakeConn:
+        def close(self):
+            pass
+
+    monkeypatch.setattr(watchdog.db, "connect", lambda c: _FakeConn())
+    monkeypatch.setattr(watchdog.integration, "store_window_tokens",
+                        lambda conn, tokens: None)
+
+    reached = {"silence": False}
+
+    def fake_silence(cfg, silent_min, **kw):
+        reached["silence"] = True
+        wake_state.update(cfg, awake=False)  # end the loop cleanly
+        return "test-stop"
+
+    monkeypatch.setattr(watchdog, "silence_action", fake_silence)
+    rc = watchdog.run(cfg)
+    assert rc == 0
+    assert reached["silence"] is True  # alive -> idle gate ran (unchanged path)

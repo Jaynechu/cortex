@@ -9,7 +9,22 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from cortex import config, db, lie_down, transcript, wake_state
+from cortex import config, db, lie_down, transcript, wake_state, window
+
+
+def test_spawn_barrier_refuses_real_window_under_pytest(cfg):
+    """Source-level spawn guard: window._spawn is the single genuine
+    window-creation choke point (ensure_window + respawn both route here). Under
+    pytest (PYTEST_CURRENT_TEST set) it must raise WindowError BEFORE any
+    osascript runs, so an unmocked test path fails loudly instead of launching a
+    real iTerm window + claude. Belt-and-braces with the conftest subprocess
+    guard; covers future tests / out-of-repo callers the fixture cannot reach.
+    ensure_window and respawn inherit the barrier since both call _spawn."""
+    with pytest.raises(window.WindowError, match="refusing real window spawn"):
+        window._spawn(cfg)
+    # respawn routes through _spawn -> same barrier, no osascript reached.
+    with pytest.raises(window.WindowError, match="refusing real window spawn"):
+        window.respawn(cfg)
 
 
 @pytest.fixture

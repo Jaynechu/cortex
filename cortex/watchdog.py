@@ -534,6 +534,17 @@ def run(cfg: dict) -> int:
         if not st.get("awake"):
             _log("awake cleared -> watchdog retires")
             return 0  # cortex lay down on its own -> watchdog retires
+        # Window liveness gate: an accidentally-closed window leaves the ledger
+        # awake, so silence_action / _fuse below would forge a proxy lie_down
+        # (writing a future next_wake_at floor that starves the reconcile rescue
+        # branch). A dead window must never receive a proxy sleep from here —
+        # retire and let pacemaker reconcile (dead+awake+no-alarm -> resume) own
+        # the revival.
+        from cortex import wake
+        if not wake._window_alive(cfg):
+            _log("window dead -> no proxy sleep, watchdog retires; "
+                 "reconcile owns revival")
+            return 0
         if wake_state.is_paused(cfg):
             continue  # DND: no reaps / tuck-ins / fuse while paused
 
