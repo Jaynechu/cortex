@@ -423,43 +423,40 @@ def _signal_landed(cfg, before: float | None, timeout_sec: float) -> bool:
 
 # Bounded poll for a freshly-spawned window's NEW session transcript to appear.
 # The launched claude does not create its session jsonl until it starts its
-# first turn, so newest() right after respawn returns the PREVIOUS session's
+# first turn, so newest() right after respawn returns a PRE-EXISTING session's
 # file — recording that stale hint makes _window_rotated see a mismatch on the
-# next tick and respawn forever (the P0 loop). Poll until a file newer than the
-# pre-spawn newest (or past the pre-spawn timestamp) shows up; on timeout record
-# None so _window_rotated's None-hint guard keeps the alive window unrotated.
+# next tick and respawn forever (the P0 loop). Snapshot the dir's *.jsonl names
+# BEFORE spawn; poll until a file OUTSIDE that snapshot shows up (the new window
+# is by definition created after spawn); on timeout record None so
+# _window_rotated's None-hint guard keeps the alive window unrotated.
 _SPAWN_TRANSCRIPT_POLL_STEP_S = 0.5
 _SPAWN_TRANSCRIPT_POLL_TIMEOUT_S = 8.0
 
 
-def _wait_new_transcript(cfg, spawn_ts: float,
-                         exclude_sid: str | None = None) -> str | None:
-    """Poll (bounded) for the NEW session transcript after a spawn. Returns the
-    newest jsonl whose stem != exclude_sid AND whose mtime >= spawn_ts; None on
-    timeout (record None, never a stale path).
+def _wait_new_transcript(cfg, preexisting: set[str]) -> str | None:
+    """Poll (bounded) for the NEW session transcript after a spawn. Accepts a
+    jsonl iff its name is NOT in `preexisting` — the set of *.jsonl filenames
+    snapshotted from the transcript dir BEFORE the spawn launched. Returns the
+    newest such file (by mtime); None on timeout (record None, never a stale
+    path).
 
-    exclude_sid is the retiring window's claude session uuid (wake_state's
-    durable retired_sid). On a rotate spawn the OLD window stays alive and keeps
-    writing its own jsonl for several seconds after spawn_ts (lie_down MCP return
-    + its final turn), so that file is BOTH mtime-newest AND passes mtime >=
-    spawn_ts — freshness alone would accept it (live-confirmed 22:04: registered
-    the retiring session's transcript instead of the real new window's, which
-    only appears seconds later). Excluding the retired stem is the only guard
-    that holds even in tonight's case, where the lie_down claim had already
-    popped the recorded transcript hint to None (so there was no prev_path to
-    compare against). Acceptance is exclusion AND freshness, always."""
+    Filesystem, not ledger: the new window's jsonl is by definition created
+    after the spawn, so it is absent from the pre-spawn snapshot. The retiring
+    window's file — still being written for seconds after spawn (lie_down MCP
+    return + its final turn), hence mtime-newest — is by definition IN the
+    snapshot, so it is skipped no matter what the ledger recorded. The directory
+    is scanned for files outside the snapshot (not transcript.newest, which
+    during the race IS the retiring file); the newest of those is returned."""
     from cortex import transcript
 
+    d = transcript.transcript_dir(cfg)
     waited = 0.0
     while waited < _SPAWN_TRANSCRIPT_POLL_TIMEOUT_S:
-        cur = transcript.newest(cfg)
-        if cur is not None and cur.stem != exclude_sid:
-            try:
-                fresh_mtime = cur.stat().st_mtime >= spawn_ts
-            except OSError:
-                fresh_mtime = False
-            if fresh_mtime:
-                return str(cur)
+        if d.exists():
+            fresh = [p for p in d.glob("*.jsonl") if p.name not in preexisting]
+            if fresh:
+                newest = max(fresh, key=lambda p: p.stat().st_mtime)
+                return str(newest)
         time.sleep(_SPAWN_TRANSCRIPT_POLL_STEP_S)
         waited += _SPAWN_TRANSCRIPT_POLL_STEP_S
     return None
@@ -505,15 +502,16 @@ def _spawn_wake(conn, cfg, now, resume: bool = False,
     The recorded transcript hint must be the NEW session's jsonl — captured only
     after it actually appears (bounded poll) — never the pre-spawn newest, which
     is the OLD session and would drive an endless respawn loop next tick."""
-    from cortex import wake_state, watchdog, window
+    from cortex import transcript, wake_state, watchdog, window
 
     resume_sid = window.claude_session_id(cfg) if resume else None
-    # The retiring window's claude sid (durable retired_sid, set by the lie_down
-    # claim before this spawn). On a rotate the old window stays alive writing
-    # its own jsonl for several seconds past spawn_ts, so it is mtime-newest AND
-    # fresh — exclude it by stem so the poll waits for the REAL new session.
-    exclude_sid = wake_state.get_retired_sid(cfg)
-    spawn_ts = time.time()
+    # Snapshot the transcript dir's *.jsonl names BEFORE launching. The new
+    # window's jsonl is by definition created after spawn, so it is the file
+    # absent from this set; the retiring window's file (still being written for
+    # seconds past launch, hence mtime-newest) is by definition IN the set and
+    # is skipped — filesystem truth, independent of any ledger field.
+    tdir = transcript.transcript_dir(cfg)
+    preexisting = {p.name for p in tdir.glob("*.jsonl")} if tdir.exists() else set()
     # Capture the epoch token only to stamp the wake receipt (marrow's hook
     # validates it via wake_token_current). Capture failure (lock/parse) ->
     # receipt carries no token.
@@ -544,7 +542,7 @@ def _spawn_wake(conn, cfg, now, resume: bool = False,
     except window.WindowError as e:
         _alert_respawn_failed(conn, wake_id_of(now), str(e)[:180])
         return None
-    new_path = _wait_new_transcript(cfg, spawn_ts, exclude_sid=exclude_sid)
+    new_path = _wait_new_transcript(cfg, preexisting)
     # ONE atomic commit -- awake flip, wake_log_id, transcript hint, AND the new
     # resident session id (Fix 2), WITHOUT bumping the epoch. bump=False keeps
     # live gen == the receipt's gen so the marrow hook's equality check

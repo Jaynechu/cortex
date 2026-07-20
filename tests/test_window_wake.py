@@ -468,7 +468,7 @@ def test_window_wake_ear_miss_dead_respawns_with_catchup(cfg, monkeypatch):
     monkeypatch.setattr(
         window, "respawn",
         lambda c, initial_prompt=None, resume_sid=None: calls.__setitem__("respawn", calls["respawn"] + 1))
-    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, ts, exclude_sid=None: "/t/new.jsonl")
+    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, preexisting: "/t/new.jsonl")
     monkeypatch.setattr(window, "append_wake_signal", lambda c, now, token=None: None)
     monkeypatch.setattr(window, "type_wake_signal",
                         lambda c, now: calls.__setitem__("rearm", calls["rearm"] + 1))
@@ -714,13 +714,12 @@ def test_spawn_wake_records_new_transcript_not_stale(cfg, monkeypatch):
     records that, so a second consecutive wake on the alive window takes the ear
     path, not respawn.
 
-    Timing model (the crux): at the instant respawn() returns, the retiring
-    window is STILL WRITING its own jsonl, so newest() returns the OLD file
-    (fresh, mtime >= spawn_ts) for the first reads; the NEW window's file
-    appears on a LATER poll. The retiring sid is recorded as retired_sid before
-    the spawn (lie_down claim), so the poll skips OLD by stem and waits for NEW.
-    Modelled with a stateful newest() stub: OLD for the first N reads, then
-    NEW — both files fresh."""
+    Timing model (the crux): OLD exists on disk BEFORE the spawn (retiring
+    window, still being written — hence mtime-newest), so _spawn_wake captures
+    it in the pre-spawn snapshot; the NEW window's file appears only on a LATER
+    poll. Acceptance is snapshot-absence, not mtime: the file outside the
+    pre-spawn set is the new one no matter what the ledger recorded. Modelled by
+    making NEW appear on disk on the 3rd poll iteration."""
     from datetime import datetime as _dt
 
     from cortex import transcript, wake, watchdog, window
@@ -735,29 +734,20 @@ def test_spawn_wake_records_new_transcript_not_stale(cfg, monkeypatch):
     tdir.mkdir(parents=True)
     old = tdir / "OLD.jsonl"
     new = tdir / "NEW.jsonl"
-    old.write_text("{}")   # retiring window, still fresh on disk
+    old.write_text("{}")   # retiring window, present in the pre-spawn snapshot
 
-    # OLD is the retiring sid: the lie_down claim recorded it as retired_sid, so
-    # the poll must exclude it even though it is mtime-newest and fresh.
-    wake_state.set_retired_sid(cfg, str(old))
+    # NEW appears on disk on the 3rd poll iteration (a beat after respawn, as in
+    # production). Until then only OLD (snapshotted) exists, so the poll waits.
+    sleeps = {"n": 0}
 
-    # newest() returns OLD until the new session's jsonl "appears" on the 3rd
-    # read (as it does in production, a beat after respawn). Both files are fresh
-    # (mtime >= spawn_ts); only the retired-stem exclusion skips OLD.
-    reads = {"n": 0}
-
-    def stub_newest(c):
-        reads["n"] += 1
-        if reads["n"] >= 3:
+    def stub_sleep(s):
+        sleeps["n"] += 1
+        if sleeps["n"] >= 2:
             new.write_text("{}")
-            return new
-        return old
 
-    monkeypatch.setattr(transcript, "newest", stub_newest)
     monkeypatch.setattr(window, "respawn", lambda c, initial_prompt=None, resume_sid=None: "sid-new")
     monkeypatch.setattr(watchdog, "spawn", lambda c: None)
-    # Zero the poll sleep so the test does not actually wait.
-    monkeypatch.setattr(wake.time, "sleep", lambda s: None)
+    monkeypatch.setattr(wake.time, "sleep", stub_sleep)
 
     wake._spawn_wake(conn, cfg, _dt.now(timezone.utc))
     conn.close()
@@ -774,87 +764,75 @@ def test_spawn_wake_records_new_transcript_not_stale(cfg, monkeypatch):
     assert wake._window_rotated(cfg) is False  # no respawn loop
 
 
-def test_wait_new_transcript_rejects_stale_mtime(cfg, monkeypatch):
-    """A stale file (mtime < spawn_ts) must be rejected for the whole poll
-    window, yielding None on timeout — freshness alone gates a plain existing
-    jsonl."""
+def test_wait_new_transcript_rotate_accepts_file_outside_snapshot(cfg, monkeypatch):
+    """22:04 rotate regression, snapshot model: the RETIRING window is still
+    alive and keeps writing its own jsonl for seconds after the spawn (lie_down
+    MCP return + its final turn), so that file is mtime-newest the whole time.
+    It is in the pre-spawn snapshot, so the poll skips it and waits for the real
+    new window's file — which appears late and is NOT in the snapshot. The poll
+    returns the new one, never the mtime-newest retiring file."""
     from cortex import transcript, wake
 
     tdir = transcript.transcript_dir(cfg)
     tdir.mkdir(parents=True)
-    stale = tdir / "stale-session.jsonl"
-    stale.write_text("{}")
-    spawn_ts = stale.stat().st_mtime + 100  # spawn started AFTER the stale file's mtime
-
-    monkeypatch.setattr(wake.time, "sleep", lambda s: None)  # no real waiting
-    result = wake._wait_new_transcript(cfg, spawn_ts)
-    assert result is None  # stale file must never be accepted
-
-
-def test_wait_new_transcript_accepts_fresh_mtime(cfg, monkeypatch):
-    """Companion case: the jsonl's mtime IS >= spawn_ts (a genuinely new file)
-    -> accepted immediately."""
-    from cortex import transcript, wake
-
-    tdir = transcript.transcript_dir(cfg)
-    tdir.mkdir(parents=True)
-    fresh = tdir / "fresh-session.jsonl"
-    fresh.write_text("{}")
-    spawn_ts = fresh.stat().st_mtime - 100  # spawn started BEFORE the file's mtime
-
-    monkeypatch.setattr(wake.time, "sleep", lambda s: None)
-    result = wake._wait_new_transcript(cfg, spawn_ts)
-    assert result == str(fresh)
-
-
-def test_wait_new_transcript_rotate_skips_retiring_window_jsonl(cfg, monkeypatch):
-    """22:04 rotate regression: the RETIRING window is still alive and keeps
-    writing its own jsonl for seconds after spawn_ts (lie_down MCP return + its
-    final turn), so that file is mtime-newest AND passes mtime >= spawn_ts.
-    Freshness alone would accept the retiring session's transcript; the real new
-    window's jsonl appears late. With exclude_sid set to the retired stem, the
-    poll must SKIP the retiring file and return the new one once it lands."""
-    from cortex import transcript, wake
-
-    tdir = transcript.transcript_dir(cfg)
-    tdir.mkdir(parents=True)
-    old = tdir / "c3ab04de.jsonl"   # retiring window, keeps getting written
+    old = tdir / "c3ab04de.jsonl"   # retiring window, present pre-spawn
     new = tdir / "6d6e7b9c.jsonl"   # real new window, appears late
     old.write_text("{}")
-    spawn_ts = old.stat().st_mtime - 1  # both files are "fresh" (mtime >= spawn_ts)
+    preexisting = {"c3ab04de.jsonl"}
 
-    # newest() returns the still-written OLD file until the NEW jsonl appears on
-    # the 3rd read; without exclusion the OLD (fresh) file would be accepted.
-    reads = {"n": 0}
+    # NEW lands on the 3rd poll iteration; keep OLD mtime-newest throughout to
+    # prove the accept condition is snapshot-absence, not mtime.
+    import os
+    sleeps = {"n": 0}
 
-    def stub_newest(c):
-        reads["n"] += 1
-        if reads["n"] >= 3:
+    def stub_sleep(s):
+        sleeps["n"] += 1
+        if sleeps["n"] >= 2:
             new.write_text("{}")
-            return new
-        return old
+            bump = old.stat().st_mtime + 10  # OLD stays mtime-newest
+            os.utime(old, (bump, bump))
 
-    monkeypatch.setattr(transcript, "newest", stub_newest)
-    monkeypatch.setattr(wake.time, "sleep", lambda s: None)
-    result = wake._wait_new_transcript(cfg, spawn_ts, exclude_sid="c3ab04de")
-    assert result == str(new)   # skipped the retiring file, waited for the new one
+    monkeypatch.setattr(wake.time, "sleep", stub_sleep)
+    result = wake._wait_new_transcript(cfg, preexisting)
+    assert result == str(new)   # skipped the snapshotted file, returned the new one
 
 
-def test_wait_new_transcript_rotate_only_retiring_file_times_out(cfg, monkeypatch):
-    """If the new window's jsonl never lands within the poll window (only the
-    excluded retiring file exists, fresh), the poll must return None — never the
-    retired sid's path."""
+def test_wait_new_transcript_only_preexisting_times_out(cfg, monkeypatch):
+    """If no file outside the pre-spawn snapshot ever lands (only the retiring
+    file exists, still being written), the poll returns None — never a
+    snapshotted path."""
     from cortex import transcript, wake
 
     tdir = transcript.transcript_dir(cfg)
     tdir.mkdir(parents=True)
     old = tdir / "c3ab04de.jsonl"
     old.write_text("{}")
-    spawn_ts = old.stat().st_mtime - 1  # the retiring file is fresh
+    preexisting = {"c3ab04de.jsonl"}
 
     monkeypatch.setattr(wake.time, "sleep", lambda s: None)
-    result = wake._wait_new_transcript(cfg, spawn_ts, exclude_sid="c3ab04de")
-    assert result is None  # fresh but excluded -> never returned
+    result = wake._wait_new_transcript(cfg, preexisting)
+    assert result is None  # in the snapshot -> never returned
+
+
+def test_wait_new_transcript_picks_newest_of_several_new(cfg, monkeypatch):
+    """If several files outside the snapshot exist, the newest (by mtime) is
+    returned."""
+    import os
+    from cortex import transcript, wake
+
+    tdir = transcript.transcript_dir(cfg)
+    tdir.mkdir(parents=True)
+    (tdir / "old.jsonl").write_text("{}")
+    a = tdir / "new-a.jsonl"
+    b = tdir / "new-b.jsonl"
+    a.write_text("{}")
+    b.write_text("{}")
+    os.utime(a, (1000, 1000))
+    os.utime(b, (2000, 2000))  # b is newer
+
+    monkeypatch.setattr(wake.time, "sleep", lambda s: None)
+    result = wake._wait_new_transcript(cfg, {"old.jsonl"})
+    assert result == str(b)
 
 
 def test_spawn_wake_timeout_records_none_not_stale(cfg, monkeypatch):
@@ -879,7 +857,7 @@ def test_spawn_wake_timeout_records_none_not_stale(cfg, monkeypatch):
     monkeypatch.setattr(window, "respawn", lambda c, initial_prompt=None, resume_sid=None: "sid-x")
     monkeypatch.setattr(watchdog, "spawn", lambda c: None)
     # Force an immediate timeout so the test does not sleep.
-    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, ts, exclude_sid=None: None)
+    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, preexisting: None)
 
     wake._spawn_wake(conn, cfg, _dt.now(timezone.utc))
     conn.close()
@@ -1301,7 +1279,7 @@ def test_window_wake_dead_resumes_when_sid_present(cfg, monkeypatch):
                         lambda c, initial_prompt=None, resume_sid=None:
                         (calls.__setitem__("resume_sid", resume_sid),
                          calls.__setitem__("prompt", initial_prompt)))
-    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, ts, exclude_sid=None: "/t/new.jsonl")
+    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, preexisting: "/t/new.jsonl")
     # The Fix-3 fallback bell is exercised by its own tests; here we only assert
     # the resume LAUNCH stays clean, so stub it out (it would otherwise poll for a
     # model turn for resume_turn_timeout_sec).
@@ -1348,7 +1326,7 @@ def test_window_wake_dead_resumes_from_newest_jsonl_when_hint_none(cfg, monkeypa
                         (calls.__setitem__("resume_sid", resume_sid),
                          calls.__setitem__("launch_command",
                                            window.launch_command(c, initial_prompt, resume_sid))))
-    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, ts, exclude_sid=None: "/t/new.jsonl")
+    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, preexisting: "/t/new.jsonl")
     monkeypatch.setattr(wake, "_resume_fallback_bell", lambda *a, **k: None)
     monkeypatch.setattr(watchdog, "spawn", lambda c: None)
 
@@ -1386,7 +1364,7 @@ def test_window_wake_dead_resumes_newest_over_stale_recorded_hint(cfg, monkeypat
                         (calls.__setitem__("resume_sid", resume_sid),
                          calls.__setitem__("launch_command",
                                            window.launch_command(c, initial_prompt, resume_sid))))
-    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, ts, exclude_sid=None: "/t/new.jsonl")
+    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, preexisting: "/t/new.jsonl")
     monkeypatch.setattr(wake, "_resume_fallback_bell", lambda *a, **k: None)
     monkeypatch.setattr(watchdog, "spawn", lambda c: None)
 
@@ -1425,7 +1403,7 @@ def test_window_wake_dead_skips_newer_digest_resumes_older_window_session(cfg, m
                         (calls.__setitem__("resume_sid", resume_sid),
                          calls.__setitem__("launch_command",
                                            window.launch_command(c, initial_prompt, resume_sid))))
-    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, ts, exclude_sid=None: "/t/new.jsonl")
+    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, preexisting: "/t/new.jsonl")
     monkeypatch.setattr(wake, "_resume_fallback_bell", lambda *a, **k: None)
     monkeypatch.setattr(watchdog, "spawn", lambda c: None)
 
@@ -1454,7 +1432,7 @@ def test_window_wake_dead_no_sid_fresh_with_catchup(cfg, monkeypatch):
     monkeypatch.setattr(window, "respawn",
                         lambda c, initial_prompt=None, resume_sid=None:
                         calls.__setitem__("resume_sid", resume_sid))
-    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, ts, exclude_sid=None: "/t/new.jsonl")
+    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, preexisting: "/t/new.jsonl")
     monkeypatch.setattr(watchdog, "spawn", lambda c: None)
 
     from datetime import datetime as _dt
@@ -1511,7 +1489,7 @@ def test_window_wake_resume_spawn_failure_falls_back_to_fresh_catchup(cfg, monke
             raise window.WindowError("resumed window did not come up")
         return "new-iterm-sid"
     monkeypatch.setattr(window, "respawn", _respawn_stub)
-    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, ts, exclude_sid=None: "/t/new.jsonl")
+    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, preexisting: "/t/new.jsonl")
     monkeypatch.setattr(watchdog, "spawn", lambda c: None)
 
     from datetime import datetime as _dt

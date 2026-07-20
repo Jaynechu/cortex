@@ -140,7 +140,7 @@ def test_run_wake_two_concurrent_spawn_entrants_only_one_spawns(cfg, monkeypatch
     # serialization lock the loser sees it live and skips.
     monkeypatch.setattr(wake, "_window_alive",
                         lambda c: bool(wake_state.get_session_id(c)))
-    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, ts, exclude_sid=None: NEW_TRANSCRIPT)
+    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, preexisting: NEW_TRANSCRIPT)
     # transcript.newest must agree with the recorded hint the winner's commit
     # just wrote (both resolve to the SAME real file in production -- the spawn
     # actually creates it before _wait_new_transcript returns it). Without this,
