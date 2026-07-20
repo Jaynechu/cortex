@@ -6,9 +6,8 @@
           readiness timeout no longer looks like success.
   Fix 3 - a resumed wake types ONE machine-tagged bell only when no new model
           turn (assistant line) appears within resume_turn_timeout_sec.
-  Fix 4 - the fresh spawn (and the resume fallback bell) carry the (gen,state_id)
-          epoch token; set_awake is conditional; an epoch advance during the slow
-          startup rejects the stale activation without overwriting state.
+  Fix 4 - REMOVED (2026-07-20): the spawn-path set_awake CAS is gone; the
+          physically-up window is the resident, unconditionally.
   Fix 5 - the wake note opens with a config-driven machine-origin tag.
 
 No iTerm/osascript here; window control is stubbed. Temp cortex_home + temp DB.
@@ -430,49 +429,6 @@ def test_fresh_spawn_receipt_carries_epoch_token(cfg, monkeypatch):
     # Fix 2: the new session id is committed atomically with the awake flip
     # (set_awake's session_id= param) -- window.respawn itself never persists it.
     assert d["session_id"] == "sid-new"
-
-
-def test_fresh_spawn_epoch_advanced_rejects_activation(cfg, monkeypatch):
-    """Fix 4 race: a user reset / lie_down / newer wake advances the epoch DURING
-    the slow window startup. The stale spawn's set_awake must reject: state is NOT
-    overwritten (awake stays as the newer epoch left it), the watchdog is NOT
-    started, and the outcome is audited. Modelled by bumping gen inside the
-    respawn stub (i.e. between the pre-spawn epoch capture and set_awake)."""
-    from cortex import wake, watchdog, window
-
-    _seed_wake_row(cfg, "fresh-race")
-    wake_state.set_session_id(cfg, "prior-live-sid")  # the newer epoch's own resident
-    watchdog_started = {"n": 0}
-    monkeypatch.setattr(watchdog, "spawn",
-                        lambda c: watchdog_started.__setitem__("n", watchdog_started["n"] + 1))
-    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, prev, ts: "/t/new.jsonl")
-
-    def _respawn(c, initial_prompt=None, resume_sid=None):
-        # A newer epoch lands during startup (e.g. a user message reset).
-        wake_state.bump_gen(cfg)
-        return "sid-new"  # this stale spawn's own (never-committed) sid
-    monkeypatch.setattr(window, "respawn", _respawn)
-
-    gen_before = wake_state.current_epoch(cfg)[0]
-
-    conn = db.connect(cfg)
-    try:
-        res = wake._spawn_wake(conn, cfg, datetime.now(timezone.utc), resume=False)
-    finally:
-        conn.close()
-
-    # The window physically came up -> a result dict is still returned (a None
-    # would drive a needless respawn on top of the window the newer epoch owns).
-    assert res is not None and res["mode"] == "window"
-    d = wake_state.load(cfg)
-    # The stale activation did NOT flip awake / clobber state under the newer gen.
-    assert d.get("awake") is not True
-    assert d["gen"] == gen_before + 1          # only the racing bump advanced it
-    assert watchdog_started["n"] == 0          # watchdog NOT started on reject
-    # Fix 2: the stale spawn's sid ("sid-new") must NEVER overwrite the newer
-    # epoch's own live resident -- window.respawn no longer persists it itself,
-    # and the rejected CAS means set_awake's session_id= param never landed.
-    assert d["session_id"] == "prior-live-sid"
 
 
 # ── Fix 5: machine-origin tag on the wake note ────────────────────────────────

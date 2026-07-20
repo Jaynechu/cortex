@@ -483,27 +483,15 @@ def _spawn_wake(conn, cfg, now, resume: bool = False,
     fresh-with-catchup on a resume failure, _window_wake -> headless on a fresh
     failure).
 
-    Epoch cancellation (Fix 4): the (gen, state_id) FULL token is captured BEFORE
-    the slow window spawn and carried into the wake receipt; set_awake's CAS
-    validates BOTH fields (expected_token), not gen alone -- a gen-only compare
-    tolerates a wake_state.json delete/recreate landing back on the same gen with
-    a new state_id, letting a stale actor overwrite the recreated state; marrow's
-    own receipt consumer already validates both fields. If a user reset /
-    lie_down / newer wake advances the epoch during the ~30-90s startup, the
-    stale spawn's set_awake rejects (returns None): the awake marker is NOT
-    overwritten, the new session id is NOT recorded as resident (Fix 2), the
-    watchdog is NOT started, and the outcome is audited. The window is physically
-    up regardless, so a real result dict is still returned (a None would drive an
-    unwanted fresh respawn on top of a window the newer epoch already owns).
+    The epoch token is captured before the spawn only to stamp the wake receipt
+    (marrow's hook validates it via wake_token_current). The set_awake commit
+    itself is UNCONDITIONAL (Fix 4 CAS removed): the physically-up window IS the
+    resident; a bell or user message racing ahead of the slow startup must never
+    cancel the registration.
 
     Session id commit (Fix 2): window.respawn() only VERIFIES readiness and
     returns the new sid -- it no longer persists it. The sid is committed here,
-    IN THE SAME atomic section as the awake flip (set_awake's session_id= param),
-    conditional on the same expected_token. A rejected CAS therefore leaves the
-    prior (still-live) resident's session id completely untouched, instead of the
-    old two-step (persist sid unconditionally, then maybe reject the awake flip)
-    which let a cancelled spawn's sid overwrite the newer epoch's live resident
-    before the CAS even ran.
+    IN THE SAME atomic section as the awake flip (set_awake's session_id= param).
 
     Resume fallback-bell ordering (Fix 3): the assistant-line baseline is
     captured BEFORE `claude --resume` is launched (a harness-driven turn written
@@ -522,10 +510,9 @@ def _spawn_wake(conn, cfg, now, resume: bool = False,
     prev_path = transcript.newest(cfg)
     prev_path = str(prev_path) if prev_path else None
     spawn_ts = time.time()
-    # Fix 4: capture the FULL alarm epoch token before spawning so a newer epoch
-    # landing during startup can cancel this stale spawn's state overwrite. A
-    # capture failure (lock/parse) -> no token (set_awake stays unconditional,
-    # the pre-token behaviour) rather than wedging the wake.
+    # Capture the epoch token only to stamp the wake receipt (marrow's hook
+    # validates it via wake_token_current). Capture failure (lock/parse) ->
+    # receipt carries no token.
     try:
         token = wake_state.current_epoch(cfg)
     except wake_state.StateValidationError:
@@ -554,26 +541,15 @@ def _spawn_wake(conn, cfg, now, resume: bool = False,
         _alert_respawn_failed(conn, wake_id_of(now), str(e)[:180])
         return None
     new_path = _wait_new_transcript(cfg, prev_path, spawn_ts)
-    # Fix 2 + Fix 4: ONE atomic commit -- awake flip, wake_log_id, transcript hint,
-    # AND the new resident session id, all conditional on the SAME expected_token,
-    # WITHOUT bumping the epoch. The wake receipt (fresh window's baked bell, or
-    # the resume fallback bell below) carries this same captured (gen, state_id);
-    # a bump here would advance the live gen past the receipt's and the marrow
-    # hook's equality check (wake_token_current) would then read the receipt as
-    # stale and SUPPRESS the note. bump=False keeps live gen == the receipt's gen
-    # so a genuine wake is processed, while expected_token still rejects a spawn a
-    # NEWER epoch (user reset / lie_down) advanced past during the slow startup:
-    # None = do NOT overwrite state (session id included), do NOT start the
-    # watchdog, do NOT type the resume fallback bell (a superseded window is not
-    # this actor's to keep nudging), audit, and return the (physically live)
-    # window so the caller does not respawn on top of it.
-    new_epoch = wake_state.set_awake(
+    # ONE atomic commit -- awake flip, wake_log_id, transcript hint, AND the new
+    # resident session id (Fix 2), WITHOUT bumping the epoch. bump=False keeps
+    # live gen == the receipt's gen so the marrow hook's equality check
+    # (wake_token_current) processes the bell instead of suppressing it as
+    # stale. UNCONDITIONAL (Fix 4 CAS removed): the physically-up window is the
+    # resident, whatever raced past the epoch during the slow startup.
+    wake_state.set_awake(
         cfg, _wake_log_id(conn, now, wake_reasons), new_path,
-        expected_token=token, bump=False, session_id=new_sid)
-    if new_epoch is None:
-        _audit_wake(conn, wake_id_of(now),
-                    "spawn set_awake lost race (epoch superseded) -> marker not set")
-        return {"mode": "window", "session_id": None, "text": None}
+        bump=False, session_id=new_sid)
     watchdog.spawn(cfg)
     if resume_sid:
         # Fix 3: the awake flip is already committed; the fallback-bell poll now
