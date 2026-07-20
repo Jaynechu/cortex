@@ -146,7 +146,15 @@ def write_wake_receipt(cfg: dict, now, token=None, rearm: bool = False) -> None:
     flag, an ISO timestamp, and the current template prefix (so the consumer can
     shape-match without cortex config). Overwrites any prior receipt (stale
     hygiene). Best-effort: a write failure never crashes the pacemaker — the
-    consumer then takes the shape fallback."""
+    consumer then takes the shape fallback.
+
+    Also carries the CURRENT `cortex_registration_token` nonce (minted by
+    start_registration_handshake, independent of gen) into the receipt when one
+    is pending — the marrow claim validates registration against this nonce,
+    not gen, so ordinary unrelated gen advances during a minutes-long spawn/
+    resume startup never invalidate a claim in flight (07-20 live bug, 3rd
+    round). Read fresh at receipt-write time under the SAME call as the
+    handshake, so the two are always for the SAME spawn."""
     from datetime import timezone
 
     from cortex import wake_state
@@ -154,10 +162,12 @@ def write_wake_receipt(cfg: dict, now, token=None, rearm: bool = False) -> None:
     gen = state_id = None
     if token:
         gen, state_id = token
+    reg_token = wake_state.load(cfg).get("cortex_registration_token")
     receipt = {
         "text": text,
         "gen": int(gen) if gen is not None else None,
         "state_id": str(state_id) if state_id is not None else None,
+        "registration_token": str(reg_token) if reg_token else None,
         "rearm": bool(rearm),
         "ts": datetime.now(timezone.utc).isoformat(),
         # Both persisted so the consumer shape-matches without cortex config: the
@@ -184,7 +194,8 @@ def fresh_initial_prompt(cfg: dict, now, token=None) -> str:
     return wake_signal_line(cfg, now, token=token)
 
 
-def launch_command(cfg: dict, initial_prompt: str | None = None) -> str:
+def launch_command(cfg: dict, initial_prompt: str | None = None,
+                   resume_sid: str | None = None) -> str:
     # Identity + channel markers set explicitly (hooks derive channel from
     # MARROW_CHANNEL; MARROW_CORTEX=1 = cortex identity / kickout immunity).
     # --model/--effort pin tier + reasoning so the window never rides the
@@ -193,13 +204,17 @@ def launch_command(cfg: dict, initial_prompt: str | None = None) -> str:
     # claude's first positional prompt so a freshly launched window starts
     # acting immediately — the marrow hook detects the marker and injects the
     # full note; near-zero readable text (one emoji + a short marker line).
-    # P17: always a fresh brain — no --resume revival.
+    # A non-empty resume_sid adds `--resume <sid>` so a window that simply died
+    # (crash / manual close, NOT a deliberate rotate) comes back as the SAME
+    # session with full context — no fresh brain, no handoff catchup needed.
     home = str(config.cortex_home(cfg))
     cmd = cfg["wake"].get("launch_command", "claude")
     flags = f" --model {window_model(cfg)}"
     eff = window_effort(cfg)
     if eff:
         flags += f" --effort {eff}"
+    if resume_sid:
+        flags += f" --resume {_shq(resume_sid)}"
     # Skip the workspace-trust dialog so the injected note lands (a fresh dir
     # otherwise blocks on the trust prompt). Mirrors marrow's headless call.
     if cfg["wake"].get("skip_permissions", True):
@@ -239,9 +254,10 @@ def append_wake_signal(cfg: dict, now, token=None) -> None:
 _launch_command = launch_command  # back-compat alias
 
 
-def _spawn(cfg: dict, initial_prompt: str | None = None) -> str:
+def _spawn(cfg: dict, initial_prompt: str | None = None,
+          resume_sid: str | None = None) -> str:
     name = _esc(cfg["wake"].get("session_name", "cortex"))
-    launch = _esc(launch_command(cfg, initial_prompt))
+    launch = _esc(launch_command(cfg, initial_prompt, resume_sid))
     # No `activate` — spawning must not steal keyboard focus. Creating a window
     # still brings iTerm forward, so capture the frontmost app and restore it.
     prev = _frontmost_bid()
@@ -299,14 +315,56 @@ def _close_session(sid: str) -> None:
         pass
 
 
-def respawn(cfg: dict, initial_prompt: str | None = None) -> str:
+def claude_session_id(cfg: dict) -> str | None:
+    """The claude conversation session UUID for --resume: the stem of a
+    session jsonl (~/.claude/projects/<cwd>/<uuid>.jsonl). This is NOT the
+    iTerm session id (wake_state.session_id).
+
+    Priority: the newest WINDOW-LINEAGE session jsonl in the transcript dir
+    FIRST (transcript.newest_window_lineage) — the newest jsonl whose first
+    user message carries the wake signal marker, i.e. was launched as a cortex
+    window (fresh_initial_prompt bakes it into every window's first prompt
+    since dccb3d4). Plain newest() is NOT enough: the transcript dir also holds
+    HEADLESS session archives (marrow's sessionend digest runs `claude -p`
+    against this same cwd -> same projects dir), and a digest run can be the
+    mtime-newest file — resuming it exposes its full worker prompt in the
+    window (live-confirmed). The recorded hint is a best-effort bounded poll
+    captured right after a spawn (_wait_new_transcript, ~8s) — the claude TUI
+    can take 30s+ to create its session jsonl, so in real timing the poll
+    routinely times out (hint None) AND, if a stale entry from a previous cycle
+    was never cleared, the hint can be present but wrong (live-confirmed:
+    resumed a stale recorded uuid instead of the dead window's real archive).
+    The hint is now only a fallback for when no marker-bearing transcript file
+    exists at all. None only when neither yields a UUID (caller falls back to
+    a fresh spawn)."""
+    from pathlib import Path
+    from cortex import transcript as _transcript
+
+    # Window-lineage marker = the visible bell template prefix (e.g. '☀️'): every
+    # window's first prompt now leads with it (fresh_initial_prompt).
+    marker = bell_template_prefix(cfg).strip()
+    lineage = _transcript.newest_window_lineage(cfg, marker)
+    if lineage is not None:
+        return lineage.stem
+    raw = wake_state.load(cfg).get("transcript")
+    if raw:
+        stem = Path(str(raw)).stem
+        if stem:
+            return stem
+    return None
+
+
+def respawn(cfg: dict, initial_prompt: str | None = None,
+           resume_sid: str | None = None) -> str:
     """Replace the resident window with a new one: SIGTERM its `claude` process
-    (never SIGKILL), close the old iTerm session, then spawn a FRESH brain. A
-    non-empty initial_prompt (fresh_initial_prompt: emoji + bell marker) is baked
-    into the launch command so the window starts acting immediately — no arm
-    prompt, no lie-down-first, no signal. Persists and returns the new resident
-    sid. Used for every window wake (rotate/rebirth/dead) — P17: no resume-
-    revival."""
+    (never SIGKILL), close the old iTerm session, then spawn. A non-empty
+    initial_prompt (fresh_initial_prompt: emoji + bell marker) is baked into the
+    launch command so the window starts acting immediately — no arm prompt, no
+    lie-down-first, no signal. A non-empty resume_sid launches `claude --resume
+    <sid>` (same conversation, full context) instead of a fresh brain — used
+    when the window simply died with no rotate flag. Persists and returns the
+    new resident sid. Reused for rotate/rebirth (fresh) and the dead-window
+    recovery (resume)."""
     pid = find_claude_pid(cfg)
     if pid is not None:
         try:
@@ -316,7 +374,7 @@ def respawn(cfg: dict, initial_prompt: str | None = None) -> str:
     old = wake_state.get_session_id(cfg)
     if old:
         _close_session(old)
-    sid = _spawn(cfg, initial_prompt)
+    sid = _spawn(cfg, initial_prompt, resume_sid)
     wake_state.set_session_id(cfg, sid)
     _wait_ready(sid, cfg)
     return sid

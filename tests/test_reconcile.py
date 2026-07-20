@@ -13,6 +13,11 @@ import pytest
 
 from cortex import config, db, lie_down, pacemaker_tick, wake_state
 
+# Captured at import time (before the autouse _no_real_rotate_successor fixture
+# in conftest.py stubs lie_down._spawn_successor to a no-op) so the dedicated
+# succession tests can monkeypatch it back and exercise the real function.
+_real_spawn_successor = lie_down._spawn_successor
+
 
 @pytest.fixture
 def cfg(tmp_path):
@@ -56,6 +61,31 @@ def test_set_awake_clears_ledger(cfg):
     assert wake_state.get_next_wake_at(cfg) is None
 
 
+def test_set_awake_bump_false_reuses_handshake_epoch(cfg):
+    """07-20 live bug: set_awake's default bump would invalidate the
+    registration token minted moments earlier by start_registration_handshake,
+    before the spawned window's own hook could ever claim it. bump=False +
+    expected_gen reuses that exact epoch instead of advancing past it — a token
+    minted from the handshake's gen stays current after set_awake runs."""
+    reg_token = wake_state.start_registration_handshake(cfg)
+    new_epoch = wake_state.set_awake(cfg, 1, "/t/new.jsonl",
+                                     expected_gen=reg_token[0], bump=False)
+    assert new_epoch == reg_token  # same epoch, not advanced
+    assert wake_state.token_current(cfg, reg_token) is True
+    assert wake_state.is_awake(cfg) is True
+
+
+def test_set_awake_bump_false_fails_closed_on_superseded_epoch(cfg):
+    """bump=False + a stale expected_gen (a newer epoch already moved on) aborts
+    (None), same CAS discipline as the existing conditional (bump=True) path."""
+    reg_token = wake_state.start_registration_handshake(cfg)
+    wake_state.start_registration_handshake(cfg)  # a second handshake bumps past it
+    result = wake_state.set_awake(cfg, 1, "/t/new.jsonl",
+                                  expected_gen=reg_token[0], bump=False)
+    assert result is None
+    assert wake_state.is_awake(cfg) is False  # marker not set by the losing call
+
+
 def test_lie_down_rotate_records_retired_sid(cfg):
     """lie_down(rotate=True) durably records the retiring session's sid (the
     transcript jsonl stem) at the same moment it sets the one-shot rotated
@@ -70,6 +100,131 @@ def test_lie_down_no_rotate_leaves_retired_sid_untouched(cfg):
     wake_state.set_awake(cfg, 1, "/t/still-alive.jsonl")
     lie_down.lie_down(cfg, rotate=False, next_wake_min=30)
     assert wake_state.get_retired_sid(cfg) is None
+
+
+# --- rotate succession: hand over NOW (fresh successor spawns immediately) -----
+
+def test_lie_down_rotate_spawns_successor_immediately(cfg, monkeypatch):
+    """Rotate = hand over NOW: a fresh successor window spawns immediately as part
+    of the rotate flow (forced decision through wake.run_wake), not at the ledger
+    time. The mocked spawn boundary is wake.run_wake. Overrides the autouse
+    _no_real_rotate_successor stub with the real _spawn_successor so this test
+    actually exercises it."""
+    from cortex import wake
+    monkeypatch.setattr(lie_down, "_spawn_successor", _real_spawn_successor)
+    fired = {}
+    monkeypatch.setattr(wake, "run_wake",
+                        lambda conn, c, decision, **k:
+                        fired.update(decision=decision) or {"mode": "window"})
+    wake_state.set_awake(cfg, 1, "/t/retiring.jsonl")
+    r = lie_down.lie_down(cfg, rotate=True, next_wake_min=30)
+    assert r["rotated"] is True
+    assert fired.get("decision", {}).get("wake") is True
+    assert fired["decision"]["wake_reasons"] == "rotate"
+
+
+def test_lie_down_no_rotate_never_spawns_successor(cfg, monkeypatch):
+    """A plain (non-rotate) sleep never spawns a successor — the resident stays."""
+    from cortex import wake
+    fired = {"n": 0}
+    monkeypatch.setattr(wake, "run_wake",
+                        lambda *a, **k: fired.__setitem__("n", fired["n"] + 1))
+    wake_state.set_awake(cfg, 1, "/t/alive.jsonl")
+    lie_down.lie_down(cfg, rotate=False, next_wake_min=30)
+    assert fired["n"] == 0
+
+
+def test_lie_down_rotate_spawn_failure_retirement_still_lands(cfg, monkeypatch):
+    """A successor spawn failure must NOT wedge the rotate: the retirement stays
+    landed (retired_sid recorded, cortex_claude_sid popped) and the failure is
+    surfaced via wake._alert_respawn_failed (best-effort)."""
+    from cortex import wake
+    monkeypatch.setattr(lie_down, "_spawn_successor", _real_spawn_successor)
+    wake_state.update(cfg, cortex_claude_sid="old-sid")
+
+    def _boom(*a, **k):
+        raise RuntimeError("spawn boom")
+    monkeypatch.setattr(wake, "run_wake", _boom)
+    alerts = {"n": 0}
+    monkeypatch.setattr(wake, "_alert_respawn_failed",
+                        lambda conn, wid, detail: alerts.__setitem__("n", alerts["n"] + 1))
+    wake_state.set_awake(cfg, 1, "/t/retiring.jsonl")
+    r = lie_down.lie_down(cfg, rotate=True, next_wake_min=30)
+    assert r["rotated"] is True  # retirement landed despite the spawn failure
+    assert wake_state.get_retired_sid(cfg) == "retiring"
+    assert wake_state.load(cfg).get("cortex_claude_sid") is None  # registration dropped
+    assert alerts["n"] == 1  # failure alerted
+
+
+def test_spawn_successor_idempotent_when_resident_already_alive(cfg, monkeypatch):
+    """No double-spawn: if a live registered resident already holds office (the
+    successor already landed, or a racing reconcile beat us), _spawn_successor
+    skips run_wake."""
+    from cortex import wake
+    wake_state.update(cfg, cortex_resident_pid=4321, cortex_claude_sid="successor")
+    monkeypatch.setattr(wake_state, "_pid_alive", lambda pid: True)
+    monkeypatch.setattr("cortex.lie_down._chains_to_ancestor",
+                        lambda pid, ancestor: False)
+    fired = {"n": 0}
+    monkeypatch.setattr(wake, "run_wake",
+                        lambda *a, **k: fired.__setitem__("n", fired["n"] + 1))
+    conn = db.connect(cfg)
+    try:
+        lie_down._spawn_successor(conn, cfg)
+    finally:
+        conn.close()
+    assert fired["n"] == 0  # live resident already in office -> no second spawn
+
+
+def test_run_wake_two_concurrent_spawn_entrants_only_one_spawns(cfg, monkeypatch):
+    """07-20 live race repro: a SIGKILLed resident (simulated crash, no rotate) +
+    a concurrent ctl wake both pass the "no resident" check before either used to
+    spawn (two unlocked steps) -> two identical windows landed. Two threads both
+    call wake.run_wake through the real window/spawn branch (_window_wake ->
+    _spawn_wake, with only window.respawn/watchdog.spawn/osascript-adjacent calls
+    stubbed) against the SAME on-disk state dir; window.respawn sleeps briefly so
+    both threads are inside the classify-then-spawn window at the same time if
+    unlocked. Exactly one must actually spawn; the loser must see the winner's
+    registered office and skip."""
+    import threading
+    import time as _time
+    from cortex import transcript, wake, watchdog, window
+
+    monkeypatch.setattr(transcript, "newest_window_lineage", lambda cfg, marker: None)
+    spawn_calls = {"n": 0}
+    lock_for_calls = threading.Lock()
+
+    def _respawn_stub(c, initial_prompt=None, resume_sid=None):
+        with lock_for_calls:
+            spawn_calls["n"] += 1
+        _time.sleep(0.05)  # widen the race window
+        return "new-iterm-sid"
+    monkeypatch.setattr(window, "respawn", _respawn_stub)
+    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, prev, ts: "/t/new.jsonl")
+    monkeypatch.setattr(watchdog, "spawn", lambda c: None)
+
+    def _fire():
+        conn = db.connect(cfg)
+        try:
+            now = datetime.now(_tz(cfg))
+            decision = {"wake": True, "reasons": [], "gated_by": [],
+                        "wake_reasons": "test",
+                        "explanation": "concurrent entrant"}
+            wake.run_wake(conn, cfg, decision, now=now)
+        finally:
+            conn.close()
+
+    t1 = threading.Thread(target=_fire)
+    t2 = threading.Thread(target=_fire)
+    t1.start()
+    t2.start()
+    t1.join(timeout=10)
+    t2.join(timeout=10)
+    assert spawn_calls["n"] == 1  # exactly one entrant actually spawned a window
+    # The winner's spawn registered the office (resident pid recorded by
+    # start_registration_handshake's own claim path is simulated separately —
+    # here the state-level guarantee is what matters: only one window.respawn
+    # call ever fired, so at most one real iTerm window exists.
 
 
 # --- no night clamp (P8: gate-end clamp retired) ------------------------------
@@ -368,7 +523,7 @@ def test_ctl_wake_dormant_signal_clears_paused(cfg, monkeypatch):
     """Remote wake of a live-but-dormant resident lifts DND (ct-pause documents
     /ct-wake as its exit). The caller never takes office."""
     from cortex import ctl, wake
-    wake_state.update(cfg, cortex_resident_pid=4321)  # live foreign resident, dormant
+    wake_state.update(cfg, cortex_resident_pid=4321, cortex_claude_sid="resident")  # live foreign resident, dormant
     monkeypatch.setattr(wake_state, "_pid_alive", lambda pid: True)
     monkeypatch.setattr("cortex.lie_down._chains_to_ancestor",
                         lambda pid, ancestor: False)  # foreign
@@ -379,31 +534,41 @@ def test_ctl_wake_dormant_signal_clears_paused(cfg, monkeypatch):
     assert wake_state.is_paused(cfg) is False
 
 
-def test_ctl_wake_dead_resident_reports_never_spawns(cfg, monkeypatch):
-    """Resident dead (no recorded pid / not alive) -> report death + diagnostics
-    hint, DO NOT spawn (spawn authority is exclusively the pacemaker's). The
-    caller never takes office, never sets awake, never writes registration."""
+def test_ctl_wake_no_resident_triggers_fresh_respawn(cfg, monkeypatch):
+    """No resident in office (no recorded pid -> resident_alive False) -> respawn
+    a FRESH window NOW via the pacemaker fire path (run_wake). The caller window
+    never takes office, never sets awake itself, never writes registration."""
     from cortex import ctl, wake
-    # no cortex_resident_pid recorded -> resident_alive False -> dead branch
     wake_state.set_retired_sid(cfg, "some-other-session-from-ages-ago")
-    wake_state.set_next_wake_at(cfg, "2099-01-01T00:00:00+10:00")
     spawned = {"n": 0}
     monkeypatch.setattr(wake, "run_wake",
-                        lambda *a, **k: spawned.__setitem__("n", spawned["n"] + 1))
+                        lambda *a, **k: spawned.__setitem__("n", spawned["n"] + 1)
+                        or {"mode": "window"})
     line = ctl.cmd_wake(cfg)
-    assert spawned["n"] == 0  # never spawns
-    assert wake_state.is_awake(cfg) is False  # no take-office
-    assert "cortex_claude_sid" not in wake_state.load(cfg)
-    assert wake_state.get_next_wake_at(cfg) == "2099-01-01T00:00:00+10:00"  # untouched
-    assert "{backup_hint}" not in line  # template placeholder substituted
-    assert line.startswith(cfg["wake"]["ctl_wake_dead_text"].split("{")[0])
+    assert spawned["n"] == 1  # fresh respawn fired through run_wake
+    assert wake_state.is_awake(cfg) is False  # caller never takes office
+    assert "cortex_claude_sid" not in wake_state.load(cfg)  # caller writes none
+    assert line == cfg["wake"]["ctl_wake_respawn_text"]
+
+
+def test_ctl_wake_no_resident_respawn_failure_returns_diagnostics(cfg, monkeypatch):
+    """A run_wake failure on the no-resident branch surfaces the diagnostics-hint
+    fallback text ({backup_hint} substituted)."""
+    from cortex import ctl, wake
+
+    def _boom(*a, **k):
+        raise RuntimeError("spawn boom")
+    monkeypatch.setattr(wake, "run_wake", _boom)
+    line = ctl.cmd_wake(cfg)
+    assert "{backup_hint}" not in line  # placeholder substituted
+    assert line.startswith(cfg["wake"]["ctl_wake_respawn_failed_text"].split("{")[0])
 
 
 def test_ctl_wake_live_awake_resident_on_duty_zero_side_effects(cfg, monkeypatch):
     """Live resident, already awake -> on-duty text, zero side effects. The caller
     is an ordinary remote and never touches wake_state."""
     from cortex import ctl, wake
-    wake_state.update(cfg, cortex_resident_pid=4321)
+    wake_state.update(cfg, cortex_resident_pid=4321, cortex_claude_sid="resident")
     monkeypatch.setattr(wake_state, "_pid_alive", lambda pid: True)
     monkeypatch.setattr("cortex.lie_down._chains_to_ancestor",
                         lambda pid, ancestor: False)  # foreign live resident
@@ -422,7 +587,7 @@ def test_ctl_wake_live_dormant_resident_sends_ear_signal(cfg, monkeypatch):
     """Live but DORMANT resident -> send a wake signal NOW via the pacemaker fire
     path (forced ctl decision through run_wake). The caller never takes office."""
     from cortex import ctl, wake
-    wake_state.update(cfg, cortex_resident_pid=4321)
+    wake_state.update(cfg, cortex_resident_pid=4321, cortex_claude_sid="resident")
     monkeypatch.setattr(wake_state, "_pid_alive", lambda pid: True)
     monkeypatch.setattr("cortex.lie_down._chains_to_ancestor",
                         lambda pid, ancestor: False)  # foreign live resident

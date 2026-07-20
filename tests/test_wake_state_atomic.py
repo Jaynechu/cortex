@@ -134,6 +134,46 @@ def test_registration_pending_survives_until_claimed_elsewhere(cfg):
     assert "cortex_claude_sid" not in wake_state.load(cfg)
 
 
+def test_start_registration_handshake_mints_dedicated_nonce(cfg):
+    """07-20 live bug (3rd round): the registration claim must validate against
+    a nonce independent of gen, not gen itself — gen advances on ordinary
+    unrelated traffic throughout the real minutes-long gap between mint and
+    claim. Each handshake mints a fresh, distinct nonce."""
+    wake_state.start_registration_handshake(cfg)
+    tok1 = wake_state.load(cfg).get("cortex_registration_token")
+    assert tok1  # non-empty
+    wake_state.start_registration_handshake(cfg)  # a second/superseding spawn
+    tok2 = wake_state.load(cfg).get("cortex_registration_token")
+    assert tok2 and tok2 != tok1  # single-flight: overwritten, never reused
+
+
+def test_start_registration_handshake_writes_audit_line(cfg):
+    """A silent gen bump here was part of why the 07-20 registration-claim bug
+    took three rounds to diagnose live — must be audited."""
+    wake_state.start_registration_handshake(cfg)
+    log = config.wake_audit_log_path(cfg).read_text()
+    assert "register_handshake" in log
+
+
+def test_registration_nonce_survives_unrelated_gen_advances(cfg):
+    """The nonce minted by start_registration_handshake stays valid (still the
+    CURRENT pending token) even after several unrelated gen-bumping operations
+    fire in between — commit_wait, set_awake, another kick, etc. Only a NEWER
+    handshake (a superseding spawn) invalidates it, never ordinary traffic."""
+    gen0, _ = wake_state.start_registration_handshake(cfg)
+    reg_token = wake_state.load(cfg).get("cortex_registration_token")
+    # Ordinary unrelated activity bumps gen repeatedly (simulates the real
+    # minutes-long gap between handshake mint and the spawned window's first-
+    # prompt claim: another session's wait(), a real user message elsewhere).
+    wake_state.set_awake(cfg, 1, "/t/unrelated.jsonl")
+    wake_state.commit_wait(cfg, "2026-07-20T05:10:00+00:00")
+    gen_final = wake_state.load(cfg).get("gen")
+    assert gen_final > gen0 + 1  # gen genuinely moved past the handshake's own
+    # The nonce is untouched by all of that -> still the live pending token.
+    assert wake_state.load(cfg).get("cortex_registration_token") == reg_token
+    assert wake_state.load(cfg).get("cortex_registration_pending") is True
+
+
 def test_rotate_retires_registration_immediately(cfg):
     """/ct-clear (lie_down rotate=True) drops cortex_claude_sid the instant the
     rotate claim lands — the old window loses registration before the new one

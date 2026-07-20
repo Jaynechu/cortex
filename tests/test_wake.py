@@ -338,20 +338,64 @@ def test_window_wake_plan_clears_transcript_on_rotate_consume(rot_cfg):
     assert wake_state.load(rot_cfg).get("transcript") is None
 
 
-def test_fresh_with_catchup_always_fresh_no_resume(monkeypatch, marrow_conn, rot_cfg):
-    """P17: no resume-revival — a dead resident (whatever its transcript hint)
-    always fresh-spawns via _spawn_wake (no resume/resume_sid parameter left)."""
-    from cortex import wake_state
+def test_resume_or_fresh_dead_normal_resume(monkeypatch, marrow_conn, rot_cfg):
+    """Baseline: an un-retired resumable sid resumes normally."""
+    from cortex import transcript, wake_state
+    monkeypatch.setattr(transcript, "newest_window_lineage", lambda cfg, marker: None)
     wake_state.update(rot_cfg, transcript="/t/alive-sid.jsonl")
     captured = {}
     monkeypatch.setattr(wake, "_spawn_wake",
-                        lambda conn, cfg, now, **kw:
-                        captured.update(called=True) or {"mode": "window"})
-    wake._fresh_with_catchup(marrow_conn, rot_cfg, DAY1, "test")
-    assert captured["called"] is True
+                        lambda conn, cfg, now, resume=False, **kw:
+                        captured.update(resume=resume) or {"mode": "window"})
+    wake._resume_or_fresh_dead(marrow_conn, rot_cfg, DAY1, "test")
+    assert captured["resume"] is True
 
 
-def test_fresh_with_catchup_seeds_from_delivered_catchup_cutoff(
+def test_resume_or_fresh_dead_retired_sid_forces_fresh(monkeypatch, marrow_conn, rot_cfg):
+    """Coordinator repro: `rotated` already consumed by an earlier wake, but
+    the stale transcript pointer still resolves to the retired session's sid.
+    retired_sid must block the resume and force a fresh spawn instead — this
+    is the single choke point both ctl.cmd_wake's dead-branch and tick
+    reconcile's resume share (_window_wake -> _resume_or_fresh_dead)."""
+    from cortex import transcript, wake_state
+    monkeypatch.setattr(transcript, "newest_window_lineage", lambda cfg, marker: None)
+    # rotated already consumed elsewhere; stale pointer still names the
+    # retired session (durably recorded via set_retired_sid at rotate time).
+    wake_state.update(rot_cfg, transcript="/t/retired-sid.jsonl")
+    wake_state.set_retired_sid(rot_cfg, "/t/retired-sid.jsonl")
+    assert wake_state.load(rot_cfg).get("rotated") is None  # already consumed
+    captured = {}
+    monkeypatch.setattr(wake, "_spawn_wake",
+                        lambda conn, cfg, now, resume=False, **kw:
+                        captured.update(resume=resume) or {"mode": "window"})
+    wake._resume_or_fresh_dead(marrow_conn, rot_cfg, DAY1, "test")
+    assert captured["resume"] is False  # never resumes a retired session
+
+
+def test_resume_or_fresh_dead_resume_spawn_failure_falls_back_to_fresh(
+        monkeypatch, marrow_conn, rot_cfg):
+    """A resume ATTEMPT that fails to land (the resume spawn returns None — bad/
+    gone sid, claude errors out, window doesn't come up) must NEVER leave the
+    caller with nothing: it retries once as a fresh spawn (with catchup), never
+    falling all the way through to headless from here."""
+    from cortex import transcript, wake_state, window
+    monkeypatch.setattr(transcript, "newest_window_lineage", lambda cfg, marker: None)
+    wake_state.update(rot_cfg, transcript="/t/alive-sid.jsonl")
+    calls = []
+
+    def _spawn_wake_stub(conn, cfg, now, resume=False, **kw):
+        calls.append(resume)
+        if resume:
+            return None  # resume spawn failed to land
+        return {"mode": "window"}
+    monkeypatch.setattr(wake, "_spawn_wake", _spawn_wake_stub)
+    monkeypatch.setattr(window, "write_note", lambda cfg, text: None)
+    result = wake._resume_or_fresh_dead(marrow_conn, rot_cfg, DAY1, "test")
+    assert calls == [True, False]  # resume tried first, fresh retried on failure
+    assert result["mode"] == "window"  # never nothing, even after the resume failure
+
+
+def test_resume_or_fresh_dead_seeds_from_delivered_catchup_cutoff(
         monkeypatch, marrow_conn, rot_cfg):
     """#3: the dead-no-handoff branch REPLACES the first note with a second
     died_no_handoff catch-up note before spawning. Seeding must anchor to the
@@ -361,10 +405,10 @@ def test_fresh_with_catchup_seeds_from_delivered_catchup_cutoff(
     stay > baseline and duplicate in the first free-round.
 
     Here we prove the replacement note's cutoff is captured and returned. The
-    catch-up note is assembled inside _fresh_with_catchup; its cutoff reflects
+    catch-up note is assembled inside _resume_or_fresh_dead; its cutoff reflects
     the racer event present at that assembly, and that exact cutoff rides back on
     the result dict for run_wake's seed_baseline call."""
-    from cortex import wake_state, window
+    from cortex import transcript, wake_state, window
     # Rebuild events with a channel column (the autouse fixture omits it, which
     # the replay query needs to see the racer event).
     marrow_conn.execute("DROP TABLE events")
@@ -373,21 +417,23 @@ def test_fresh_with_catchup_seeds_from_delivered_catchup_cutoff(
         "timestamp TEXT, role TEXT, content TEXT, channel TEXT)")
     marrow_conn.commit()
 
-    # No handoff written -> the fresh-with-catchup branch replaces the note.
+    # No resumable sid + no handoff -> the fresh-with-catchup branch.
+    monkeypatch.setattr(transcript, "newest_window_lineage", lambda cfg, marker: None)
+    monkeypatch.setattr(window, "claude_session_id", lambda cfg: None)
     monkeypatch.setattr(wake, "_handoff_written_this_window", lambda cfg: False)
     monkeypatch.setattr(window, "write_note", lambda cfg, text: None)
     monkeypatch.setattr(wake, "_spawn_wake",
-                        lambda conn, cfg, now, **kw: {"mode": "window"})
+                        lambda conn, cfg, now, resume=False, **kw: {"mode": "window"})
     monkeypatch.setattr(wake.note, "_frontmost_app", lambda: None)
 
     # Event that races in AFTER the first note but is present when the catch-up
-    # note is assembled inside _fresh_with_catchup.
+    # note is assembled inside _resume_or_fresh_dead.
     marrow_conn.execute(
         "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
         ("s", "2026-07-08T03:00:30+00:00", "user", "raced between assemblies", "wx"))
     marrow_conn.commit()
 
-    result = wake._fresh_with_catchup(marrow_conn, rot_cfg, DAY1, "test")
+    result = wake._resume_or_fresh_dead(marrow_conn, rot_cfg, DAY1, "test")
     # The delivered catch-up note's cutoff rides back for seeding.
     assert result["note_cutoff"] == "2026-07-08T03:00:30+00:00"
 
@@ -399,17 +445,20 @@ def test_fresh_with_catchup_seeds_from_delivered_catchup_cutoff(
     assert d["replay"] == []  # racer already delivered -> not duplicated
 
 
-def test_fresh_with_catchup_no_note_replacement_keeps_first_cutoff(
+def test_resume_or_fresh_dead_no_note_replacement_keeps_first_cutoff(
         monkeypatch, marrow_conn, rot_cfg):
     """#3 counterpart: when the dead path does NOT replace the note (handoff was
     written this window), no note_cutoff key is set, so run_wake keeps the first
     note's captured cutoff."""
+    from cortex import transcript, window
+    monkeypatch.setattr(transcript, "newest_window_lineage", lambda cfg, marker: None)
+    monkeypatch.setattr(window, "claude_session_id", lambda cfg: None)
     monkeypatch.setattr(wake, "_handoff_written_this_window", lambda cfg: True)
     captured = {}
     monkeypatch.setattr(wake, "_spawn_wake",
-                        lambda conn, cfg, now, **kw:
+                        lambda conn, cfg, now, resume=False, **kw:
                         captured.update(spawned=True) or {"mode": "window"})
-    result = wake._fresh_with_catchup(marrow_conn, rot_cfg, DAY1, "test")
+    result = wake._resume_or_fresh_dead(marrow_conn, rot_cfg, DAY1, "test")
     assert captured.get("spawned") is True
     assert "note_cutoff" not in result  # no replacement -> caller keeps first cutoff
 

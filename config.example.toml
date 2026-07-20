@@ -38,6 +38,7 @@ wake_audit_log = ""
 wake_state_file = ""     # awake marker + resident iTerm session id. Default: <home>/state/wake_state.json
 wakeup_note_file = ""    # note text the window is told to Read. Default: <home>/wakeup_note.md
 watchdog_pidfile = ""    # per-wake watchdog pid. Default: <home>/state/watchdog.pid
+spawn_lock_file = ""     # serializes every window-spawn entrant. Default: <home>/state/spawn.lock
 # Claude Code transcript dir for the window. Empty = derived from cortex_home
 # (munge non-alphanumeric -> '-'). Default: ~/.claude/projects/<munged cortex_home>
 transcript_dir = ""
@@ -123,8 +124,10 @@ rotate_refuse_text = "Rotate refused: your wake-signal monitor is still running.
 # /ct-wake remote-control one-line outputs (caller window never takes office).
 ctl_wake_awake_text = "resident on duty — nothing to do."
 ctl_wake_signal_text = "wake signal sent — resident waking in place."
-# dead resident -> report, never spawn. {backup_hint} = resolved diagnostics path.
-ctl_wake_dead_text = "resident is dead — pacemaker will respawn on schedule/reconcile; no window opened here. Diagnostics: {backup_hint}"
+# no resident in office (sid cleared or pid dead) -> respawn a window NOW (resume preferred, fresh as fallback).
+ctl_wake_respawn_text = "no resident in office — respawning a window now."
+# respawn failed -> diagnostics hint. {backup_hint} = resolved diagnostics path.
+ctl_wake_respawn_failed_text = "no resident in office and respawn failed — the pacemaker will retry on schedule/reconcile. Diagnostics: {backup_hint}"
 
 # Per-wake watchdog thresholds (spawned at injection, killed at lie_down).
 [wake.watchdog]

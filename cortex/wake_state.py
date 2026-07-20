@@ -46,6 +46,14 @@ def watchdog_pidfile_path(cfg: dict) -> Path:
     return Path(raw).expanduser() if raw else config.state_dir(cfg) / "watchdog.pid"
 
 
+def spawn_lock_path(cfg: dict) -> Path:
+    """Exclusive flock file serialising EVERY window-spawn entrant (pacemaker
+    tick reconcile, ctl wake's no-resident branch, rotate succession) — see
+    wake._spawn_serialized. Default: <cortex_home>/state/spawn.lock."""
+    raw = cfg["paths"].get("spawn_lock_file") or ""
+    return Path(raw).expanduser() if raw else config.state_dir(cfg) / "spawn.lock"
+
+
 def lock_path(cfg: dict) -> Path:
     """Sibling .lock file guarding load-modify-write. Shared byte-for-byte with
     the marrow hook side so cross-process updates never lose each other.
@@ -286,17 +294,23 @@ def get_resident_pid(cfg: dict) -> int | None:
 
 
 def resident_alive(cfg: dict, caller_pid: int | None = None) -> bool:
-    """THE ONE liveness signal for "office is held right now". True iff the
-    RECORDED resident claude pid is alive (kill -0) AND is NOT in `caller_pid`'s
-    process chain (ancestor/descendant) — a live resident that IS the caller's
-    own chain is a self re-wake, not a foreign holder. No recorded pid = no
-    resident (False, claimable). Any read failure = fail-closed True (refuse to
-    grant). caller_pid defaults to os.getpid()."""
+    """THE ONE liveness signal for "office is held right now". True iff office is
+    REGISTERED (cortex_claude_sid set) AND its recorded resident claude pid is
+    alive (kill -0) AND is NOT in `caller_pid`'s process chain (ancestor/
+    descendant) — a live resident that IS the caller's own chain is a self
+    re-wake, not a foreign holder. No registration (rotated/retired window pops
+    cortex_claude_sid) OR no recorded pid = no resident (False, claimable) even
+    if a stale old pid stays alive. Any read failure = fail-closed True (refuse
+    to grant). caller_pid defaults to os.getpid()."""
     from cortex.lie_down import _chains_to_ancestor
     if caller_pid is None:
         caller_pid = os.getpid()
     try:
-        pid = get_resident_pid(cfg)
+        d = load(cfg)
+        if not d.get("cortex_claude_sid"):
+            return False
+        raw = d.get("cortex_resident_pid")
+        pid = int(raw) if raw is not None else None
     except Exception:
         return True
     if pid is None:
@@ -336,47 +350,70 @@ def is_awake(cfg: dict) -> bool:
 
 
 def set_awake(cfg: dict, wake_log_id: int | None, transcript: str | None,
-              expected_gen: int | None = None) -> tuple[int, str] | None:
-    """Activate a wake (asleep -> awake). BUMPS gen (a fresh wake is a new epoch
-    that invalidates the sleeping window's alarm token). When `expected_gen` is
-    given the flip is CONDITIONAL: if the live gen has moved on (a newer lie_down
-    / user reset re-armed since the wake decision), abort and return None. Returns
-    the new (gen, state_id) on success, None if the conditional flip lost.
+              expected_gen: int | None = None, bump: bool = True) -> tuple[int, str] | None:
+    """Activate a wake (asleep -> awake). BUMPS gen by default (a fresh wake is a
+    new epoch that invalidates the sleeping window's alarm token). When
+    `expected_gen` is given the flip is CONDITIONAL: if the live gen has moved on
+    (a newer lie_down / user reset re-armed since the wake decision), abort and
+    return None. Returns the new (gen, state_id) on success, None if the
+    conditional flip lost.
+
+    `bump=False` (spawn path only): the caller already bumped gen itself moments
+    ago (wake_state.start_registration_handshake, right before baking that exact
+    (gen, state_id) into the spawned window's first-prompt registration token) —
+    a second bump here would invalidate that token before the window's own hook
+    ever gets to claim it (07-20 live bug: a resumed/fresh window's registration
+    claim always arrived stale, so cortex_resident_pid was never re-recorded and
+    every tick kept treating the window as unregistered). `expected_gen` is
+    required with `bump=False` (asserts the epoch is still the handshake's own,
+    fail-closed if superseded meanwhile — same CAS discipline as the bump path).
 
     next_wake_at is the durable ledger: a successful wake means it fired, so it is
     cleared here (re-armed by the next lie_down) in the same atomic section so an
-    awake window never carries a stale scheduled time."""
+    awake window never carries a stale scheduled time. Audited (`set_awake`,
+    old->new gen) whenever it actually bumps — a silent bump here was part of
+    why the 07-20 registration-claim bug took three rounds to diagnose live."""
     try:
         with _strict_flock(cfg):
             d = _load_strict(cfg)
             _ensure_epoch(d)
             if expected_gen is not None and int(d["gen"]) != int(expected_gen):
                 return None
-            d["gen"] = int(d["gen"]) + 1
+            old_gen = int(d["gen"])
+            if bump:
+                d["gen"] = old_gen + 1
+            new_gen = d["gen"]
             d.update(awake=True, next_wake_at=None,
                      awake_since=datetime.now(timezone.utc).isoformat(),
                      wake_log_id=wake_log_id, transcript=transcript,
                      wait_spent=False, user_replied_this_wake=False,
                      tuck_pending=None, last_note_ts=None)
             _save(cfg, d)
-            return int(d["gen"]), str(d["state_id"])
+            result = int(d["gen"]), str(d["state_id"])
     except StateValidationError:
         return None
+    if bump:
+        wake_audit(cfg, "set_awake", f"gen {old_gen}->{new_gen}", "")
+    return result
 
 
 def clear_awake(cfg: dict) -> None:
     """Clear the awake marker AND bump gen (a successful sleep is a new epoch —
-    any alarm token from the just-ended wake is invalidated). Strict-locked."""
+    any alarm token from the just-ended wake is invalidated). Strict-locked.
+    Audited (`clear_awake`, old->new gen)."""
     try:
         with _strict_flock(cfg):
             d = _load_strict(cfg)
             _ensure_epoch(d)
-            d["gen"] = int(d["gen"]) + 1
+            old_gen = int(d["gen"])
+            d["gen"] = old_gen + 1
+            new_gen = d["gen"]
             for k in _AWAKE_KEYS:
                 d.pop(k, None)
             _save(cfg, d)
     except StateValidationError:
-        pass
+        return
+    wake_audit(cfg, "clear_awake", f"gen {old_gen}->{new_gen}", "")
 
 
 def claim_lie_down(cfg: dict, force_slept: str | None = None) -> dict | None:
@@ -714,9 +751,13 @@ def get_retired_sid(cfg: dict) -> str | None:
 
 def _resident_alive_under_lock(d: dict, caller_pid: int) -> bool:
     """THE ONE RULE evaluated against an already-loaded state dict (caller holds
-    the strict lock). True iff recorded resident pid alive AND not in the
-    caller's process chain. No recorded pid = no resident (False)."""
+    the strict lock). True iff office is REGISTERED (cortex_claude_sid set) AND
+    the recorded resident pid is alive AND not in the caller's process chain. No
+    registration (rotated/retired window) OR no recorded pid = no resident
+    (False)."""
     from cortex.lie_down import _chains_to_ancestor
+    if not d.get("cortex_claude_sid"):
+        return False
     pid = d.get("cortex_resident_pid")
     try:
         pid = int(pid) if pid is not None else None
@@ -817,28 +858,51 @@ def discard_pending_claim(cfg: dict) -> None:
 
 def start_registration_handshake(cfg: dict) -> tuple[int, str]:
     """Called at every spawn (fresh window, resume-of-dead): mark the
-    registration PENDING under a fresh epoch. The spawned/resumed window's
-    first marker prompt must carry this exact (gen, state_id) token to claim
-    registration in the marrow hook (cortex_bridge.claim_registration_if_pending).
-    Bumps gen — any older pending/claimed token is invalidated. Returns the new
-    (gen, state_id); falls back to the current (unbumped) epoch on a lock
-    failure (fail-closed — the handshake simply cannot start, caught by the
-    gate default-deny)."""
+    registration PENDING under a fresh epoch AND mint a dedicated
+    `cortex_registration_token` nonce (random, independent of gen) — the claim
+    (cortex_bridge.claim_registration_if_pending) validates against THIS nonce,
+    not gen. Returns the (gen, state_id) pair (unchanged shape — still used to
+    tag the wake-alarm staleness check on the SAME bell line), but the actual
+    registration-claim validity now rides the nonce.
+
+    07-20 live bug (3rd round): gen keeps advancing during ordinary traffic
+    while a spawned/resumed window is starting up (claude startup + --resume
+    history replay takes real wall-clock minutes) — the resumed window's own
+    first `wait()` call, a real user message elsewhere, another spawn's
+    handshake, etc. all bump gen for reasons that have nothing to do with
+    THIS registration. A strict gen-equality claim check is doomed by design
+    under normal traffic: it was always stale by the time the claim actually
+    ran, so cortex_resident_pid was never re-recorded and every reconcile tick
+    kept treating the live window as unregistered forever. The nonce is
+    single-flight (this call overwrites any previous nonce — a claim from a
+    SUPERSEDED spawn, i.e. a newer handshake minted since, presents the OLD
+    nonce and is correctly rejected) but survives any number of UNRELATED gen
+    advances in between, because nothing else ever touches it.
+
+    Audited (`register_handshake`, old->new gen) — a silent bump here was
+    itself part of why this took three rounds to diagnose live. Falls back to
+    the current (unbumped) epoch + no nonce on a lock failure (fail-closed —
+    the handshake simply cannot start, caught by the gate default-deny)."""
     try:
         with _strict_flock(cfg):
             d = _load_strict(cfg)
             _ensure_epoch(d)
-            d["gen"] = int(d["gen"]) + 1
+            old_gen = int(d["gen"])
+            d["gen"] = old_gen + 1
+            new_gen = d["gen"]
             d["cortex_registration_pending"] = True
+            d["cortex_registration_token"] = secrets.token_hex(16)
             # A fresh handshake = office is being handed over: drop the retiring
             # resident's recorded pid so the fresh claim is not refused by THE ONE
             # RULE against a resident that is on its way out (the fresh window
             # records its OWN pid on claim).
             d.pop("cortex_resident_pid", None)
             _save(cfg, d)
-            return int(d["gen"]), str(d["state_id"])
+            result = int(d["gen"]), str(d["state_id"])
     except StateValidationError:
         return current_epoch(cfg)
+    wake_audit(cfg, "register_handshake", f"gen {old_gen}->{new_gen}", "")
+    return result
 
 
 def get_sentinel_pid(cfg: dict) -> int | None:

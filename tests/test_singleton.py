@@ -156,7 +156,7 @@ def test_spawn_launches_when_recorded_pid_dead(cfg, monkeypatch):
 def test_ctl_wake_live_awake_resident_reports_on_duty(cfg, monkeypatch):
     """Live resident + already awake -> on-duty text, zero side effects."""
     from cortex import ctl, wake
-    wake_state.update(cfg, cortex_resident_pid=4321)
+    wake_state.update(cfg, cortex_resident_pid=4321, cortex_claude_sid="resident")
     monkeypatch.setattr(wake_state, "_pid_alive", lambda pid: True)
     monkeypatch.setattr("cortex.lie_down._chains_to_ancestor",
                         lambda pid, ancestor: False)  # foreign
@@ -174,7 +174,7 @@ def test_ctl_wake_live_dormant_resident_signals(cfg, monkeypatch):
     """Live but dormant resident -> ear-signal wake now (run_wake), never takes
     office. Works whether the caller is foreign or the resident's own chain."""
     from cortex import ctl, wake
-    wake_state.update(cfg, cortex_resident_pid=4321)
+    wake_state.update(cfg, cortex_resident_pid=4321, cortex_claude_sid="resident")
     monkeypatch.setattr(wake_state, "_pid_alive", lambda pid: True)
     monkeypatch.setattr("cortex.lie_down._chains_to_ancestor",
                         lambda pid, ancestor: False)  # foreign
@@ -209,26 +209,28 @@ def test_ctl_wake_no_staged_claim_never_writes_registration_dormant(cfg, monkeyp
     """Dormant branch: no staged pending_claim -> cortex_claude_sid never written,
     even though a wake signal is sent."""
     from cortex import ctl, wake
-    wake_state.update(cfg, cortex_resident_pid=4321)
+    wake_state.update(cfg, cortex_resident_pid=4321, cortex_claude_sid="resident")
     monkeypatch.setattr(wake_state, "_pid_alive", lambda pid: True)
     monkeypatch.setattr("cortex.lie_down._chains_to_ancestor",
                         lambda pid, ancestor: False)
     monkeypatch.setattr(wake, "run_wake", lambda *a, **k: None)
     ctl.cmd_wake(cfg)
-    assert "cortex_claude_sid" not in wake_state.load(cfg)
+    # cmd_wake never CHANGES registration: the pre-existing resident sid stays,
+    # no self-registration is written.
+    assert wake_state.load(cfg).get("cortex_claude_sid") == "resident"
 
 
 def test_ctl_wake_no_staged_claim_never_writes_registration_awake(cfg, monkeypatch):
     """Awake branch: on-duty text, cortex_claude_sid never written by the caller."""
     from cortex import ctl, wake
-    wake_state.update(cfg, cortex_resident_pid=4321)
+    wake_state.update(cfg, cortex_resident_pid=4321, cortex_claude_sid="resident")
     monkeypatch.setattr(wake_state, "_pid_alive", lambda pid: True)
     monkeypatch.setattr("cortex.lie_down._chains_to_ancestor",
                         lambda pid, ancestor: False)
     wake_state.set_awake(cfg, 1, None)
     monkeypatch.setattr(wake, "run_wake", lambda *a, **k: None)
     ctl.cmd_wake(cfg)
-    assert "cortex_claude_sid" not in wake_state.load(cfg)
+    assert wake_state.load(cfg).get("cortex_claude_sid") == "resident"
 
 
 def test_ctl_wake_staged_pending_claim_never_promoted(cfg, monkeypatch):
@@ -394,11 +396,52 @@ def test_claim_office_dead_resident_is_claimable(cfg, monkeypatch):
 def test_resident_alive_self_chain_not_foreign(cfg, monkeypatch):
     """Recorded pid alive but in the caller's own chain = self re-wake (False,
     grantable), not a foreign holder."""
-    wake_state.update(cfg, cortex_resident_pid=4321)
+    wake_state.update(cfg, cortex_resident_pid=4321, cortex_claude_sid="resident")
     monkeypatch.setattr(wake_state, "_pid_alive", lambda pid: True)
     monkeypatch.setattr("cortex.lie_down._chains_to_ancestor",
                         lambda pid, ancestor: True)  # in chain
     assert wake_state.resident_alive(cfg, caller_pid=100) is False
+
+
+def test_resident_alive_rotated_sid_none_old_pid_alive_is_false(cfg, monkeypatch):
+    """07-20 live bug 2 repro: rotate popped cortex_claude_sid (sid=None) but the
+    OLD claude pid is still alive (user kept the retiring iTerm window open for
+    scrollback) -> resident_alive must be False. A rotated/retired window is NOT
+    a resident; office is registration (sid) + pid, not pid alone."""
+    wake_state.update(cfg, rotated=True, cortex_resident_pid=33924)
+    wake_state.update(cfg, retired_sid="old-session-sid")
+    assert wake_state.load(cfg).get("cortex_claude_sid") is None
+    monkeypatch.setattr(wake_state, "_pid_alive", lambda pid: True)  # old pid alive
+    assert wake_state.resident_alive(cfg) is False
+
+
+def test_resident_alive_sid_set_pid_dead_is_false(cfg, monkeypatch):
+    """Registered (sid set) but the recorded pid is dead -> not a resident."""
+    wake_state.update(cfg, cortex_resident_pid=4321, cortex_claude_sid="resident")
+    monkeypatch.setattr(wake_state, "_pid_alive", lambda pid: False)
+    assert wake_state.resident_alive(cfg) is False
+
+
+def test_resident_alive_no_sid_no_pid_is_false(cfg):
+    """No registration and no recorded pid at all -> not a resident (the
+    default/never-spawned state)."""
+    assert wake_state.resident_alive(cfg) is False
+
+
+def test_ctl_wake_rotated_sid_none_old_pid_alive_reports_not_on_duty(cfg, monkeypatch):
+    """07-20 live bug 2 regression end-to-end: cmd_wake ran while state was
+    rotated=True/cortex_claude_sid=None but the old resident pid was still alive
+    -> must NOT report on-duty (the false positive that happened live). It falls
+    into the no-resident branch and fires a respawn."""
+    from cortex import ctl, wake
+    wake_state.update(cfg, rotated=True, cortex_resident_pid=33924)
+    monkeypatch.setattr(wake_state, "_pid_alive", lambda pid: True)  # old pid alive
+    fired = {"n": 0}
+    monkeypatch.setattr(wake, "run_wake",
+                        lambda *a, **k: fired.__setitem__("n", fired["n"] + 1))
+    line = ctl.cmd_wake(cfg)
+    assert line != cfg["wake"]["ctl_wake_awake_text"]  # NOT reported on-duty
+    assert fired["n"] == 1  # respawn fired instead
 
 
 def test_spawn_registered_resident_two_ticks_no_respawn(cfg, monkeypatch):
@@ -431,7 +474,8 @@ def test_accidental_close_aborts_if_resident_takes_office_mid_tick(cfg, monkeypa
     recorded resident (take-office between gate-eval and fire) aborts the respawn
     under the lock re-check."""
     wake_state.set_session_id(cfg, "SID-1")
-    wake_state.update(cfg, awake=True, cortex_resident_pid=4321)
+    wake_state.update(cfg, awake=True, cortex_resident_pid=4321,
+                      cortex_claude_sid="resident")
     monkeypatch.setattr("cortex.wake._window_alive", lambda c: False)
     # resident_alive: first the top-of-reconcile OR check must NOT hold (else it
     # returns None before the branch); force it foreign there but the under-lock

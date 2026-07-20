@@ -121,11 +121,17 @@ _DEFAULTS: dict[str, Any] = {
         # resident alive + dormant -> a wake signal was sent, it wakes in place.
         "ctl_wake_signal_text":
             "wake signal sent — resident waking in place.",
-        # resident dead -> report death, do NOT spawn (pacemaker owns spawning).
+        # no resident in office (sid cleared or pid dead) -> a window is
+        # respawned NOW via the pacemaker fire path (resume preferred, fresh as
+        # fallback). The caller never takes office; the new window carries its
+        # own birth credentials.
+        "ctl_wake_respawn_text":
+            "no resident in office — respawning a window now.",
+        # respawn failed -> diagnostics hint (dead-text style).
         # {backup_hint} = resolved backup/diagnostic path.
-        "ctl_wake_dead_text":
-            "resident is dead — pacemaker will respawn on schedule/reconcile; "
-            "no window opened here. Diagnostics: {backup_hint}",
+        "ctl_wake_respawn_failed_text":
+            "no resident in office and respawn failed — the pacemaker will "
+            "retry on schedule/reconcile. Diagnostics: {backup_hint}",
     },
     # marrow repo invocation for the wake call (separate venv/deps, C3).
     "marrow": {

@@ -136,6 +136,20 @@ def _no_real_ear_kill(monkeypatch):
         pass
 
 
+@pytest.fixture(autouse=True)
+def _no_real_rotate_successor(monkeypatch):
+    """A rotate lie_down (rotate=True / mode='night') now spawns a fresh successor
+    window immediately (_spawn_successor -> wake.run_wake -> real osascript spawn,
+    blocked). No rotate/night test that isn't specifically about succession cares
+    about the successor, so stub it to a no-op; the dedicated succession tests
+    override this with their own spy. Mirrors _no_real_sentinel/_no_real_ear_kill."""
+    try:
+        import cortex.lie_down as _l
+        monkeypatch.setattr(_l, "_spawn_successor", lambda conn, cfg: None)
+    except ImportError:
+        pass
+
+
 @pytest.fixture
 def marrow_conn(tmp_path):
     conn = db.connect_path(tmp_path / "marrow.db")
