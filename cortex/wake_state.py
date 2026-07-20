@@ -455,8 +455,11 @@ def commit_wait(cfg: dict, until_iso: str) -> dict:
             d = _load_strict(cfg)
             _ensure_epoch(d)
             if not d.get("awake"):
+                wake_audit(cfg, "wait_refused", "not awake", f"gen={d.get('gen')}")
                 return {"ok": False, "refused": True, "reason": "not awake"}
             if d.get("wait_spent"):
+                wake_audit(cfg, "wait_refused", "consecutive",
+                           f"gen={d.get('gen')} awake={d.get('awake')}")
                 return {"ok": False, "refused": True, "reason": "consecutive"}
             old_gen = int(d["gen"])
             d["gen"] = old_gen + 1
