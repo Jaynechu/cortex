@@ -58,7 +58,7 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
 - launch_command: `cd <cortex_home> && MARROW_CORTEX=1 MARROW_CHANNEL=ct claude --model <wake.window_model opus> [--effort] [--resume <sid>] [--dangerously-skip-permissions] [prompt]`.
 - initial_prompt = emoji-only (window.wake_prompt ☀️); marrow hook injects full note.
 - claude_session_id(cfg) = recorded transcript jsonl stem = conversation UUID for --resume (NOT iTerm session_id); None when no hint. _wait_ready polls session text for wake.ready_marker ('accept edits') up to 30s.
-- respawn(cfg, initial_prompt, resume_sid): SIGTERM old claude, close session, _spawn, persist sid. Silent — say() is sole attention-getter.
+- respawn(cfg, initial_prompt, resume_sid): _spawn + persist sid. Old window left OPEN, old claude NOT killed (rotate: predecessor stays for user to close; resume: nothing to kill). Silent — say() is sole attention-getter.
 - find_claude_pid: session tty → ps exact-match, fallback pgrep -x + cwd filter; 0 or >1 → None never guess (window.py:388-459). hard_interrupt = SIGINT on that pid only (462-473).
 ### wake_state.json (`wake_state.py`)
 - Keys: awake set = awake/awake_since/wake_log_id/transcript/silence_wait_until/wait_count/user_replied_this_wake/tuck_pending/last_note_ts (cleared together by clear_awake/claim_lie_down).

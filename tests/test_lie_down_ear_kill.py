@@ -164,9 +164,9 @@ def test_chains_to_ancestor_walks_real_ppid_via_ps(cfg, monkeypatch):
 
 def test_kill_ear_tails_leaves_alarm_and_wake_state_untouched(cfg, monkeypatch):
     """The kill helper only signals processes — it must not mutate wake_state
-    (sentinel pid, ledger, night flag, registration all preserved)."""
+    (sentinel pid, ledger, night flag all preserved)."""
     wake_state.update(cfg, sentinel_pid=999, next_wake_at="2099-01-01T00:00:00+00:00",
-                      mode="night", cortex_claude_sid="keep-me")
+                      mode="night", retired_sid="keep-me")
     before = wake_state.load(cfg)
     monkeypatch.setattr(lie_down, "_ear_tail_pids", _REAL_EAR_TAIL_PIDS)
     monkeypatch.setattr(
@@ -177,5 +177,5 @@ def test_kill_ear_tails_leaves_alarm_and_wake_state_untouched(cfg, monkeypatch):
     assert after.get("sentinel_pid") == 999
     assert after.get("next_wake_at") == "2099-01-01T00:00:00+00:00"
     assert after.get("mode") == "night"
-    assert after.get("cortex_claude_sid") == "keep-me"
+    assert after.get("retired_sid") == "keep-me"
     assert before == after

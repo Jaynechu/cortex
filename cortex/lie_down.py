@@ -219,20 +219,23 @@ def _spawn_successor(conn, cfg: dict) -> None:
     """Rotate succession: spawn the fresh successor window NOW via the existing
     pacemaker fire path — a forced decision through wake.run_wake. run_wake calls
     _window_wake_plan, which take_rotated()-consumes the rotate flag and classifies
-    "fresh", so the fresh spawn + registration handshake does the rest (same shape
-    as ctl's remote wake). Spawn authority stays inside cortex's own chain (this IS
-    a pacemaker-family path).
+    "fresh", so the fresh spawn does the rest (same shape as ctl's remote wake).
+    Spawn authority stays inside cortex's own chain (this IS a pacemaker-family
+    path).
 
-    Idempotent (no double-spawn): if a live registered resident already holds
-    office (the successor already landed, or a racing reconcile beat us), skip.
+    Idempotent (no double-spawn): the rotate flag is consumed atomically by
+    _window_wake_plan's take_rotated() inside run_wake, so a racing reconcile
+    that beat us finds no flag and classifies "ear"/"resume" instead of a second
+    fresh spawn. If the flag is already gone here (someone consumed it), the
+    successor is already being spawned -> skip.
     Best-effort: any failure to spawn is alerted via wake._alert_respawn_failed
     (or an audit line) and never wedges the rotate that already committed."""
     from cortex import wake, wake_state
 
     now = _now_local(cfg)
     try:
-        if wake_state.resident_alive(cfg):
-            return  # successor already registered -> no double-spawn
+        if not wake_state.load(cfg).get("rotated"):
+            return  # rotate flag already consumed -> successor already spawning
         decision = {"wake": True, "reasons": [], "gated_by": [],
                     "wake_reasons": "rotate",
                     "explanation": f"{now.strftime('%H:%M')} rotate succession"}
@@ -261,17 +264,14 @@ def _token_ok(cfg: dict, token) -> bool:
 
 def _mark_rotated(transcript_path):
     """Mutator (used under conditional_mutate): set the one-shot rotate flag +
-    the durable retired-sid, both children of the claim gen (no bump). Also
-    retires single-active-window registration immediately (P14 Fix 3): the
-    rotating window's cortex_claude_sid registration is dropped here so a
-    zombie turn on the old window fails the gate the instant it resumes,
-    without waiting for the next spawn's handshake."""
+    the durable retired-sid, both children of the claim gen (no bump). retired_sid
+    is the belt-and-braces guard the resume paths check so a stale transcript
+    pointer never resumes the retired session."""
     from pathlib import Path
 
     def _m(d: dict):
         d["rotated"] = True
         d["retired_sid"] = Path(str(transcript_path)).stem if transcript_path else None
-        d.pop("cortex_claude_sid", None)
         return True
     return _m
 

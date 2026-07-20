@@ -146,15 +146,7 @@ def write_wake_receipt(cfg: dict, now, token=None, rearm: bool = False) -> None:
     flag, an ISO timestamp, and the current template prefix (so the consumer can
     shape-match without cortex config). Overwrites any prior receipt (stale
     hygiene). Best-effort: a write failure never crashes the pacemaker — the
-    consumer then takes the shape fallback.
-
-    Also carries the CURRENT `cortex_registration_token` nonce (minted by
-    start_registration_handshake, independent of gen) into the receipt when one
-    is pending — the marrow claim validates registration against this nonce,
-    not gen, so ordinary unrelated gen advances during a minutes-long spawn/
-    resume startup never invalidate a claim in flight (07-20 live bug, 3rd
-    round). Read fresh at receipt-write time under the SAME call as the
-    handshake, so the two are always for the SAME spawn."""
+    consumer then takes the shape fallback."""
     from datetime import timezone
 
     from cortex import wake_state
@@ -162,12 +154,10 @@ def write_wake_receipt(cfg: dict, now, token=None, rearm: bool = False) -> None:
     gen = state_id = None
     if token:
         gen, state_id = token
-    reg_token = wake_state.load(cfg).get("cortex_registration_token")
     receipt = {
         "text": text,
         "gen": int(gen) if gen is not None else None,
         "state_id": str(state_id) if state_id is not None else None,
-        "registration_token": str(reg_token) if reg_token else None,
         "rearm": bool(rearm),
         "ts": datetime.now(timezone.utc).isoformat(),
         # Both persisted so the consumer shape-matches without cortex config: the
@@ -189,8 +179,7 @@ def fresh_initial_prompt(cfg: dict, now, token=None) -> str:
     marrow UserPromptSubmit hook recognizes the on-screen line and injects the
     full wakeup note — the window gets its wake identity + note in one stroke
     instead of the emoji being read as a bare chat message. `token` (gen,
-    state_id) doubles as the registration handshake token; it is carried in the
-    receipt, not the visible line."""
+    state_id) is carried in the receipt, not the visible line."""
     return wake_signal_line(cfg, now, token=token)
 
 
@@ -307,14 +296,6 @@ def _relaunch(sid: str, cfg: dict) -> None:
     _wait_ready(sid, cfg)
 
 
-def _close_session(sid: str) -> None:
-    """Close a specific iTerm session (the old resident window's tab)."""
-    try:
-        _osa(_session_stmt(sid, "tell s to close"))
-    except WindowError:
-        pass
-
-
 def claude_session_id(cfg: dict) -> str | None:
     """The claude conversation session UUID for --resume: the stem of a
     session jsonl (~/.claude/projects/<cwd>/<uuid>.jsonl). This is NOT the
@@ -356,24 +337,16 @@ def claude_session_id(cfg: dict) -> str | None:
 
 def respawn(cfg: dict, initial_prompt: str | None = None,
            resume_sid: str | None = None) -> str:
-    """Replace the resident window with a new one: SIGTERM its `claude` process
-    (never SIGKILL), close the old iTerm session, then spawn. A non-empty
-    initial_prompt (fresh_initial_prompt: emoji + bell marker) is baked into the
-    launch command so the window starts acting immediately — no arm prompt, no
-    lie-down-first, no signal. A non-empty resume_sid launches `claude --resume
-    <sid>` (same conversation, full context) instead of a fresh brain — used
-    when the window simply died with no rotate flag. Persists and returns the
-    new resident sid. Reused for rotate/rebirth (fresh) and the dead-window
-    recovery (resume)."""
-    pid = find_claude_pid(cfg)
-    if pid is not None:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
-            pass
-    old = wake_state.get_session_id(cfg)
-    if old:
-        _close_session(old)
+    """Spawn a new resident window. The old window is left OPEN and its `claude`
+    process is NOT killed — on a rotate the predecessor stays up for the user to
+    close herself; on a dead-window resume there is nothing to kill anyway. A
+    non-empty initial_prompt (fresh_initial_prompt: emoji + bell marker) is baked
+    into the launch command so the window starts acting immediately — no arm
+    prompt, no lie-down-first, no signal. A non-empty resume_sid launches
+    `claude --resume <sid>` (same conversation, full context) instead of a fresh
+    brain — used when the window simply died with no rotate flag. Persists and
+    returns the new resident sid. Reused for rotate/rebirth (fresh) and the
+    dead-window recovery (resume)."""
     sid = _spawn(cfg, initial_prompt, resume_sid)
     wake_state.set_session_id(cfg, sid)
     _wait_ready(sid, cfg)
@@ -585,35 +558,12 @@ def _pid_cwd(pid: int) -> str | None:
     return None
 
 
-def claude_ancestor_pid(caller_pid: int | None = None) -> int | None:
-    """The `claude` process in the CALLER's own parent chain (the window /ct-wake
-    runs inside), or None. Walks ppid from caller_pid, matching against live
-    `pgrep -x claude` pids — records exactly the window that invoked us, never a
-    foreigner. caller_pid defaults to os.getpid()."""
-    from cortex.lie_down import _ppid_of, _PPID_WALK_MAX_DEPTH
-    if caller_pid is None:
-        caller_pid = os.getpid()
-    claude_pids = set(_pgrep_claude_pids())
-    if not claude_pids:
-        return None
-    current = caller_pid
-    for _ in range(_PPID_WALK_MAX_DEPTH):
-        if current in claude_pids:
-            return current
-        parent = _ppid_of(current)
-        if parent is None or parent <= 1:
-            return None
-        current = parent
-    return None
-
-
 def find_claude_pid(cfg: dict) -> int | None:
     """Discover the pid of the resident cortex window's `claude` process.
     (a) iTerm session tty -> ps -t <tty> for a `claude` command on that tty.
     (b) fallback: pgrep -x claude, keep the ones whose cwd == cortex_home.
     Ambiguous (0 or >1 candidates) or undiscoverable -> None (never guess).
-    NOTE (P18): no registration/wake DECISION may consume this — it stays only
-    for non-decision uses (e.g. hard_interrupt). Liveness = wake_state.resident_alive."""
+    Used for non-decision uses (e.g. hard_interrupt). Liveness = _window_alive."""
     sid = wake_state.get_session_id(cfg)
     if sid:
         tty = _session_tty(sid)

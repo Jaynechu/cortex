@@ -446,34 +446,18 @@ def _spawn_wake(conn, cfg, now, resume: bool = False,
                 wake_reasons: str | None = None) -> dict | None:
     """New-window wake. FRESH (resume=False): a brand-new brain whose FIRST
     prompt is the emoji + bell-marker wake prompt (marrow hook detects the
-    marker and injects the note). RESUME (resume=True + a recorded claude
-    session UUID): relaunch `claude --resume <sid>` with the same baked prompt
-    so the SAME conversation returns with full context AND its wake identity —
-    used when the window simply died with no rotate flag. Resume with no
-    recorded UUID -> fall back to a fresh spawn. Sets the awake marker + lights
-    the watchdog. Returns a result dict, or None on window failure (caller ->
-    _resume_or_fresh_dead retries as fresh-with-catchup on a resume failure,
-    _window_wake -> headless on a fresh failure).
+    marker via the wake_state receipt and injects the note). RESUME (resume=True
+    + a recorded claude session UUID): relaunch `claude --resume <sid>` with NO
+    baked prompt — the conversation IS the identity, so the same window returns
+    with full context and the user just keeps talking; no bell is typed into a
+    resumed window. Resume with no recorded UUID -> fall back to a fresh spawn.
+    Sets the awake marker + lights the watchdog. Returns a result dict, or None on
+    window failure (caller -> _resume_or_fresh_dead retries as fresh-with-catchup
+    on a resume failure, _window_wake -> headless on a fresh failure).
 
     The recorded transcript hint must be the NEW session's jsonl — captured only
     after it actually appears (bounded poll) — never the pre-spawn newest, which
-    is the OLD session and would drive an endless respawn loop next tick.
-
-    Single-active-window registration (P14 Fix 3): every spawn/resume/rebirth
-    starts a registration handshake (wake_state.start_registration_handshake)
-    and bakes its token into the same trailing wake-line tag as the
-    cancellation epoch — the new window's first marker prompt claims
-    registration in the marrow hook off this token, no separate wire format.
-
-    gen is bumped EXACTLY ONCE per spawn, by start_registration_handshake — the
-    set_awake call below reuses that same epoch (bump=False, expected_gen=
-    reg_token's gen) instead of bumping again. A second bump here would
-    invalidate reg_token before the just-spawned window's own first-prompt hook
-    can claim it (07-20 live bug: claude startup + --resume history replay takes
-    real wall-clock seconds, so the second bump always landed first in practice
-    — the registration claim arrived stale every time, cortex_resident_pid was
-    never re-recorded, and resident_alive stayed False forever -> every
-    reconcile tick treated the live window as dead and kept respawning)."""
+    is the OLD session and would drive an endless respawn loop next tick."""
     from cortex import transcript, wake_state, watchdog, window
     from cortex.pacemaker import integration
 
@@ -481,26 +465,21 @@ def _spawn_wake(conn, cfg, now, resume: bool = False,
     prev_path = transcript.newest(cfg)
     prev_path = str(prev_path) if prev_path else None
     spawn_ts = time.time()
-    reg_token = wake_state.start_registration_handshake(cfg)
-    # Write the pending receipt for the baked-in visible bell BEFORE spawning, so
-    # the marrow hook recognizes the fresh window's first (human-text) prompt.
-    window.write_wake_receipt(cfg, now, token=reg_token)
+    if resume_sid:
+        # Resume: the conversation is the identity, no bell prompt typed in.
+        initial_prompt = None
+    else:
+        # Fresh: the visible bell is the first prompt; write its receipt BEFORE
+        # spawning so the marrow hook recognizes the new window's first line.
+        window.write_wake_receipt(cfg, now)
+        initial_prompt = window.fresh_initial_prompt(cfg, now)
     try:
-        window.respawn(cfg, initial_prompt=window.fresh_initial_prompt(cfg, now, token=reg_token),
-                       resume_sid=resume_sid)
+        window.respawn(cfg, initial_prompt=initial_prompt, resume_sid=resume_sid)
     except window.WindowError as e:
         _alert_respawn_failed(conn, wake_id_of(now), str(e)[:180])
         return None
     new_path = _wait_new_transcript(cfg, prev_path, spawn_ts)
-    new_epoch = wake_state.set_awake(cfg, _wake_log_id(conn, now, wake_reasons), new_path,
-                                     expected_gen=reg_token[0], bump=False)
-    if new_epoch is None:
-        # A newer epoch superseded the handshake between start_registration_
-        # handshake and here (e.g. a concurrent user reset) -> the awake marker
-        # was NOT set by this call. The window is physically up regardless
-        # (best-effort audit only, never wedges the spawn that already happened).
-        _audit_wake(conn, wake_id_of(now),
-                    "spawn set_awake lost race (epoch superseded) -> marker not set by this call")
+    wake_state.set_awake(cfg, _wake_log_id(conn, now, wake_reasons), new_path)
     watchdog.spawn(cfg)
     return {"mode": "window", "session_id": None, "text": None}
 
@@ -723,11 +702,11 @@ def _spawn_serialized(cfg: dict):
 
     07-20 live race: a SIGKILLed resident (simulated crash) + `ctl wake` both
     ran within the same ~5s window. Both passed the "no resident" liveness
-    check (wake_state.resident_alive) BEFORE either spawned — the checks and
-    the actual window spawn were two separate, unlocked steps, so both callers
-    proceeded and landed two identical resume windows. Locking this whole
-    check+spawn section closes that: the loser's re-check (inside the lock,
-    after acquiring it) sees the winner's now-live registration and skips."""
+    check (_window_alive) BEFORE either spawned — the checks and the actual
+    window spawn were two separate, unlocked steps, so both callers proceeded
+    and landed two identical resume windows. Locking this whole check+spawn
+    section closes that: the loser's re-check (inside the lock, after acquiring
+    it) sees the winner's now-live window and skips."""
     from cortex import wake_state
 
     lp = wake_state.spawn_lock_path(cfg)
@@ -786,7 +765,6 @@ def run_wake(
     # taken for the real wake (default caller) in window mode; explicit `caller`
     # (tests / headless callers) always runs the marrow-subprocess path below.
     if cfg["wake"].get("mode", "window") == "window" and caller is call_marrow_cortex:
-        from cortex import wake_state
         # Classify the wake once (consumes the rotate flag). "fresh" = deliberate
         # new brain (rotate/rebirth): re-assemble the handoff note here. "resume"
         # = a window that simply died: relaunch --resume, same context, plain
@@ -816,26 +794,16 @@ def run_wake(
             # fresh/resume both spawn a window -> the whole check+spawn critical
             # section is serialized (07-20 live race: pacemaker tick reconcile
             # and ctl wake both passed the "no resident" check before either
-            # spawned, landing two identical resume windows). Re-check office
-            # under the lock before spawning: a winner that landed between this
-            # entrant's plan classification (outside the lock) and here means
-            # this entrant lost the race -> skip the spawn entirely.
-            #
-            # Two signals, either one means "someone already spawned this
-            # cycle": resident_alive() (marrow's async first-prompt hook already
-            # claimed registration — sid+pid recorded) OR
-            # cortex_registration_pending (a handshake was started by the
-            # winner's _spawn_wake and is still awaiting that claim — the
-            # synchronous signal, always visible the instant the winner releases
-            # this same lock, since claiming happens later/async and often never
-            # completes within a single wake's lifetime in tests). Checking
-            # resident_alive() alone is not enough: registration is claimed by
-            # the spawned window's own first-prompt hook moments (real seconds)
-            # later, so a loser arriving before that claim lands would see
-            # resident_alive()=False and spawn a duplicate anyway.
+            # spawned, landing two identical resume windows). Re-check liveness
+            # under the lock before spawning a RESUME: the winner's _spawn_wake
+            # records the new session (set_awake) before releasing this lock, so a
+            # loser arriving after sees _window_alive()=True and skips the spawn.
+            # A "fresh"/rotate spawn is deliberate — the retiring window is still
+            # alive by design (it is not killed), so _window_alive is not a valid
+            # skip signal there; the consumed rotate flag already makes it single-
+            # shot per rotate.
             with _spawn_serialized(cfg):
-                if wake_state.resident_alive(cfg) or wake_state.load(cfg).get(
-                        "cortex_registration_pending"):
+                if plan == "resume" and _window_alive(cfg):
                     win = {"mode": "window", "session_id": None, "text": None,
                           "skipped": "spawn_race_lost"}
                 else:

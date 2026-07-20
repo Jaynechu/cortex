@@ -121,13 +121,6 @@ ctl_sleep_marker = "⚙️ [CTL]"
 # lie_down(rotate=True) refuses while this window's own wake-signal ear tail is still alive
 # (its live monitor task replays on resume). Stop the monitor first, then rotate. Plain lie_down never refuses.
 rotate_refuse_text = "Rotate refused: your wake-signal monitor is still running. TaskStop it first, then call lie_down(rotate=true) again."
-# /ct-wake remote-control one-line outputs (caller window never takes office).
-ctl_wake_awake_text = "resident on duty — nothing to do."
-ctl_wake_signal_text = "wake signal sent — resident waking in place."
-# no resident in office (sid cleared or pid dead) -> respawn a window NOW (resume preferred, fresh as fallback).
-ctl_wake_respawn_text = "no resident in office — respawning a window now."
-# respawn failed -> diagnostics hint. {backup_hint} = resolved diagnostics path.
-ctl_wake_respawn_failed_text = "no resident in office and respawn failed — the pacemaker will retry on schedule/reconcile. Diagnostics: {backup_hint}"
 
 # Per-wake watchdog thresholds (spawned at injection, killed at lie_down).
 [wake.watchdog]

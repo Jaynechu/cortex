@@ -2,10 +2,8 @@
 ledger paths the pacemaker uses, so a human can drive the resident window by
 hand without racing the tick.
 
-  wake            remote control: in-office+awake -> on-duty text;
-                  in-office+dormant -> ear-signal wake now; no resident ->
-                  respawn now (resume preferred, fresh as fallback — same
-                  pacemaker fire path)
+  wake            immediate wake via the standard run_wake pipeline (alive
+                  resident -> ear signal; dead -> rotated?fresh:resume)
   sleep           awake resident -> inject a lie_down instruction; else
                   (dead, or alive-but-dormant) set the ledger directly
   pause           DND: hold tick reconcile / watchdog reaps / injections
@@ -21,6 +19,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from cortex import config, db, wake_state, window
+from cortex.pacemaker import integration
 
 
 def _now(cfg: dict) -> datetime:
@@ -28,80 +27,38 @@ def _now(cfg: dict) -> datetime:
 
 
 def cmd_wake(cfg: dict) -> str:
-    """/ct-wake remote control: the caller window is an ordinary remote and NEVER
-    takes office. After /ct-wake there must be a live awake cortex whatever the
-    prior state. Three-way, keyed on office held right now (wake_state.
-    resident_alive = cortex_claude_sid registered AND its recorded pid alive):
-
-      in office + awake   -> on-duty text, ZERO side effects.
-      in office + dormant -> send a wake signal NOW (forced ctl decision through
-          run_wake -> the resident's ear signal, exactly "the alarm firing
-          early"). No spawn.
-      no resident (sid cleared OR pid dead — includes rotated-and-gone) ->
-          respawn a window NOW through the SAME pacemaker fire path: a forced
-          ctl decision through run_wake, which _window_wake_plan classifies
-          "resume" (a simply-dead window: same conversation, full context) or
-          "fresh" (rotated-and-gone / no rotate flag but no recoverable sid) ->
-          spawn + registration handshake. A resume attempt that fails to land
-          falls back to fresh (never nothing — see wake._resume_or_fresh_dead).
-          Respawn text on success, a diagnostics-hint fallback if the whole
-          chain fails.
-
-    Manual take-office is abolished: env vars are birth-time-only, so a running
-    claude can never be retro-fitted into a full cortex. The ONLY registration
-    credential is the pacemaker spawn handshake (start_registration_handshake +
-    marrow's claim on the fresh window's first prompt); this function never
-    writes cortex_claude_sid. The new window carries its own birth credentials.
-    """
-    if not wake_state.resident_alive(cfg):
-        # No resident in office: respawn now (resume preferred, fresh as
-        # fallback — same chain as the rotate succession). A human explicitly
-        # waking wants activity back — leave DND (ct-pause documents /ct-wake
-        # as its exit).
-        wake_state.set_paused(cfg, False)
-        ok = _fire_ctl_wake(cfg)
-        if ok:
-            return str(cfg["wake"].get("ctl_wake_respawn_text") or "").strip()
-        return _respawn_failed_text(cfg)
-    if wake_state.is_awake(cfg):
-        return str(cfg["wake"].get("ctl_wake_awake_text") or "").strip()
-    # A human explicitly waking wants activity back — leave DND (ct-pause
-    # documents /ct-wake as its exit).
+    from cortex.wake import run_wake, _window_alive
+    # A human explicitly waking wants activity back — clear DND first.
     wake_state.set_paused(cfg, False)
-    _fire_ctl_wake(cfg)
-    return str(cfg["wake"].get("ctl_wake_signal_text") or "").strip()
-
-
-def _fire_ctl_wake(cfg: dict) -> bool:
-    """Fire a wake NOW by reusing the pacemaker fire path: a forced ctl decision
-    through wake.run_wake. run_wake's own _window_wake_plan classifies the wake —
-    "ear" for a live-but-dormant resident (signal-file inject), "resume"/"fresh"
-    for a no-resident state (resume preferred, fresh as fallback — spawn +
-    registration handshake). Same injection the sentinel tick would perform, no
-    new mechanism. Returns True when the wake fired without error; False on any
-    failure (the caller surfaces the diagnostics-hint fallback). The caller
-    window never takes office."""
-    from cortex import wake
-
+    # Already-on-duty guard (singleton invariant): a resident window that is both
+    # alive AND awake is already on duty — re-driving run_wake would re-set_awake
+    # and spawn a second watchdog. The live session already has the human's
+    # attention; refuse rather than double-activate. (Alive-but-dormant still
+    # wakes: that is the intended ear path below.)
+    if _window_alive(cfg) and wake_state.is_awake(cfg):
+        return "wake: already awake on duty -> no-op (one resident)"
+    # Always drive the standard wake pipeline (run_wake -> _window_wake_plan
+    # + _window_wake), including the alive-resident ear path: it renders a
+    # fresh note, sets the awake marker and starts the watchdog, and falls
+    # back to headless on any AppleScript failure. Do not re-implement any
+    # of that here — a hand-rolled signal-only path would skip set_awake and
+    # the watchdog, letting the next tick double-wake and the eventual
+    # lie_down hit claim_lie_down's "not awake" no-op.
     conn = db.connect(cfg)
     try:
         now = _now(cfg)
         decision = {"wake": True, "reasons": [], "gated_by": [],
                     "wake_reasons": "ctl",
-                    "explanation": f"{now.strftime('%H:%M')} ctl remote wake"}
-        try:
-            wake.run_wake(conn, cfg, decision, now=now)
-            return True
-        except Exception:  # noqa: BLE001 — a wake failure must not wedge ctl
-            return False
+                    "explanation": f"{now.strftime('%H:%M')} manual ctl wake"}
+        result = run_wake(conn, cfg, decision, now=now)
+        if result.get("mode") != "window":
+            next_floor = integration.lie_down(conn, cfg)
+            wake_state.set_next_wake_at(
+                cfg, next_floor.isoformat() if next_floor else None)
+        rotated = "fresh" if wake_state.load(cfg).get("rotated") else "resume/spawn"
+        return f"wake: {rotated} (mode={result.get('mode')})"
     finally:
         conn.close()
-
-
-def _respawn_failed_text(cfg: dict) -> str:
-    tmpl = str(cfg["wake"].get("ctl_wake_respawn_failed_text") or "").strip()
-    backup_hint = str(config.wake_audit_log_path(cfg))
-    return tmpl.replace("{backup_hint}", backup_hint)
 
 
 def _resolve_minutes(cfg: dict, until: str | None, minutes: float | None) -> float:
@@ -159,7 +116,7 @@ def cmd_resume(cfg: dict) -> str:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="cortex.ctl", description="Manual cortex control")
     sub = parser.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("wake", help="remote wake: signal the dormant resident, or report on-duty/dead")
+    sub.add_parser("wake", help="wake the resident window now (ear signal / resume / fresh)")
     sp = sub.add_parser("sleep", help="lie the live window down, or set the ledger")
     sp.add_argument("--until", default=None, help="wake at HH:MM (local)")
     sp.add_argument("--min", dest="minutes", type=float, default=None,

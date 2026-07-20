@@ -190,13 +190,14 @@ def test_window_wake_respawn_delivers_note_as_prompt(cfg, monkeypatch):
     conn.close()
     assert res["mode"] == "window"
     # Visible baked prompt = human text only (template) — no marker/token on
-    # screen. The machine data (incl. the registration-handshake token) lives in
-    # the wake_state receipt written before the spawn.
+    # screen. The bell text lives in the wake_state receipt written before the
+    # spawn (a fresh spawn carries no epoch token -> gen None, so the marrow
+    # staleness check fails open and always processes the fresh wake).
     assert calls["prompt"] == window.wake_signal_line(cfg, now)
     assert re.search(r"\{g\d+:[0-9a-fA-F]+\}", calls["prompt"]) is None
     r = wake_state.load(cfg)["wake_receipt"]
     assert r["text"] == calls["prompt"]
-    assert isinstance(r["gen"], int) and r["state_id"]
+    assert r["gen"] is None
     assert "signal" not in calls                # fresh path never appends a signal
     assert calls["watchdog"] is True
     d = wake_state.load(cfg)
@@ -1250,12 +1251,10 @@ def test_window_wake_dead_resumes_when_sid_present(cfg, monkeypatch):
     conn.close()
     assert res["mode"] == "window"
     assert calls["resume_sid"] == "live-uuid"   # same conversation resumed
-    # The resumed relaunch bakes the visible bell (human text) only; its
-    # registration-handshake token lives in the wake_state receipt.
-    assert calls["prompt"] == window.wake_signal_line(cfg, now)
-    assert re.search(r"\{g\d+:[0-9a-fA-F]+\}", calls["prompt"]) is None
-    r = wake_state.load(cfg)["wake_receipt"]
-    assert r["text"] == calls["prompt"] and isinstance(r["gen"], int)
+    # Resume = the conversation is the identity: no bell prompt typed in, no
+    # receipt written (the window just returns with full context).
+    assert calls["prompt"] is None
+    assert "wake_receipt" not in wake_state.load(cfg)
     note_text = wake_state.wakeup_note_path(cfg).read_text()
     assert "died without a handoff" not in note_text  # resume -> no catchup
 
@@ -1453,64 +1452,3 @@ def test_window_wake_resume_spawn_failure_falls_back_to_fresh_catchup(cfg, monke
     assert calls == ["live-uuid", None]  # resume tried first, fresh retried on failure
     note_text = wake_state.wakeup_note_path(cfg).read_text()
     assert "died without a handoff" in note_text  # fresh fallback -> catchup
-
-
-# --- registration token survives set_awake (07-20 live bug: pid never re-recorded) ---
-
-def test_spawn_wake_resume_registration_token_survives_set_awake(cfg, monkeypatch):
-    """End-to-end (coordinator repro): a RESUME spawn's registration handshake
-    token must still be current AFTER _spawn_wake returns, so the resumed
-    window's own first-prompt hook can claim it moments later (real claude
-    startup + --resume history replay takes real wall-clock seconds — set_awake
-    used to bump gen a second time here, always beating the claim). Simulates
-    marrow's claim (writes cortex_claude_sid + cortex_resident_pid keyed on the
-    captured token, mirroring cortex_bridge.claim_registration_if_pending) and
-    asserts resident_alive is True afterward — the actual live symptom
-    (cortex_resident_pid staying None forever) is what this closes."""
-    from cortex import wake, wake_state, watchdog, window
-
-    conn = db.connect(cfg)
-    wake_state.update(cfg, transcript="/x/projects/cwd/resume-sid.jsonl")
-    monkeypatch.setattr(transcript, "newest_window_lineage", lambda cfg, marker: None)
-
-    captured = {}
-
-    def _respawn_stub(c, initial_prompt=None, resume_sid=None):
-        captured["resume_sid"] = resume_sid
-        return "new-iterm-sid"
-    monkeypatch.setattr(window, "respawn", _respawn_stub)
-    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, prev, ts: "/t/new.jsonl")
-    monkeypatch.setattr(watchdog, "spawn", lambda c: None)
-
-    from datetime import datetime as _dt
-    res = wake._spawn_wake(conn, cfg, _dt.now(timezone.utc), resume=True)
-    conn.close()
-    assert res is not None and res["mode"] == "window"
-    assert captured["resume_sid"] == "resume-sid"  # genuinely a resume spawn
-
-    # The registration token baked into the spawned window's first prompt is
-    # readable back from the wake_state receipt (same source the marrow hook
-    # reads: write_wake_receipt stores {gen, state_id} alongside the bell text).
-    receipt = wake_state.load(cfg)["wake_receipt"]
-    reg_token = (int(receipt["gen"]), str(receipt["state_id"]))
-
-    # The critical assertion: the token is STILL current after _spawn_wake
-    # returned (set_awake did not bump past it a second time).
-    assert wake_state.token_current(cfg, reg_token) is True
-
-    # Simulate the marrow-side claim (cortex_bridge.claim_registration_if_pending):
-    # the handshake is still pending and the epoch still matches reg_token, so a
-    # real claim would succeed and write BOTH sid and pid, clearing pending.
-    d = wake_state.load(cfg)
-    assert d.get("cortex_registration_pending") is True
-    assert (d["gen"], str(d["state_id"])) == reg_token
-    wake_state.update(cfg, cortex_claude_sid="resume-sid", cortex_resident_pid=99999)
-    with wake_state._flock(cfg):
-        dd = wake_state.load(cfg)
-        dd.pop("cortex_registration_pending", None)
-        wake_state._save(cfg, dd)
-
-    monkeypatch.setattr(wake_state, "_pid_alive", lambda pid: True)
-    monkeypatch.setattr("cortex.lie_down._chains_to_ancestor",
-                        lambda pid, ancestor: False)  # foreign, not self-chain
-    assert wake_state.resident_alive(cfg) is True
