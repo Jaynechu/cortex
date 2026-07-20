@@ -346,10 +346,17 @@ def respawn(cfg: dict, initial_prompt: str | None = None,
     `claude --resume <sid>` (same conversation, full context) instead of a fresh
     brain — used when the window simply died with no rotate flag. Persists and
     returns the new resident sid. Reused for rotate/rebirth (fresh) and the
-    dead-window recovery (resume)."""
+    dead-window recovery (resume).
+
+    Readiness is VERIFIED before the sid is persisted (Fix 2): _wait_ready raises
+    WindowError if the TUI never comes up (a bad/gone --resume sid, or `claude`
+    exiting at once, leaves a bare shell). On that failure the just-spawned
+    session id is NOT recorded as the resident -- the caller (_spawn_wake) turns
+    the WindowError into a None return so a dead resume falls back to a fresh
+    spawn instead of recording a bare shell as an awake resident."""
     sid = _spawn(cfg, initial_prompt, resume_sid)
+    _wait_ready(sid, cfg)  # raises WindowError on timeout -> sid not persisted
     wake_state.set_session_id(cfg, sid)
-    _wait_ready(sid, cfg)
     return sid
 
 
@@ -374,7 +381,14 @@ return ""
 
 def _wait_ready(sid: str, cfg: dict) -> None:
     """Block until the freshly spawned claude TUI is ready for input (its footer
-    marker appears), so the first injection never types into a booting shell."""
+    marker appears), so the first injection never types into a booting shell.
+
+    Readiness is VERIFIED, never assumed: the footer marker must actually appear
+    within ready_timeout_sec. A timeout (a bad/gone --resume sid or an instantly
+    exiting `claude` leaves a bare shell that never renders the marker) raises
+    WindowError so the caller can fall back to a fresh spawn — returning
+    identically on marker-found and on timeout previously let a dead resume be
+    recorded as an awake resident (Fix 2)."""
     marker = cfg["wake"].get("ready_marker", "accept edits")
     timeout = float(cfg["wake"].get("ready_timeout_sec", 30))
     deadline = time.time() + timeout
@@ -382,6 +396,8 @@ def _wait_ready(sid: str, cfg: dict) -> None:
         if marker in _read_session(sid):
             return
         time.sleep(1.0)
+    raise WindowError(
+        f"session {sid} not ready (marker {marker!r} absent after {timeout}s)")
 
 
 def _session_stmt(sid: str, stmt: str) -> str:
@@ -451,13 +467,16 @@ def inject_prompt(cfg: dict, text: str) -> bool:
     return True
 
 
-def type_wake_signal(cfg: dict, now) -> bool:
-    """Ear-died rearm (ladder 2a): type the VISIBLE bell line (human text) into
-    the ALIVE resident window and write its receipt with rearm=True. It flows
-    through the marrow hook like any wake (receipt matched -> note injected ->
-    session rearms). Returns False if there is no resident session. Focus-guarded
+def type_wake_signal(cfg: dict, now, token=None) -> bool:
+    """Ear-died rearm (ladder 2a) / resumed-window fallback (Fix 3): type the
+    VISIBLE bell line (human text) into the resident window and write its receipt
+    with rearm=True. It flows through the marrow hook like any wake (receipt
+    matched -> note injected -> session rearms). `token` (gen, state_id), when
+    given, is carried in the receipt so a superseded wake is suppressed by the
+    marrow epoch check (the resume fallback passes it; the ear-death rearm does
+    not need it). Returns False if there is no resident session. Focus-guarded
     like every typing path."""
-    write_wake_receipt(cfg, now, rearm=True)
+    write_wake_receipt(cfg, now, token=token, rearm=True)
     return inject_prompt(cfg, wake_signal_line(cfg, now, rearm=True))
 
 

@@ -197,7 +197,13 @@ def test_window_wake_respawn_delivers_note_as_prompt(cfg, monkeypatch):
     assert re.search(r"\{g\d+:[0-9a-fA-F]+\}", calls["prompt"]) is None
     r = wake_state.load(cfg)["wake_receipt"]
     assert r["text"] == calls["prompt"]
-    assert r["gen"] is None
+    # Fix 4: the fresh receipt now carries the captured epoch token (gen is an int,
+    # not None). set_awake uses bump=False so the live gen still EQUALS this
+    # receipt gen -> the marrow hook reads the receipt as current and injects the
+    # note (a bump would make it stale and suppress the wake).
+    assert isinstance(r["gen"], int)
+    assert r["state_id"] == wake_state.load(cfg)["state_id"]
+    assert wake_state.load(cfg)["gen"] == r["gen"]  # not bumped past the receipt
     assert "signal" not in calls                # fresh path never appends a signal
     assert calls["watchdog"] is True
     d = wake_state.load(cfg)
@@ -1243,6 +1249,10 @@ def test_window_wake_dead_resumes_when_sid_present(cfg, monkeypatch):
                         (calls.__setitem__("resume_sid", resume_sid),
                          calls.__setitem__("prompt", initial_prompt)))
     monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, prev, ts: "/t/new.jsonl")
+    # The Fix-3 fallback bell is exercised by its own tests; here we only assert
+    # the resume LAUNCH stays clean, so stub it out (it would otherwise poll for a
+    # model turn for resume_turn_timeout_sec).
+    monkeypatch.setattr(wake, "_resume_fallback_bell", lambda *a, **k: None)
     monkeypatch.setattr(watchdog, "spawn", lambda c: None)
 
     from datetime import datetime as _dt
@@ -1251,8 +1261,9 @@ def test_window_wake_dead_resumes_when_sid_present(cfg, monkeypatch):
     conn.close()
     assert res["mode"] == "window"
     assert calls["resume_sid"] == "live-uuid"   # same conversation resumed
-    # Resume = the conversation is the identity: no bell prompt typed in, no
-    # receipt written (the window just returns with full context).
+    # Resume = the conversation is the identity: the LAUNCH itself types no bell
+    # prompt and writes no receipt (the window returns with full context; the
+    # harness's own background-shell notice drives the first turn).
     assert calls["prompt"] is None
     assert "wake_receipt" not in wake_state.load(cfg)
     note_text = wake_state.wakeup_note_path(cfg).read_text()
@@ -1285,6 +1296,7 @@ def test_window_wake_dead_resumes_from_newest_jsonl_when_hint_none(cfg, monkeypa
                          calls.__setitem__("launch_command",
                                            window.launch_command(c, initial_prompt, resume_sid))))
     monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, prev, ts: "/t/new.jsonl")
+    monkeypatch.setattr(wake, "_resume_fallback_bell", lambda *a, **k: None)
     monkeypatch.setattr(watchdog, "spawn", lambda c: None)
 
     from datetime import datetime as _dt
@@ -1322,6 +1334,7 @@ def test_window_wake_dead_resumes_newest_over_stale_recorded_hint(cfg, monkeypat
                          calls.__setitem__("launch_command",
                                            window.launch_command(c, initial_prompt, resume_sid))))
     monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, prev, ts: "/t/new.jsonl")
+    monkeypatch.setattr(wake, "_resume_fallback_bell", lambda *a, **k: None)
     monkeypatch.setattr(watchdog, "spawn", lambda c: None)
 
     from datetime import datetime as _dt
@@ -1360,6 +1373,7 @@ def test_window_wake_dead_skips_newer_digest_resumes_older_window_session(cfg, m
                          calls.__setitem__("launch_command",
                                            window.launch_command(c, initial_prompt, resume_sid))))
     monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, prev, ts: "/t/new.jsonl")
+    monkeypatch.setattr(wake, "_resume_fallback_bell", lambda *a, **k: None)
     monkeypatch.setattr(watchdog, "spawn", lambda c: None)
 
     from datetime import datetime as _dt
@@ -1400,13 +1414,15 @@ def test_window_wake_dead_no_sid_fresh_with_catchup(cfg, monkeypatch):
 
 
 def test_window_wake_plan_rotate_flag_is_fresh(cfg, monkeypatch):
-    """_window_wake_plan: rotate flag -> 'fresh' (deliberate new brain), and the
-    flag is consumed."""
+    """_window_wake_plan: rotate flag -> 'fresh' (deliberate new brain). Fix 1:
+    classification only PEEKS the flag; it is NOT consumed here (the one-shot
+    consume is deferred to after a fresh successor is verified live), so the flag
+    survives the plan call for retry ownership on a failed spawn."""
     from cortex import wake, window
 
     wake_state.set_rotated(cfg)
     assert wake._window_wake_plan(cfg) == "fresh"
-    assert wake_state.take_rotated(cfg) is False  # consumed by the plan call
+    assert wake_state.peek_rotated(cfg) is True   # still set (peeked, not consumed)
 
 
 def test_window_wake_plan_dead_no_flag_is_resume(cfg, monkeypatch):

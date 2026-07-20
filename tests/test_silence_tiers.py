@@ -313,7 +313,11 @@ def test_free_round_mirrors_full_note_to_file(awake_no_sentinel):
     note_path = wake_state.wakeup_note_path(cfg)
     note_path.write_text("stale", encoding="utf-8")
     watchdog.silence_action(cfg, silent_min=21.0)
-    assert note_path.read_text(encoding="utf-8").lstrip().startswith("Now:")
+    # Full render replaces the stale content. The note now opens with the Fix 5
+    # machine-origin tag (a mirrored wake note is still a wake note), so assert the
+    # full body is present rather than that the file starts with "Now:".
+    body = note_path.read_text(encoding="utf-8")
+    assert body != "stale" and "Now:" in body
 
 
 def test_free_round_mirror_uses_full_replay(awake_no_sentinel, monkeypatch):

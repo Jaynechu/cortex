@@ -78,6 +78,14 @@ ready_timeout_sec = 30         # max wait for readiness after a fresh spawn
 # replaced by a FRESH window that gets the note as its first prompt.
 signal_log = ""                # Default: <cortex_home>/state/wake_signal.log
 ear_timeout_sec = 90           # recovery deadline for an alive-window wake to land before respawn
+# Bounded wait after a RESUMED window comes up for the resumed model to take a
+# turn on its own (the CC harness's background-shell notice usually drives it).
+# A resume replays a long conversation first and the harness-triggered first turn
+# alone can churn 85s+, so this is minutes-scale, NOT the 90s ear timeout. If no
+# NEW assistant-role line appears in the resumed transcript within this window
+# (the prior session had no armed Monitor for the harness to report), cortex types
+# ONE ordinary bell line so the resumed window still gets its wake note.
+resume_turn_timeout_sec = 180
 # A fresh window (rotate / dead resident / ear miss) is spawned with this as
 # claude's FIRST prompt — JUST an emoji, so nothing readable shows in the user's
 # face; the window wakes silently. The full wake instructions (read the note,
@@ -225,6 +233,11 @@ max_reasons = 8                # cap the pending-flag list (stuck bridge guard)
 # max_chars cap is gone; per-source limits below keep each line bounded.
 # Persona/display strings + behaviour (identity stays in config).
 [note]
+# Machine-origin tag prepended as the FIRST line of every wakeup note (before
+# title). Makes the model treat the ☀️ bell/wake-prompt turn that delivered this
+# note as an automated scheduler signal, not a message the user typed. Note copy
+# only — does not change the bell text or receipt matching. "" omits it.
+wake_machine_tag = "[AUTOMATED WAKE SIGNAL — this note and the ☀️ line that delivered it come from the scheduler, not from the user. The user has NOT spoken; do not reply as if answering them.]"
 title = ""                   # first line of the wakeup note, e.g. a nickname for the note; empty hides it
 replay_events = 6            # trailing user/assistant events in the replay section
 replay_event_chars = 300     # per-event truncation in the replay section

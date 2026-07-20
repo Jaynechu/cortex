@@ -227,8 +227,11 @@ def test_window_rotated_flag_path(monkeypatch, rot_cfg):
     monkeypatch.setattr(window, "find_claude_pid", lambda cfg: 4242)
     monkeypatch.setattr(transcript, "newest", lambda cfg: None)
     assert wake._window_rotated(rot_cfg) is True
-    # flag consumed (read-and-clear): a second check without a new signal is False
-    assert wake._window_rotated(rot_cfg) is False
+    # Fix 1: classification only PEEKS the rotate flag now (the one-shot consume is
+    # deferred to after the fresh successor is live), so a second check still sees
+    # the flag set -> still True. The flag is consumed by run_wake, not here.
+    assert wake._window_rotated(rot_cfg) is True
+    assert wake_state.peek_rotated(rot_cfg) is True  # not consumed by classification
 
 
 def test_window_rotated_transcript_diff_path(monkeypatch, rot_cfg):
@@ -328,14 +331,17 @@ def test_window_wake_unrotated_no_handoff(monkeypatch, marrow_conn, rot_cfg):
 # --------------------------------------------------------------------------- #
 
 def test_window_wake_plan_clears_transcript_on_rotate_consume(rot_cfg):
-    """The transcript pointer is cleared at the SAME moment take_rotated
-    consumes the flag, so nothing in between can read it as still live."""
+    """The transcript pointer is cleared while the rotate flag still stands (Fix 1:
+    the plan peeks the flag and clears the retiring pointer in the same step), so
+    nothing in between can read it as still live. The one-shot flag itself is
+    consumed later by run_wake, after the fresh successor is verified."""
     from cortex import wake_state
     wake_state.set_session_id(rot_cfg, "sid-1")
     wake_state.update(rot_cfg, transcript="/t/retiring.jsonl")
     wake_state.set_rotated(rot_cfg)
     assert wake._window_wake_plan(rot_cfg) == "fresh"
     assert wake_state.load(rot_cfg).get("transcript") is None
+    assert wake_state.peek_rotated(rot_cfg) is True  # flag survives classification
 
 
 def test_resume_or_fresh_dead_normal_resume(monkeypatch, marrow_conn, rot_cfg):

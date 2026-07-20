@@ -16,7 +16,12 @@ NOW = datetime(2026, 7, 8, 14, 30, tzinfo=MEL)
 @pytest.fixture
 def cfg(tmp_path):
     # Pure defaults: point load at a nonexistent path so no live cortex.toml leaks in.
-    return config.load(path=tmp_path / "absent.toml")
+    c = config.load(path=tmp_path / "absent.toml")
+    # These tests assert the note BODY structure (Now: / title / replay). The Fix 5
+    # machine-origin tag is a separate first line, verified in test_wake_regime_fixes;
+    # blank it here so the body assertions (startswith "Now:" / title) stay exact.
+    c["note"]["wake_machine_tag"] = ""
+    return c
 
 
 def make_events_table(conn):

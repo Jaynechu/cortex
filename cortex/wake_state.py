@@ -562,9 +562,20 @@ def set_rotated(cfg: dict) -> None:
     update(cfg, rotated=True)
 
 
+def peek_rotated(cfg: dict) -> bool:
+    """Non-destructive read of the rotate flag. Used to CLASSIFY a wake as fresh
+    without consuming the one-shot flag: the flag must survive until the fresh
+    successor is verified live, so a failed spawn keeps retry ownership (consuming
+    it during classification, before the spawn succeeded, let a failed spawn drop
+    the flag -> the retiring conversation got reactivated on the next wake, Fix 1).
+    Consume with take_rotated only AFTER the successor is confirmed."""
+    return bool(load(cfg).get("rotated"))
+
+
 def take_rotated(cfg: dict) -> bool:
     """Consume the rotate flag (read-and-clear). True = last lie_down asked the
-    next wake to respawn the window fresh."""
+    next wake to respawn the window fresh. Called only AFTER a fresh successor is
+    verified live (Fix 1) so a spawn failure never strands the retired window."""
     with _flock(cfg):
         d = load(cfg)
         val = bool(d.pop("rotated", False))

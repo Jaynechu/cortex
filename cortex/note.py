@@ -1018,6 +1018,13 @@ def render(cfg: dict, now: datetime, data: dict) -> str:
     title = _note_cfg(cfg).get("title", "")
     if title:
         note_text = title + "\n\n" + note_text
+    # Fix 5: machine-origin tag as the very first line, so the model reads the
+    # ☀️ bell/wake-prompt turn that carried this note as an automated scheduler
+    # signal, not a user message. Config-driven ("" omits it); note copy only,
+    # never touches the bell text or receipt matching.
+    machine_tag = _note_cfg(cfg).get("wake_machine_tag", "")
+    if machine_tag:
+        note_text = machine_tag + "\n\n" + note_text
     return note_text
 
 

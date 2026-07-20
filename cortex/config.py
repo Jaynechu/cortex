@@ -58,6 +58,13 @@ _DEFAULTS: dict[str, Any] = {
         "token_cap": 150_000,
         "signal_log": "",
         "ear_timeout_sec": 90,
+        # Bounded wait after a RESUMED window comes up for the resumed model to
+        # take a turn on its own (the CC harness's background-shell notice usually
+        # drives it). Minutes-scale (a resume replays a long conversation first),
+        # NOT the 90s ear timeout. If no NEW assistant-role line appears in the
+        # resumed transcript within this window, cortex types one ordinary bell
+        # line so the resumed window still gets its wake note (Fix 3).
+        "resume_turn_timeout_sec": 180,
         "wake_prompt": "☀️",
         # Visible bell line = human text ONLY (no machine marker, no epoch token).
         # The machine data (marker/gen/state_id/rearm) is written to the
@@ -198,6 +205,16 @@ _DEFAULTS: dict[str, Any] = {
     # max_chars cap is gone; per-source limits below keep each line bounded.
     # OSS: identity/display strings stay in config, never hardcoded in .py.
     "note": {
+        # Machine-origin tag prepended as the VERY FIRST line of every wakeup
+        # note (before title), so the model treats the ☀️ bell/wake-prompt turn
+        # that carried this note as an automated scheduler signal, NOT a message
+        # the user personally typed (live-observed: cortex replied to the bell as
+        # if the user spoke it, Fix 5). Note-copy only -- does NOT change the bell
+        # text or receipt matching. "" omits it.
+        "wake_machine_tag":
+            "[AUTOMATED WAKE SIGNAL — this note and the ☀️ line that delivered it "
+            "come from the scheduler, not from the user. The user has NOT spoken; "
+            "do not reply as if answering them.]",
         # Optional first line of the wakeup note (e.g. a nickname for the
         # note), followed by a blank line then the usual content. "" omits it.
         "title": "",
