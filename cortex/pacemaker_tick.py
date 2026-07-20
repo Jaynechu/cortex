@@ -213,6 +213,48 @@ def _fire_dead_window(conn, cfg: dict, why: str) -> str:
     return f"reconcile ({why}) -> wake fired (mode={result.get('mode')})"
 
 
+def _adopt_manual_window(cfg: dict) -> str | None:
+    """Auto-adopt a cortex window the user opened `claude` in herself (in
+    cortex_home) but never registered — so the tick treats it as the live
+    resident this same tick instead of firing/spawning a duplicate. Runs INSIDE
+    the shared spawn lock (wake._spawn_serialized) so it never races an actual
+    spawn. Config-gated ([wake].auto_adopt, default on).
+
+    Re-check liveness under the lock first (a spawn may have landed a resident
+    between the caller's check and the lock). Then scan iTerm for an adoptable
+    window (window.find_adoptable_window: interactive `claude` in cortex_home,
+    newest start wins; headless `claude -p` excluded by construction). Adopt via
+    the SAME atomic CAS the spawn path uses (wake_state.set_awake with the live
+    epoch token, bump=False, session_id + claude transcript sid committed
+    together) so a concurrent lie_down/reset cannot be overwritten. Returns a log
+    line on adoption, else None (no candidate / adoption CAS lost / disabled)."""
+    from cortex import wake, wake_state, window
+    if not bool(cfg["wake"].get("auto_adopt", True)):
+        return None
+    with wake._spawn_serialized(cfg):
+        if wake._window_alive(cfg):
+            return None  # a resident landed under the lock -> nothing to adopt
+        sid = window.find_adoptable_window(cfg)
+        if not sid:
+            return None
+        claude_sid = window.claude_session_id(cfg)
+        transcript_path = None
+        if claude_sid:
+            transcript_path = str(transcript.transcript_dir(cfg) / f"{claude_sid}.jsonl")
+        try:
+            token = wake_state.current_epoch(cfg)
+        except wake_state.StateValidationError:
+            return None
+        new_epoch = wake_state.set_awake(
+            cfg, None, transcript_path, expected_token=token, bump=False,
+            session_id=sid)
+        if new_epoch is None:
+            return None  # a newer epoch superseded between capture and commit
+        wake_state.wake_audit(cfg, "adopt_manual_window", sid,
+                              f"claude_sid={claude_sid}")
+        return f"adopted manual window {sid} (claude_sid={claude_sid})"
+
+
 def _reconcile(conn, cfg: dict, st: dict, now) -> str | None:
     """Ledger reconcile (runs every tick, after night close). Returns a log line
     when it acts / short-circuits the rest of the tick, else None (let the normal
@@ -234,6 +276,12 @@ def _reconcile(conn, cfg: dict, st: dict, now) -> str | None:
         return "paused (DND): reconcile + reaps + injections held"
     if _window_alive(cfg):
         return None  # alive -> never touch; normal flow handles it
+    # Before ANY dead-window fire/spawn: adopt a window the user opened herself.
+    # A hit records it as the resident under the spawn lock -> treat as alive
+    # this tick (no fire, no spawn), so she never re-registers her window.
+    adopted = _adopt_manual_window(cfg)
+    if adopted is not None:
+        return adopted
     due = _parse_local(wake_state.get_next_wake_at(cfg), cfg)
     if due is not None and now >= due:
         return _fire_dead_window(conn, cfg, "ledger due, window dead")

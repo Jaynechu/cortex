@@ -281,6 +281,9 @@ def _fire_spy(monkeypatch):
         return f"fired: {why}"
 
     monkeypatch.setattr(pacemaker_tick, "_fire_dead_window", fake_fire)
+    # Adoption runs before any dead-window fire; with no manual window to adopt
+    # (the default) it must be a no-op so the fire/hold matrix is exercised.
+    monkeypatch.setattr(pacemaker_tick, "_adopt_manual_window", lambda cfg: None)
     return calls
 
 
@@ -378,6 +381,7 @@ def test_reconcile_future_hold_short_circuits_main(cfg, monkeypatch):
     """P1-1: a dead window + future ledger alarm must short-circuit main() so
     no other wake path (e.g. an overdue floor via run_tick) fires early."""
     monkeypatch.setattr("cortex.wake._window_alive", lambda c: False)
+    monkeypatch.setattr(pacemaker_tick, "_adopt_manual_window", lambda cfg: None)
     monkeypatch.setattr(pacemaker_tick.config, "load", lambda: cfg)
     now = datetime.now(_tz(cfg))
     wake_state.set_next_wake_at(cfg, (now + timedelta(minutes=20)).isoformat())
@@ -480,6 +484,7 @@ def test_main_normal_tick_dry_run_wake_sets_ledger(cfg, monkeypatch):
     write the redrawn floor into next_wake_at, not just log-only advance the
     in-memory floor — else the ledger goes stale here too."""
     monkeypatch.setattr("cortex.wake._window_alive", lambda c: False)
+    monkeypatch.setattr(pacemaker_tick, "_adopt_manual_window", lambda cfg: None)
     monkeypatch.setattr(pacemaker_tick.config, "load", lambda: cfg)
     cfg["pacemaker"]["dry_run"] = True
     now = datetime.now(_tz(cfg))

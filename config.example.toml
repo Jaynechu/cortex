@@ -57,6 +57,11 @@ call_timeout_s = 600
 # fresh one on the next wake. 0 disables the token cap.
 [wake]
 token_cap = 150000
+# Auto-adopt a cortex window you opened `claude` in yourself (in cortex_home) but
+# never registered: the pacemaker tick records it as the resident (under the spawn
+# lock) instead of firing/spawning a duplicate window. Interactive-tty only, so a
+# headless `claude -p` run against the same cwd is never adopted. false = off.
+auto_adopt = true
 # Wake delivery: "window" = resident interactive iTerm cli (B3v, default);
 # "headless" = the marrow-subprocess call (fallback, auto-used if osascript/iTerm
 # fails). The window body = one `claude` in cortex_home with MARROW_CORTEX=1
@@ -178,7 +183,7 @@ enabled = false
 # launchd tick cadence (seconds). Baked into the plists at `python -m cortex.install`.
 [tick]
 collect_interval_sec = 1800    # collectors ~30min
-pacemaker_interval_sec = 300   # pacemaker evaluation ~5min
+pacemaker_interval_sec = 60    # pacemaker evaluation + auto-adopt latency (~1min)
 usage_snapshot = true          # OAuth usage % snapshot (marrow subprocess) each tick
 
 # Integration layer knobs (numbers the integration computes and hands the pure pacemaker).

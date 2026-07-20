@@ -608,6 +608,106 @@ def find_claude_pid(cfg: dict) -> int | None:
     return None
 
 
+def _list_sessions() -> list[tuple[str, str]]:
+    """Enumerate EVERY live iTerm session as (session id, tty). tty is the
+    /dev/ttysNNN device backing the session (empty for a session with no live
+    process). Used by the tick's auto-adopt scan to find a window the user
+    opened `claude` in herself (never registered). Same repeat-over-windows/
+    tabs/sessions shape as _session_alive; one AppleScript call, machine-parsed
+    from `id|tty` lines. iTerm down / AppleScript error -> []."""
+    script = f'''
+set out to ""
+tell application "{_APP}"
+  repeat with w in windows
+    repeat with t in tabs of w
+      repeat with s in sessions of t
+        set out to out & (id of s) & "|" & (tty of s) & linefeed
+      end repeat
+    end repeat
+  end repeat
+end tell
+return out
+'''
+    try:
+        raw = _osa(script)
+    except WindowError:
+        return []
+    pairs = []
+    for line in raw.splitlines():
+        if "|" not in line:
+            continue
+        sid, tty = line.split("|", 1)
+        sid, tty = sid.strip(), tty.strip()
+        if sid:
+            pairs.append((sid, tty))
+    return pairs
+
+
+def _claude_start_on_tty(ttyname: str, home: str) -> float | None:
+    """Newest start time (epoch seconds) of an interactive `claude` process on
+    `ttyname` (no /dev/ prefix) whose cwd is `home`. `ps -o lstart=` gives the
+    wall-clock start; parsed to epoch. An INTERACTIVE tty (a real ttysNNN) is
+    required by construction — headless `claude -p` runs (marrow's digest) have
+    no controlling tty, so they never appear under `ps -t <tty>` and are excluded
+    without a special case. None when no matching claude runs on that tty."""
+    try:
+        p = subprocess.run(["ps", "-t", ttyname, "-o", "pid=,comm=,lstart="],
+                           capture_output=True, text=True)
+    except OSError:
+        return None
+    if p.returncode != 0:
+        return None
+    newest: float | None = None
+    for line in p.stdout.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) < 3:
+            continue
+        pid_s, comm, lstart = parts
+        if comm != "claude":
+            continue
+        try:
+            pid = int(pid_s)
+        except ValueError:
+            continue
+        if _pid_cwd(pid) != home:
+            continue
+        ts = _parse_lstart(lstart)
+        if ts is not None and (newest is None or ts > newest):
+            newest = ts
+    return newest
+
+
+def _parse_lstart(text: str) -> float | None:
+    """Parse `ps -o lstart` output (e.g. 'Sun Jul 20 18:36:01 2026') to epoch
+    seconds via the local timezone. Unparseable -> None."""
+    from datetime import datetime
+    for fmt in ("%a %b %d %H:%M:%S %Y", "%a %d %b %H:%M:%S %Y"):
+        try:
+            return datetime.strptime(text.strip(), fmt).timestamp()
+        except ValueError:
+            continue
+    return None
+
+
+def find_adoptable_window(cfg: dict) -> str | None:
+    """Scan iTerm for a window the user opened `claude` in herself inside
+    cortex_home and never registered. Returns the iTerm session id (UUID) of the
+    best candidate — the one whose `claude` process start time is NEWEST — or
+    None when there is no candidate. Interactive-tty-only by construction (see
+    _claude_start_on_tty), so marrow's headless `claude -p` runs against the same
+    cwd are never adopted. iTerm down / no sessions -> None."""
+    home = str(config.cortex_home(cfg))
+    best_sid: str | None = None
+    best_ts = -1.0
+    for sid, tty in _list_sessions():
+        if not tty.startswith("/dev/"):
+            continue
+        ts = _claude_start_on_tty(tty.removeprefix("/dev/"), home)
+        if ts is not None and ts > best_ts:
+            best_ts, best_sid = ts, sid
+    return best_sid
+
+
 def _claude_on_session_tty(cfg: dict, sid: str) -> bool:
     """True iff a `claude` process runs on the RECORDED iTerm session's own tty.
     Per-session liveness — the cwd fallback in find_claude_pid is deliberately

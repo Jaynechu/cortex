@@ -56,6 +56,10 @@ _DEFAULTS: dict[str, Any] = {
     # say_sound = the sound say() plays when it fronts the window.
     "wake": {
         "token_cap": 150_000,
+        # Auto-adopt a cortex window the user opened `claude` in herself (in
+        # cortex_home) but never registered: the tick reconcile records it as the
+        # resident (under the spawn lock) instead of firing a duplicate window.
+        "auto_adopt": True,
         "signal_log": "",
         "ear_timeout_sec": 90,
         # Bounded wait after a RESUMED window comes up for the resumed model to
@@ -160,7 +164,7 @@ _DEFAULTS: dict[str, Any] = {
     # launchd tick cadence (seconds). Baked into plists at install time.
     "tick": {
         "collect_interval_sec": 1800,
-        "pacemaker_interval_sec": 300,
+        "pacemaker_interval_sec": 60,
         # OAuth usage % snapshot (marrow subprocess) each collect tick.
         "usage_snapshot": True,
     },
