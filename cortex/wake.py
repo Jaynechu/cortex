@@ -462,6 +462,38 @@ def _wait_new_transcript(cfg, preexisting: set[str]) -> str | None:
     return None
 
 
+def _wait_resume_transcript(cfg, resume_sid: str, before: tuple[float, int] | None,
+                            preexisting: set[str]) -> str | None:
+    """Poll (bounded) for evidence that a `claude --resume` landed. Unlike a fresh
+    spawn, --resume APPENDS to the existing <resume_sid>.jsonl — no new file
+    appears — so waiting on a new-file snapshot burns the whole timeout and wipes
+    the transcript hint. Settle on evidence instead: the resume file's (mtime,
+    size) growing past `before` (captured pre-spawn; None = file absent then),
+    returning that path. Edge: --resume can silently degrade to a fresh session
+    with a NEW sid; if a jsonl outside `preexisting` appears, fresh-file evidence
+    wins (settle on it). None on timeout (neither grew nor appeared)."""
+    from cortex import transcript
+
+    d = transcript.transcript_dir(cfg)
+    rp = d / f"{resume_sid}.jsonl"
+    waited = 0.0
+    while waited < _SPAWN_TRANSCRIPT_POLL_TIMEOUT_S:
+        if d.exists():
+            fresh = [p for p in d.glob("*.jsonl") if p.name not in preexisting]
+            if fresh:
+                return str(max(fresh, key=lambda p: p.stat().st_mtime))
+        try:
+            st = rp.stat()
+            now_ev = (st.st_mtime, st.st_size)
+        except OSError:
+            now_ev = None
+        if now_ev is not None and (before is None or now_ev > before):
+            return str(rp)
+        time.sleep(_SPAWN_TRANSCRIPT_POLL_STEP_S)
+        waited += _SPAWN_TRANSCRIPT_POLL_STEP_S
+    return None
+
+
 def _spawn_wake(conn, cfg, now, resume: bool = False,
                 wake_reasons: str | None = None) -> dict | None:
     """New-window wake. FRESH (resume=False): a brand-new brain whose FIRST
@@ -530,6 +562,14 @@ def _spawn_wake(conn, cfg, now, resume: bool = False,
         # counts as growth against this baseline, never gets silently absorbed by
         # capturing the baseline only after the window already came up.
         resume_baseline = _assistant_line_count(cfg, resume_sid)
+        # Pre-spawn (mtime, size) of the resume file: --resume APPENDS to it (no
+        # new file appears), so growth past this is the settle evidence. None =
+        # absent now (any later stat counts as growth).
+        try:
+            _rst = (tdir / f"{resume_sid}.jsonl").stat()
+            resume_before = (_rst.st_mtime, _rst.st_size)
+        except OSError:
+            resume_before = None
     else:
         # Fresh: the visible bell is the first prompt; write its receipt (with the
         # epoch token, Fix 4) BEFORE spawning so the marrow hook recognizes the
@@ -542,7 +582,14 @@ def _spawn_wake(conn, cfg, now, resume: bool = False,
     except window.WindowError as e:
         _alert_respawn_failed(conn, wake_id_of(now), str(e)[:180])
         return None
-    new_path = _wait_new_transcript(cfg, preexisting)
+    if resume_sid:
+        # Resume APPENDS to the existing <resume_sid>.jsonl -> no new file, so
+        # _wait_new_transcript would burn its timeout and wipe the hint. Settle on
+        # growth evidence instead (fresh-file wins if --resume degraded to a new
+        # sid). See _wait_resume_transcript.
+        new_path = _wait_resume_transcript(cfg, resume_sid, resume_before, preexisting)
+    else:
+        new_path = _wait_new_transcript(cfg, preexisting)
     # ONE atomic commit -- awake flip, wake_log_id, transcript hint, AND the new
     # resident session id (Fix 2), WITHOUT bumping the epoch. bump=False keeps
     # live gen == the receipt's gen so the marrow hook's equality check

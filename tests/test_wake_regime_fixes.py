@@ -434,6 +434,142 @@ def test_fresh_spawn_receipt_carries_epoch_token(cfg, monkeypatch):
     assert d["cortex_claude_sid"] == "abc123"
 
 
+# ── Resume transcript settle: --resume APPENDS, never a new file ──────────────
+
+def _seed_resume_transcript(cfg, resume_sid: str, n_lines: int):
+    """Write <resume_sid>.jsonl and return its path (the pre-existing resume
+    file that `claude --resume` appends to)."""
+    from cortex import transcript
+
+    tdir = transcript.transcript_dir(cfg)
+    tdir.mkdir(parents=True, exist_ok=True)
+    p = tdir / f"{resume_sid}.jsonl"
+    p.write_text("\n".join('{"type":"assistant"}' for _ in range(n_lines)) + "\n")
+    return p
+
+
+def test_resume_settle_on_old_file_growth(cfg, monkeypatch):
+    """Resume: --resume APPENDS to <resume_sid>.jsonl (no new file). respawn's
+    growth of that file is the settle evidence -> transcript hint = the resume
+    file AND cortex_claude_sid == resume_sid (the file's stem)."""
+    from cortex import wake, watchdog, window
+
+    _seed_wake_row(cfg, "resume-grow")
+    rp = _seed_resume_transcript(cfg, "resume-uuid", 1)
+    monkeypatch.setattr(window, "claude_session_id", lambda c: "resume-uuid")
+    monkeypatch.setattr(watchdog, "spawn", lambda c: None)
+    monkeypatch.setattr(wake, "_resume_fallback_bell", lambda *a, **k: None)
+
+    def _respawn(c, initial_prompt=None, resume_sid=None):
+        # --resume appends a turn to the SAME file (mtime + size grow).
+        with rp.open("a") as f:
+            f.write('{"type":"assistant"}\n')
+        return "resumed-iterm-sid"
+    monkeypatch.setattr(window, "respawn", _respawn)
+
+    conn = db.connect(cfg)
+    try:
+        res = wake._spawn_wake(conn, cfg, datetime.now(timezone.utc), resume=True)
+    finally:
+        conn.close()
+
+    assert res is not None and res["mode"] == "window"
+    d = wake_state.load(cfg)
+    assert d["transcript"] == str(rp)               # hint = the resume file
+    assert d["cortex_claude_sid"] == "resume-uuid"  # stem == resume_sid
+    assert d["session_id"] == "resumed-iterm-sid"
+
+
+def test_resume_settle_on_new_file_when_degraded(cfg, monkeypatch):
+    """Edge: --resume silently degrades to a FRESH session (new sid) -> a jsonl
+    outside the pre-spawn snapshot appears. Fresh-file evidence wins: settle on
+    it, cortex_claude_sid = the NEW stem."""
+    from cortex import transcript, wake, watchdog, window
+
+    _seed_wake_row(cfg, "resume-degrade")
+    _seed_resume_transcript(cfg, "resume-uuid", 1)  # pre-existing, never grows
+    tdir = transcript.transcript_dir(cfg)
+    monkeypatch.setattr(window, "claude_session_id", lambda c: "resume-uuid")
+    monkeypatch.setattr(watchdog, "spawn", lambda c: None)
+    monkeypatch.setattr(wake, "_resume_fallback_bell", lambda *a, **k: None)
+
+    def _respawn(c, initial_prompt=None, resume_sid=None):
+        # Degraded: a brand-new session file appears instead of the resume file.
+        (tdir / "fresh-degraded.jsonl").write_text('{"type":"assistant"}\n')
+        return "degraded-iterm-sid"
+    monkeypatch.setattr(window, "respawn", _respawn)
+
+    conn = db.connect(cfg)
+    try:
+        wake._spawn_wake(conn, cfg, datetime.now(timezone.utc), resume=True)
+    finally:
+        conn.close()
+
+    d = wake_state.load(cfg)
+    assert d["transcript"] == str(tdir / "fresh-degraded.jsonl")
+    assert d["cortex_claude_sid"] == "fresh-degraded"  # new stem, not resume_sid
+
+
+def test_resume_settle_timeout_records_none(cfg, monkeypatch):
+    """Timeout: neither the resume file grows NOR a new file appears within the
+    poll window -> new_path None, so set_awake records transcript=None /
+    cortex_claude_sid=None (the None-guarded current failure behaviour), and the
+    sid still commits via session_id=."""
+    from cortex import wake, watchdog, window
+
+    _seed_wake_row(cfg, "resume-timeout-null")
+    _seed_resume_transcript(cfg, "resume-uuid", 1)  # never grows
+    monkeypatch.setattr(window, "claude_session_id", lambda c: "resume-uuid")
+    monkeypatch.setattr(watchdog, "spawn", lambda c: None)
+    monkeypatch.setattr(wake, "_resume_fallback_bell", lambda *a, **k: None)
+    monkeypatch.setattr(window, "respawn",
+                        lambda c, initial_prompt=None, resume_sid=None: "resumed-iterm-sid")
+    # Collapse the bounded poll so the timeout branch is reached instantly.
+    monkeypatch.setattr(wake, "_SPAWN_TRANSCRIPT_POLL_TIMEOUT_S", 0.0)
+    monkeypatch.setattr(wake.time, "sleep", lambda s: None)
+
+    conn = db.connect(cfg)
+    try:
+        wake._spawn_wake(conn, cfg, datetime.now(timezone.utc), resume=True)
+    finally:
+        conn.close()
+
+    d = wake_state.load(cfg)
+    assert d["transcript"] is None            # None-guarded failure behaviour
+    assert d.get("cortex_claude_sid") is None
+    assert d["session_id"] == "resumed-iterm-sid"  # sid still committed
+
+
+def test_fresh_path_still_uses_new_file_snapshot(cfg, monkeypatch):
+    """Regression: the FRESH path is unchanged -- it still detects the NEW window
+    via the pre-spawn snapshot (a file OUTSIDE `preexisting`), never the resume
+    settle. A pre-existing file must be ignored; only the post-spawn new file is
+    recorded."""
+    from cortex import transcript, wake, watchdog, window
+
+    _seed_wake_row(cfg, "fresh-snapshot")
+    tdir = transcript.transcript_dir(cfg)
+    tdir.mkdir(parents=True, exist_ok=True)
+    (tdir / "old-retiring.jsonl").write_text('{"type":"assistant"}\n')  # pre-existing
+    monkeypatch.setattr(watchdog, "spawn", lambda c: None)
+
+    def _respawn(c, initial_prompt=None, resume_sid=None):
+        assert resume_sid is None  # fresh: no resume sid
+        (tdir / "brand-new.jsonl").write_text('{"type":"assistant"}\n')
+        return "fresh-iterm-sid"
+    monkeypatch.setattr(window, "respawn", _respawn)
+
+    conn = db.connect(cfg)
+    try:
+        wake._spawn_wake(conn, cfg, datetime.now(timezone.utc), resume=False)
+    finally:
+        conn.close()
+
+    d = wake_state.load(cfg)
+    assert d["transcript"] == str(tdir / "brand-new.jsonl")  # new file, not old
+    assert d["cortex_claude_sid"] == "brand-new"
+
+
 # ── Fix 5: machine-origin tag on the wake note ────────────────────────────────
 
 def test_note_render_prepends_machine_tag(cfg):
