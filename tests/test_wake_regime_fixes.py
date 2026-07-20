@@ -122,7 +122,7 @@ def test_run_wake_fresh_spawn_success_consumes_rotate_flag(cfg, monkeypatch):
     monkeypatch.setattr(wake, "_render_daybrief", lambda c: None)
     monkeypatch.setattr(window, "respawn",
                         lambda c, initial_prompt=None, resume_sid=None: "sid-new")
-    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, prev, ts: "/t/new.jsonl")
+    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, ts, exclude_sid=None: "/t/new.jsonl")
     monkeypatch.setattr(watchdog, "spawn", lambda c: None)
 
     decision = {"wake": True, "reasons": [], "wake_reasons": "ctl"}
@@ -159,7 +159,7 @@ def test_run_wake_concurrent_rotate_second_entrant_skips(cfg, monkeypatch):
     monkeypatch.setattr(
         window, "respawn",
         lambda c, initial_prompt=None, resume_sid=None: spawns.__setitem__("n", spawns["n"] + 1))
-    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, prev, ts: "/t/new.jsonl")
+    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, ts, exclude_sid=None: "/t/new.jsonl")
 
     # ONE classification call (inside the lock) reports rotate_driven=True...
     monkeypatch.setattr(wake, "_classify_wake", lambda c: ("fresh", True))
@@ -196,7 +196,7 @@ def test_classify_wake_called_exactly_once_per_run_wake(cfg, monkeypatch):
     monkeypatch.setattr(watchdog, "spawn", lambda c: None)
     monkeypatch.setattr(window, "respawn",
                         lambda c, initial_prompt=None, resume_sid=None: "sid-new")
-    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, prev, ts: "/t/new.jsonl")
+    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, ts, exclude_sid=None: "/t/new.jsonl")
 
     calls = {"n": 0}
     real_classify = wake._classify_wake
@@ -275,7 +275,7 @@ def test_spawn_wake_resume_readiness_failure_surfaces_none(cfg, monkeypatch):
         return "fresh-iterm-sid"
     monkeypatch.setattr(wake, "_window_alive", lambda c: False)  # dead resident
     monkeypatch.setattr(window, "respawn", _respawn)
-    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, prev, ts: "/t/new.jsonl")
+    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, ts, exclude_sid=None: "/t/new.jsonl")
     monkeypatch.setattr(watchdog, "spawn", lambda c: None)
 
     conn = db.connect(cfg)
@@ -386,7 +386,7 @@ def test_resume_launch_is_clean_no_receipt(cfg, monkeypatch):
     monkeypatch.setattr(window, "respawn",
                         lambda c, initial_prompt=None, resume_sid=None:
                         launch.update(prompt=initial_prompt, resume_sid=resume_sid))
-    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, prev, ts: "/t/new.jsonl")
+    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, ts, exclude_sid=None: "/t/new.jsonl")
     monkeypatch.setattr(wake, "_resume_fallback_bell", lambda *a, **k: None)
     monkeypatch.setattr(watchdog, "spawn", lambda c: None)
 
@@ -411,7 +411,7 @@ def test_fresh_spawn_receipt_carries_epoch_token(cfg, monkeypatch):
     _seed_wake_row(cfg, "fresh-token")
     monkeypatch.setattr(window, "respawn",
                         lambda c, initial_prompt=None, resume_sid=None: "sid-new")
-    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, prev, ts: "/t/abc123.jsonl")
+    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, ts, exclude_sid=None: "/t/abc123.jsonl")
     monkeypatch.setattr(watchdog, "spawn", lambda c: None)
 
     conn = db.connect(cfg)
@@ -497,7 +497,7 @@ def test_interleave_rotate_sampling_gap_no_double_spawn(cfg, monkeypatch):
     monkeypatch.setattr(
         window, "respawn",
         lambda c, initial_prompt=None, resume_sid=None: spawns.__setitem__("n", spawns["n"] + 1))
-    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, prev, ts: "/t/new.jsonl")
+    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, ts, exclude_sid=None: "/t/new.jsonl")
 
     # _classify_wake runs for real (sees the real flag -> ("fresh", True)), but a
     # concurrent winner (modelled directly) consumes the flag the INSTANT after
@@ -534,7 +534,7 @@ def test_interleave_stale_sid_never_overwrites_live_resident(cfg, monkeypatch):
 
     _seed_wake_row(cfg, "interleave-sid")
     monkeypatch.setattr(watchdog, "spawn", lambda c: None)
-    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, prev, ts: "/t/new.jsonl")
+    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, ts, exclude_sid=None: "/t/new.jsonl")
 
     def _respawn_then_concurrent_actor_wins(c, initial_prompt=None, resume_sid=None):
         # Interleave point: THIS stale actor's window just became ready (respawn
@@ -578,7 +578,7 @@ def test_interleave_pre_readiness_assistant_turn_counts_as_growth(cfg, monkeypat
     _seed_wake_row(cfg, "interleave-preready")
     wake_state.update(cfg, transcript="/x/projects/cwd/resume-uuid.jsonl")
     monkeypatch.setattr(watchdog, "spawn", lambda c: None)
-    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, prev, ts: "/t/new.jsonl")
+    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, ts, exclude_sid=None: "/t/new.jsonl")
     monkeypatch.setattr(window, "claude_session_id", lambda c: "resume-uuid")
 
     typed = {"called": False}
@@ -614,7 +614,7 @@ def test_interleave_state_id_aba_rejects_recreated_state(cfg, monkeypatch):
 
     _seed_wake_row(cfg, "interleave-aba")
     monkeypatch.setattr(watchdog, "spawn", lambda c: None)
-    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, prev, ts: "/t/new.jsonl")
+    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, ts, exclude_sid=None: "/t/new.jsonl")
 
     token = wake_state.current_epoch(cfg)  # (gen, original_state_id)
 

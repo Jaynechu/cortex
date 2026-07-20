@@ -432,33 +432,34 @@ _SPAWN_TRANSCRIPT_POLL_STEP_S = 0.5
 _SPAWN_TRANSCRIPT_POLL_TIMEOUT_S = 8.0
 
 
-def _wait_new_transcript(cfg, prev_path: str | None, spawn_ts: float) -> str | None:
-    """Poll (bounded) for the new session transcript after a spawn. Returns its
-    path once one appears that differs from prev_path and was modified at/after
-    spawn_ts; None on timeout (record None, never a stale path).
+def _wait_new_transcript(cfg, spawn_ts: float,
+                         exclude_sid: str | None = None) -> str | None:
+    """Poll (bounded) for the NEW session transcript after a spawn. Returns the
+    newest jsonl whose stem != exclude_sid AND whose mtime >= spawn_ts; None on
+    timeout (record None, never a stale path).
 
-    When prev_path is None (no prior transcript to compare against — the
-    common case since the poll routinely times out, see module docstring
-    above), `cur_s != prev_path` is trivially true for ANY existing jsonl, so
-    the != shortcut is only valid when prev_path is a real path. With prev_path
-    None, acceptance must rely solely on fresh_mtime (mtime >= spawn_ts) —
-    otherwise the very first poll iteration returns whatever stale jsonl
-    happens to already exist (live-confirmed: recorded hint pointed at an old
-    session instead of the new window's)."""
+    exclude_sid is the retiring window's claude session uuid (wake_state's
+    durable retired_sid). On a rotate spawn the OLD window stays alive and keeps
+    writing its own jsonl for several seconds after spawn_ts (lie_down MCP return
+    + its final turn), so that file is BOTH mtime-newest AND passes mtime >=
+    spawn_ts — freshness alone would accept it (live-confirmed 22:04: registered
+    the retiring session's transcript instead of the real new window's, which
+    only appears seconds later). Excluding the retired stem is the only guard
+    that holds even in tonight's case, where the lie_down claim had already
+    popped the recorded transcript hint to None (so there was no prev_path to
+    compare against). Acceptance is exclusion AND freshness, always."""
     from cortex import transcript
 
     waited = 0.0
     while waited < _SPAWN_TRANSCRIPT_POLL_TIMEOUT_S:
         cur = transcript.newest(cfg)
-        if cur is not None:
-            cur_s = str(cur)
+        if cur is not None and cur.stem != exclude_sid:
             try:
                 fresh_mtime = cur.stat().st_mtime >= spawn_ts
             except OSError:
                 fresh_mtime = False
-            accept = fresh_mtime if prev_path is None else (cur_s != prev_path or fresh_mtime)
-            if accept:
-                return cur_s
+            if fresh_mtime:
+                return str(cur)
         time.sleep(_SPAWN_TRANSCRIPT_POLL_STEP_S)
         waited += _SPAWN_TRANSCRIPT_POLL_STEP_S
     return None
@@ -504,11 +505,14 @@ def _spawn_wake(conn, cfg, now, resume: bool = False,
     The recorded transcript hint must be the NEW session's jsonl — captured only
     after it actually appears (bounded poll) — never the pre-spawn newest, which
     is the OLD session and would drive an endless respawn loop next tick."""
-    from cortex import transcript, wake_state, watchdog, window
+    from cortex import wake_state, watchdog, window
 
     resume_sid = window.claude_session_id(cfg) if resume else None
-    prev_path = transcript.newest(cfg)
-    prev_path = str(prev_path) if prev_path else None
+    # The retiring window's claude sid (durable retired_sid, set by the lie_down
+    # claim before this spawn). On a rotate the old window stays alive writing
+    # its own jsonl for several seconds past spawn_ts, so it is mtime-newest AND
+    # fresh — exclude it by stem so the poll waits for the REAL new session.
+    exclude_sid = wake_state.get_retired_sid(cfg)
     spawn_ts = time.time()
     # Capture the epoch token only to stamp the wake receipt (marrow's hook
     # validates it via wake_token_current). Capture failure (lock/parse) ->
@@ -540,7 +544,7 @@ def _spawn_wake(conn, cfg, now, resume: bool = False,
     except window.WindowError as e:
         _alert_respawn_failed(conn, wake_id_of(now), str(e)[:180])
         return None
-    new_path = _wait_new_transcript(cfg, prev_path, spawn_ts)
+    new_path = _wait_new_transcript(cfg, spawn_ts, exclude_sid=exclude_sid)
     # ONE atomic commit -- awake flip, wake_log_id, transcript hint, AND the new
     # resident session id (Fix 2), WITHOUT bumping the epoch. bump=False keeps
     # live gen == the receipt's gen so the marrow hook's equality check
