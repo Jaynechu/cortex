@@ -15,6 +15,7 @@ import argparse
 import json
 import sys
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from cortex import config, wake_state
 from cortex.pacemaker.triggers import clamp_window_minutes
@@ -31,7 +32,10 @@ def wait(cfg: dict, minutes: float) -> dict:
     if not res.get("ok"):
         return {"ok": False, "refused": True, "reason":
                 "No consecutive waits - act (any tool) then wait, or lie_down."}
-    return {"ok": True, "minutes": minutes, "until": until.isoformat()}
+    until_local = until.astimezone(ZoneInfo(cfg["core"]["timezone"])).strftime("%H:%M")
+    template = cfg.get("wake", {}).get("wait_ack_template") or "Alarm set {until_local}"
+    note = template.format(until_local=until_local)
+    return {"ok": True, "minutes": minutes, "until": until.isoformat(), "note": note}
 
 
 def main(argv: list[str] | None = None) -> int:

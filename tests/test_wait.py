@@ -81,3 +81,34 @@ def test_no_auto_observe_manual_wait_ok_once(cfg):
     r2 = wait.wait(cfg, 10)
     assert r2["ok"] is False
     assert r2.get("refused") is True
+
+
+# --- note (alarm-armed ack) ----------------------------------------------------
+
+def test_wait_ok_returns_note_with_local_hm(cfg):
+    # Success carries a "note" field ("alarm armed") so the model doesn't
+    # misread the instant return as "the wait has already elapsed".
+    wake_state.set_awake(cfg, wake_log_id=1, transcript="t")
+    r = wait.wait(cfg, 10)
+    assert r["ok"] is True
+    assert "note" in r
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    until_dt = datetime.fromisoformat(r["until"])
+    expected_hm = until_dt.astimezone(ZoneInfo(cfg["core"]["timezone"])).strftime("%H:%M")
+    assert r["note"] == f"Alarm set {expected_hm}"
+
+
+def test_wait_refused_has_no_note(cfg):
+    wake_state.set_awake(cfg, wake_log_id=1, transcript="t")
+    wait.wait(cfg, 10)
+    r2 = wait.wait(cfg, 10)
+    assert r2["ok"] is False
+    assert "note" not in r2
+
+
+def test_wait_note_uses_custom_template(cfg):
+    cfg["wake"]["wait_ack_template"] = "⏰ {until_local}"
+    wake_state.set_awake(cfg, wake_log_id=1, transcript="t")
+    r = wait.wait(cfg, 5)
+    assert r["note"].startswith("⏰ ")

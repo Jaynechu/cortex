@@ -112,6 +112,7 @@ rearm_suffix = " (ear died — rearm)"
 say_sound = "Glass"
 wait_min = 1                # wait(N) clamp lower bound (minutes) — short one-shot hold
 wait_max = 20               # wait(N) clamp upper bound (minutes)
+wait_ack_template = "Alarm set {until_local}"  # wait() success ack note ("alarm armed", not "already elapsed"); {until_local} = HH:MM in core.timezone
 next_wake_min = 21          # lie_down(next_wake_min=N) clamp lower bound (minutes)
 next_wake_max = 240         # lie_down(next_wake_min=N) clamp upper bound (minutes)
 sentinel = true             # arm cortex.sentinel (one-shot exact-time wake) at every lie_down; false = tick-only fallback

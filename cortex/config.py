@@ -86,6 +86,10 @@ _DEFAULTS: dict[str, Any] = {
         # draw window (triggers.floor_*): a short one-shot hold on the hot cache.
         "wait_min": 1,
         "wait_max": 20,
+        # wait() success ack (C: model misreads the instant return as "the wait
+        # has already elapsed" — this one-liner reframes it as "alarm armed").
+        # {until_local} = wait() deadline rendered HH:MM in core.timezone.
+        "wait_ack_template": "Alarm set {until_local}",
         # lie_down(next_wake_min=N) clamp (minutes): [next_wake_min, next_wake_max].
         "next_wake_min": 21,
         "next_wake_max": 240,
