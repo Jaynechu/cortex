@@ -625,7 +625,7 @@ def test_static_zwj_template_roundtrips_through_receipt(cfg):
 
     from cortex import wake_state, window
 
-    static = "🧚‍♀️ 笨鸭换岗成功"
+    static = "[🧚‍♀️ 笨鸭换岗成功]"
     cfg["wake"]["wake_bell_template"] = static
     now = _dt(2026, 7, 19, 9, 5, tzinfo=timezone.utc)
     # No {hm}: the rendered line equals the static text verbatim.
@@ -636,8 +636,8 @@ def test_static_zwj_template_roundtrips_through_receipt(cfg):
     assert r["text"] == static and r["template"] == static
     assert r["template_prefix"] == static
     # ZWJ code points intact (U+1F9DA U+200D U+2640 U+FE0F).
-    assert [hex(ord(c)) for c in r["text"][:4]] == \
-        ["0x1f9da", "0x200d", "0x2640", "0xfe0f"]
+    assert [hex(ord(c)) for c in r["text"][:5]] == \
+        ["0x5b", "0x1f9da", "0x200d", "0x2640", "0xfe0f"]
 
 
 def test_fresh_initial_prompt_is_visible_bell_only(cfg):

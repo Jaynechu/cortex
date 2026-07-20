@@ -85,10 +85,10 @@ def test_wake_bell_zwj_static_template_does_not_reset(cfg):
     # Static (no {hm}) multi-codepoint ZWJ bell template must also self-match
     # as a machine line (regression: emoji-leading marker previously never
     # matched itself once the leading-decoration strip consumed it).
-    cfg["wake"]["wake_bell_template"] = "🧚‍♀️ 笨鸭换岗成功"
+    cfg["wake"]["wake_bell_template"] = "[🧚‍♀️ 笨鸭换岗成功]"
     _write(cfg, [
         _user("q", 25),
-        _user("🧚‍♀️ 笨鸭换岗成功", 2),
+        _user("[🧚‍♀️ 笨鸭换岗成功]", 2),
         _user("⏳ [NIGHT] Night window is open ...", 1),
     ])
     assert 24.0 < transcript.user_silent_min(cfg) < 26.0
