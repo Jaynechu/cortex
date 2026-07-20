@@ -190,15 +190,6 @@ def lie_down(cfg: dict, force_slept: str | None = None, rotate: bool = False,
         # defeat the 120-360 roaming band).
         next_floor = _arm_sentinel(cfg, next_floor, token)
         next_wake = _local_hm(next_floor, cfg)
-        # Rotate = hand over NOW: spawn the fresh successor immediately instead of
-        # waiting for the ledger time. The retirement mutation already committed
-        # (rotated True, cortex_claude_sid popped), so this only fires on a real
-        # rotate. Spawn failure must NOT wedge the rotate — the retirement stays
-        # landed; _spawn_successor alerts/audits best-effort. No double-spawn: the
-        # spawn goes through _window_wake_plan which take_rotated()-consumes the
-        # flag, so a racing pacemaker reconcile classifies "ear" and holds.
-        if rotated:
-            _spawn_successor(conn, cfg)
         if night:
             # C6 ack: INVISIBLE — audit-log line only, never a window inject.
             ack = (cfg.get("night", {}).get("ack_text") or "")
@@ -213,43 +204,6 @@ def lie_down(cfg: dict, force_slept: str | None = None, rotate: bool = False,
                 "next_wake": next_wake, "mode": mode}
     finally:
         conn.close()
-
-
-def _spawn_successor(conn, cfg: dict) -> None:
-    """Rotate succession: spawn the fresh successor window NOW via the existing
-    pacemaker fire path — a forced decision through wake.run_wake. run_wake calls
-    _window_wake_plan, which take_rotated()-consumes the rotate flag and classifies
-    "fresh", so the fresh spawn does the rest (same shape as ctl's remote wake).
-    Spawn authority stays inside cortex's own chain (this IS a pacemaker-family
-    path).
-
-    Idempotent (no double-spawn): the rotate flag is consumed atomically by
-    _window_wake_plan's take_rotated() inside run_wake, so a racing reconcile
-    that beat us finds no flag and classifies "ear"/"resume" instead of a second
-    fresh spawn. If the flag is already gone here (someone consumed it), the
-    successor is already being spawned -> skip.
-    Best-effort: any failure to spawn is alerted via wake._alert_respawn_failed
-    (or an audit line) and never wedges the rotate that already committed."""
-    from cortex import wake, wake_state
-
-    now = _now_local(cfg)
-    try:
-        if not wake_state.load(cfg).get("rotated"):
-            return  # rotate flag already consumed -> successor already spawning
-        decision = {"wake": True, "reasons": [], "gated_by": [],
-                    "wake_reasons": "rotate",
-                    "explanation": f"{now.strftime('%H:%M')} rotate succession"}
-        wake.run_wake(conn, cfg, decision, now=now)
-    except Exception as e:  # noqa: BLE001 - respawn must never wedge the rotate
-        try:
-            wake._alert_respawn_failed(conn, wake.wake_id_of(now),
-                                       f"rotate succession: {str(e)[:150]}")
-        except Exception:  # noqa: BLE001 - alert best-effort too
-            wake_state.wake_audit(cfg, "rotate", "respawn_failed", str(e)[:150])
-
-
-def _now_local(cfg: dict) -> datetime:
-    return datetime.now(ZoneInfo(cfg["core"]["timezone"]))
 
 
 def _token_ok(cfg: dict, token) -> bool:

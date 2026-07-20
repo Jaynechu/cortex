@@ -13,11 +13,6 @@ import pytest
 
 from cortex import config, db, lie_down, pacemaker_tick, wake_state
 
-# Captured at import time (before the autouse _no_real_rotate_successor fixture
-# in conftest.py stubs lie_down._spawn_successor to a no-op) so the dedicated
-# succession tests can monkeypatch it back and exercise the real function.
-_real_spawn_successor = lie_down._spawn_successor
-
 
 @pytest.fixture
 def cfg(tmp_path):
@@ -77,25 +72,23 @@ def test_lie_down_no_rotate_leaves_retired_sid_untouched(cfg):
     assert wake_state.get_retired_sid(cfg) is None
 
 
-# --- rotate succession: hand over NOW (fresh successor spawns immediately) -----
+# --- rotate: spawn authority is the sentinel/pacemaker only (no direct spawn) --
 
-def test_lie_down_rotate_spawns_successor_immediately(cfg, monkeypatch):
-    """Rotate = hand over NOW: a fresh successor window spawns immediately as part
-    of the rotate flow (forced decision through wake.run_wake), not at the ledger
-    time. The mocked spawn boundary is wake.run_wake. Overrides the autouse
-    _no_real_rotate_successor stub with the real _spawn_successor so this test
-    actually exercises it."""
+def test_lie_down_rotate_never_spawns_directly(cfg, monkeypatch):
+    """Spawn authority belongs exclusively to the sentinel/pacemaker chain:
+    lie_down(rotate=True) must NOT spawn a successor itself. It only sets the
+    one-shot rotated flag and arms the sentinel at the requested time — the
+    sentinel (or the 60s pacemaker tick fallback) fires the fresh successor."""
     from cortex import wake
-    monkeypatch.setattr(lie_down, "_spawn_successor", _real_spawn_successor)
-    fired = {}
+    fired = {"n": 0}
     monkeypatch.setattr(wake, "run_wake",
-                        lambda conn, c, decision, **k:
-                        fired.update(decision=decision) or {"mode": "window"})
+                        lambda *a, **k: fired.__setitem__("n", fired["n"] + 1))
     wake_state.set_awake(cfg, 1, "/t/retiring.jsonl")
     r = lie_down.lie_down(cfg, rotate=True, next_wake_min=30)
-    assert r["rotated"] is True
-    assert fired.get("decision", {}).get("wake") is True
-    assert fired["decision"]["wake_reasons"] == "rotate"
+    assert r["rotated"] is True  # rotate flag set
+    assert fired["n"] == 0  # nothing spawned from lie_down
+    assert wake_state.load(cfg).get("rotated") is True  # flag left for the sentinel
+    assert wake_state.get_next_wake_at(cfg) is not None  # sentinel/ledger armed
 
 
 def test_lie_down_no_rotate_never_spawns_successor(cfg, monkeypatch):
@@ -107,45 +100,6 @@ def test_lie_down_no_rotate_never_spawns_successor(cfg, monkeypatch):
     wake_state.set_awake(cfg, 1, "/t/alive.jsonl")
     lie_down.lie_down(cfg, rotate=False, next_wake_min=30)
     assert fired["n"] == 0
-
-
-def test_lie_down_rotate_spawn_failure_retirement_still_lands(cfg, monkeypatch):
-    """A successor spawn failure must NOT wedge the rotate: the retirement stays
-    landed (retired_sid recorded) and the failure is surfaced via
-    wake._alert_respawn_failed (best-effort)."""
-    from cortex import wake
-    monkeypatch.setattr(lie_down, "_spawn_successor", _real_spawn_successor)
-
-    def _boom(*a, **k):
-        raise RuntimeError("spawn boom")
-    monkeypatch.setattr(wake, "run_wake", _boom)
-    alerts = {"n": 0}
-    monkeypatch.setattr(wake, "_alert_respawn_failed",
-                        lambda conn, wid, detail: alerts.__setitem__("n", alerts["n"] + 1))
-    wake_state.set_awake(cfg, 1, "/t/retiring.jsonl")
-    r = lie_down.lie_down(cfg, rotate=True, next_wake_min=30)
-    assert r["rotated"] is True  # retirement landed despite the spawn failure
-    assert wake_state.get_retired_sid(cfg) == "retiring"
-    assert alerts["n"] == 1  # failure alerted
-
-
-def test_spawn_successor_idempotent_when_rotate_flag_already_consumed(cfg, monkeypatch):
-    """No double-spawn: the rotate flag is consumed atomically by run_wake's
-    deferred take_rotated() (after the fresh successor is verified live), so if
-    the flag is already gone here (a racing reconcile beat us / the successor is
-    already spawning) _spawn_successor skips run_wake."""
-    from cortex import wake
-    # No rotated flag set -> already consumed by whoever spawned the successor.
-    assert wake_state.load(cfg).get("rotated") is None
-    fired = {"n": 0}
-    monkeypatch.setattr(wake, "run_wake",
-                        lambda *a, **k: fired.__setitem__("n", fired["n"] + 1))
-    conn = db.connect(cfg)
-    try:
-        lie_down._spawn_successor(conn, cfg)
-    finally:
-        conn.close()
-    assert fired["n"] == 0  # rotate flag already consumed -> no second spawn
 
 
 def test_run_wake_two_concurrent_spawn_entrants_only_one_spawns(cfg, monkeypatch, tmp_path):

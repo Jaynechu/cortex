@@ -547,9 +547,11 @@ def _spawn_wake(conn, cfg, now, resume: bool = False,
     # (wake_token_current) processes the bell instead of suppressing it as
     # stale. UNCONDITIONAL (Fix 4 CAS removed): the physically-up window is the
     # resident, whatever raced past the epoch during the slow startup.
+    from pathlib import Path
+    claude_sid = Path(new_path).stem if new_path else None
     wake_state.set_awake(
         cfg, _wake_log_id(conn, now, wake_reasons), new_path,
-        bump=False, session_id=new_sid)
+        bump=False, session_id=new_sid, cortex_claude_sid=claude_sid)
     watchdog.spawn(cfg)
     if resume_sid:
         # Fix 3: the awake flip is already committed; the fallback-bell poll now

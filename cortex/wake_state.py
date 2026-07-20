@@ -298,7 +298,8 @@ def is_awake(cfg: dict) -> bool:
 def set_awake(cfg: dict, wake_log_id: int | None, transcript: str | None,
               expected_gen: int | None = None, bump: bool = True,
               expected_token: tuple[int, str] | None = None,
-              session_id: str | None = None) -> tuple[int, str] | None:
+              session_id: str | None = None,
+              cortex_claude_sid: str | None = None) -> tuple[int, str] | None:
     """Activate a wake (asleep -> awake). BUMPS gen by default (a fresh wake is a
     new epoch that invalidates the sleeping window's alarm token). Returns the new
     (gen, state_id) on success, None if the conditional flip lost.
@@ -346,6 +347,8 @@ def set_awake(cfg: dict, wake_log_id: int | None, transcript: str | None,
                      tuck_pending=None, last_note_ts=None)
             if session_id is not None:
                 d["session_id"] = session_id
+            if cortex_claude_sid is not None:
+                d["cortex_claude_sid"] = cortex_claude_sid
             _save(cfg, d)
             result = int(d["gen"]), str(d["state_id"])
     except StateValidationError:

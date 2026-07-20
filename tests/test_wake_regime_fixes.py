@@ -411,7 +411,7 @@ def test_fresh_spawn_receipt_carries_epoch_token(cfg, monkeypatch):
     _seed_wake_row(cfg, "fresh-token")
     monkeypatch.setattr(window, "respawn",
                         lambda c, initial_prompt=None, resume_sid=None: "sid-new")
-    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, prev, ts: "/t/new.jsonl")
+    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, prev, ts: "/t/abc123.jsonl")
     monkeypatch.setattr(watchdog, "spawn", lambda c: None)
 
     conn = db.connect(cfg)
@@ -429,6 +429,9 @@ def test_fresh_spawn_receipt_carries_epoch_token(cfg, monkeypatch):
     # Fix 2: the new session id is committed atomically with the awake flip
     # (set_awake's session_id= param) -- window.respawn itself never persists it.
     assert d["session_id"] == "sid-new"
+    # Registration writes cortex_claude_sid = the fresh transcript stem (the
+    # claude session id), so the registration key never sits stale.
+    assert d["cortex_claude_sid"] == "abc123"
 
 
 # ── Fix 5: machine-origin tag on the wake note ────────────────────────────────
