@@ -97,7 +97,7 @@ wake_prompt = "☀️"
 # at send time; the marrow hook exact-matches the on-screen line against it.
 # {hm} = local HH:MM; a fully STATIC template with no {hm} is also valid. Must
 # match marrow [cortex].wake_bell_template.
-wake_bell_template = "[🧚‍♀️ 笨鸭换岗成功]"
+wake_bell_template = "[☀️ {hm}]"
 # Pending-receipt time-to-live (minutes): the consumer ignores an older receipt
 # and the producer overwrites it on each new bell. Match marrow receipt_ttl_min.
 receipt_ttl_min = 15
