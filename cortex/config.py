@@ -368,7 +368,9 @@ def user_name(cfg: dict, default: str = "the user") -> str:
         if marrow_cfg.exists():
             with marrow_cfg.open("rb") as f:
                 data = tomllib.load(f)
-            name = str(data.get("user_name") or "").strip()
+            name = str(data.get("persona", {}).get("user_name") or "").strip()
+            if not name:
+                name = str(data.get("user_name") or "").strip()  # legacy top-level layout
             if name:
                 return name
     except (OSError, ValueError):

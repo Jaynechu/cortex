@@ -76,3 +76,32 @@ def test_path_helpers_default_when_empty():
     assert config.knowledgec_db_path(cfg) == config.DEFAULT_KNOWLEDGEC_DB
     assert config.geofence_file_path(cfg) is None
     assert config.health_export_path(cfg) is None
+
+
+def test_user_name_reads_persona_section(tmp_path):
+    """Current marrow layout: user_name lives under [persona]."""
+    marrow_cfg = tmp_path / "config.toml"
+    marrow_cfg.write_text(
+        """
+[persona]
+user_name = "念念"
+"""
+    )
+    cfg = config.load(tmp_path / "cortex.toml")
+    cfg["paths"]["marrow_db"] = str(tmp_path / "marrow.db")
+    assert config.user_name(cfg) == "念念"
+
+
+def test_user_name_falls_back_to_legacy_top_level(tmp_path):
+    """Old-layout marrow config: user_name at top level, no [persona] section."""
+    marrow_cfg = tmp_path / "config.toml"
+    marrow_cfg.write_text('user_name = "Legacy"\n')
+    cfg = config.load(tmp_path / "cortex.toml")
+    cfg["paths"]["marrow_db"] = str(tmp_path / "marrow.db")
+    assert config.user_name(cfg) == "Legacy"
+
+
+def test_user_name_defaults_when_marrow_config_absent(tmp_path):
+    cfg = config.load(tmp_path / "cortex.toml")
+    cfg["paths"]["marrow_db"] = str(tmp_path / "does_not_exist" / "marrow.db")
+    assert config.user_name(cfg) == "the user"
