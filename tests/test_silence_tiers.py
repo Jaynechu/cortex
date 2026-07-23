@@ -612,10 +612,98 @@ def test_stale_hold_when_window_alive(awake_no_sentinel, monkeypatch):
     assert wake_state.is_awake(cfg) is True  # not reaped
 
 
-def test_stale_reap_when_window_dead(awake_no_sentinel, monkeypatch):
-    """Long transcript-idle and the resident window is GONE -> reap as before."""
+def test_stale_reap_requires_confirm_ticks_default_two(awake_no_sentinel, monkeypatch):
+    """Default confirm_ticks=2: a single dead verdict must NOT reap (debounces a
+    transient osascript hiccup) -- it records a suspect marker and holds."""
     from cortex import pacemaker_tick, wake
     cfg = awake_no_sentinel
+    monkeypatch.setattr(wake, "_window_alive", lambda c: False)
+    conn = db.connect(cfg)
+    try:
+        msg = pacemaker_tick._handle_awake(conn, cfg, wake_state.load(cfg))
+    finally:
+        conn.close()
+    assert "suspect" in msg and "hold" in msg
+    assert wake_state.is_awake(cfg) is True  # not reaped yet
+    assert wake_state.load(cfg).get("stale_suspect")
+
+
+def test_stale_reap_fires_on_second_consecutive_dead_tick(awake_no_sentinel, monkeypatch):
+    """Two consecutive dead verdicts (same gen, within TTL) -> reap fires exactly
+    once on the second tick; the suspect marker is cleared."""
+    from cortex import pacemaker_tick, wake
+    cfg = awake_no_sentinel
+    monkeypatch.setattr(wake, "_window_alive", lambda c: False)
+    conn = db.connect(cfg)
+    try:
+        msg1 = pacemaker_tick._handle_awake(conn, cfg, wake_state.load(cfg))
+        assert "suspect" in msg1
+        assert wake_state.is_awake(cfg) is True
+        msg2 = pacemaker_tick._handle_awake(conn, cfg, wake_state.load(cfg))
+    finally:
+        conn.close()
+    assert "stale wake reaped" in msg2
+    assert wake_state.is_awake(cfg) is False  # reaped
+    assert wake_state.load(cfg).get("stale_suspect") is None
+
+
+def test_stale_suspect_cleared_when_window_alive_between_dead_ticks(
+        awake_no_sentinel, monkeypatch):
+    """dead once (suspect recorded) -> alive tick clears the marker -> a later
+    dead tick starts the count over at 1 (does not reap)."""
+    from cortex import pacemaker_tick, wake
+    cfg = awake_no_sentinel
+    conn = db.connect(cfg)
+    try:
+        monkeypatch.setattr(wake, "_window_alive", lambda c: False)
+        msg1 = pacemaker_tick._handle_awake(conn, cfg, wake_state.load(cfg))
+        assert "suspect" in msg1
+        assert wake_state.load(cfg).get("stale_suspect")
+
+        monkeypatch.setattr(wake, "_window_alive", lambda c: True)
+        msg2 = pacemaker_tick._handle_awake(conn, cfg, wake_state.load(cfg))
+        assert "stale hold: window alive" in msg2
+        assert wake_state.load(cfg).get("stale_suspect") is None
+
+        monkeypatch.setattr(wake, "_window_alive", lambda c: False)
+        msg3 = pacemaker_tick._handle_awake(conn, cfg, wake_state.load(cfg))
+    finally:
+        conn.close()
+    assert "suspect" in msg3 and "(1/2)" in msg3  # fresh first strike
+    assert wake_state.is_awake(cfg) is True  # not reaped
+
+
+def test_stale_suspect_gen_bump_resets_count(awake_no_sentinel, monkeypatch):
+    """dead once, then gen bumps (user message / lie_down) -> the next dead tick
+    does NOT reap: the marker's stale gen is treated as absent (fresh first
+    strike), never accumulated across an epoch it wasn't captured against."""
+    from cortex import pacemaker_tick, wake
+    cfg = awake_no_sentinel
+    st = wake_state.load(cfg)
+    snap_gen = st["gen"]
+    conn = db.connect(cfg)
+    try:
+        monkeypatch.setattr(wake, "_window_alive", lambda c: False)
+        msg1 = pacemaker_tick._handle_awake(conn, cfg, st, snap_gen=snap_gen)
+        assert "suspect" in msg1
+
+        wake_state.bump_gen(cfg)
+        new_gen, _ = wake_state.current_epoch(cfg)
+        msg2 = pacemaker_tick._handle_awake(conn, cfg, wake_state.load(cfg),
+                                             snap_gen=new_gen)
+    finally:
+        conn.close()
+    assert "suspect" in msg2 and "(1/2)" in msg2  # fresh first strike, no reap
+    assert wake_state.is_awake(cfg) is True
+
+
+def test_stale_reap_confirm_ticks_one_reproduces_old_immediate_behaviour(
+        awake_no_sentinel, monkeypatch):
+    """confirm_ticks=1 (config override) reproduces the pre-debounce behaviour:
+    a single dead verdict reaps immediately."""
+    from cortex import pacemaker_tick, wake
+    cfg = awake_no_sentinel
+    cfg["wake"]["stale"] = {"confirm_ticks": 1}
     monkeypatch.setattr(wake, "_window_alive", lambda c: False)
     conn = db.connect(cfg)
     try:

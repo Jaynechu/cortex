@@ -166,6 +166,10 @@ cooldown_sec = 600
 # this long -> presume the watchdog died, proxy lie_down (force_slept=stale).
 [wake.stale]
 threshold_min = 15
+# A single dead-window verdict can be a transient osascript hiccup (the window
+# was actually alive). Require this many CONSECUTIVE dead verdicts (same
+# snapshot gen, within the suspect TTL) before reaping. 1 = old immediate reap.
+confirm_ticks = 2
 
 [knowledgec]
 # knowledgeC.db ZSTREAMNAME to read app-usage rows from.

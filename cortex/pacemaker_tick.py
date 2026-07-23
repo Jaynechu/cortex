@@ -17,6 +17,11 @@ from cortex import config, db, transcript, wake_state
 from cortex.pacemaker import integration
 from cortex.wake import run_wake
 
+# A suspect marker older than this (minutes) is treated as absent even if its
+# gen still matches -- caps how long a single stale osascript hiccup can keep
+# counting toward the confirm threshold.
+_SUSPECT_TTL_MIN = 10
+
 
 def _handle_awake(conn, cfg: dict, st: dict, snap_gen: int | None = None) -> str:
     """A wake is in progress -> the awake gate: NEVER emit a wake signal while
@@ -60,11 +65,24 @@ def _handle_awake(conn, cfg: dict, st: dict, snap_gen: int | None = None) -> str
         # gone. Live-but-silent windows are handled by the silence tier above.
         from cortex.wake import _window_alive
         if _window_alive(cfg):
+            if wake_state.load(cfg).get("stale_suspect"):
+                wake_state.update(cfg, stale_suspect=None)
             return f"stale hold: window alive (idle {idle:.0f}min)"
         # Re-validate the snapshot epoch right before the reap: a user reset /
         # lie_down since the snapshot must cancel this stale-reap (fail closed).
         if not _snapshot_awake_current(cfg, snap_gen):
             return "stale hold: snapshot superseded (gen moved)"
+        # Debounce: a single dead verdict can be a transient osascript hiccup.
+        # Require `confirm_ticks` CONSECUTIVE dead verdicts (same snapshot gen,
+        # within the suspect TTL) before reaping.
+        confirm = int(cfg["wake"].get("stale", {}).get("confirm_ticks", 2))
+        n = _stale_suspect_count(cfg, snap_gen) + 1
+        if n < confirm:
+            wake_state.update(cfg, stale_suspect={
+                "ts": db.utcnow_iso(), "gen": snap_gen, "count": n})
+            return (f"stale suspect: window dead ({n}/{confirm}) "
+                    "-> hold for confirmation")
+        wake_state.update(cfg, stale_suspect=None)
         from cortex import lie_down as lie_down_mod
         r = lie_down_mod.lie_down(cfg, force_slept="stale")
         sys.stderr.write(
@@ -87,6 +105,32 @@ def _snapshot_awake_current(cfg: dict, snap_gen: int | None) -> bool:
     except wake_state.StateValidationError:
         return False
     return gen == snap_gen
+
+
+def _stale_suspect_count(cfg: dict, snap_gen: int | None) -> int:
+    """Prior consecutive dead-verdict count from the persisted marker, or 0 if
+    absent/malformed/gen-mismatched/expired. A marker whose gen no longer
+    matches the current snapshot's gen is a stale carry-over from a superseded
+    epoch (user message / lie_down bumps gen) -> treated as absent (fresh
+    first strike), not accumulated."""
+    from datetime import datetime, timezone
+    marker = wake_state.load(cfg).get("stale_suspect")
+    if not isinstance(marker, dict):
+        return 0
+    if marker.get("gen") != snap_gen:
+        return 0
+    ts_raw = marker.get("ts")
+    try:
+        ts = datetime.fromisoformat(str(ts_raw).replace("Z", "+00:00"))
+        age_min = (datetime.now(timezone.utc) - ts).total_seconds() / 60.0
+    except (ValueError, TypeError):
+        return 0
+    if age_min > _SUSPECT_TTL_MIN:
+        return 0
+    try:
+        return int(marker.get("count", 0))
+    except (TypeError, ValueError):
+        return 0
 
 
 def _in_night_window(now, cfg: dict) -> bool:
