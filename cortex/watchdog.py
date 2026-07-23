@@ -308,34 +308,22 @@ def _build_tuck_in_line(cfg: dict, mins: float) -> tuple[str, str | None]:
     return line, pending
 
 
-def _advance_note_baseline(cfg: dict, pending_ts: str | None) -> None:
-    """Persist the diff-mode replay baseline (wake_state.last_note_ts) to
-    pending_ts, but ONLY after a free-round injection has actually committed +
-    been written (FIX 6). Monotonic: only moves forward. A failed inject never
-    reaches here, so the events it would have shown stay replayable next round.
-    Best-effort — never raises."""
-    if not pending_ts:
-        return
-    try:
-        cur = wake_state.get_last_note_ts(cfg)
-        if not cur or str(pending_ts) > str(cur):
-            wake_state.set_last_note_ts(cfg, str(pending_ts))
-    except Exception:
-        pass
-
-
-def _write_tuck_in_line(cfg: dict, line: str) -> None:
+def _write_tuck_in_line(cfg: dict, line: str) -> bool:
     """Append a prebuilt tuck-in line to wake_signal.log (the ear Monitor
-    delivers it as a session turn). Byte-identical output to the old path."""
+    delivers it as a session turn). Byte-identical output to the old path.
+    Returns True when the line was written (or was empty), False on OSError so
+    the atomic deliver+advance path can skip the baseline advance on a failed
+    ear write (no lost events)."""
     if not line:
-        return
+        return True
     try:
         p = config.wake_signal_log_path(cfg)
         p.parent.mkdir(parents=True, exist_ok=True)
         with open(p, "a") as f:
             f.write(line + "\n")
+        return True
     except OSError:
-        pass
+        return False
 
 
 def _deliver_ct_notes_to_ear(cfg: dict) -> None:
@@ -455,8 +443,12 @@ def silence_action(cfg: dict, silent_min: float, *, allow_tuck: bool = True) -> 
         if not committed:
             return None  # not awake / already stamped -> no double injection
         if allow_tuck:
-            _write_tuck_in_line(cfg, line)
-            _advance_note_baseline(cfg, pending_ts)  # FIX 6: only after commit+write
+            # Ear delivery + baseline advance in ONE locked section (same lock the
+            # replay hook reads under): the ear line and the advanced watermark
+            # become visible together, so the turn the ear triggers can't replay
+            # the just-delivered rows off a stale baseline.
+            wake_state.deliver_then_advance(
+                cfg, lambda: _write_tuck_in_line(cfg, line), pending_ts)
             _deliver_ct_notes_to_ear(cfg)  # F9: claim ct notes now the round surfaces
         return "wait-expiry free-round appended"
 
@@ -490,8 +482,10 @@ def silence_action(cfg: dict, silent_min: float, *, allow_tuck: bool = True) -> 
         if not committed:
             return None  # awake cleared / wait live / already stamped
         if allow_tuck:
-            _write_tuck_in_line(cfg, line)
-            _advance_note_baseline(cfg, pending_ts)  # FIX 6: only after commit+write
+            # Same atomic deliver+advance as the wait-expiry path (see above): the
+            # ear line and advanced watermark commit under one lock.
+            wake_state.deliver_then_advance(
+                cfg, lambda: _write_tuck_in_line(cfg, line), pending_ts)
             _deliver_ct_notes_to_ear(cfg)  # F9: claim ct notes now the round surfaces
         return "tuck-in appended"
     # Marker already sent; wait out the grace window (measured from the marker).

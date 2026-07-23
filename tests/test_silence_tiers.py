@@ -415,6 +415,72 @@ def test_stale_epoch_wait_expiry_does_not_advance_baseline(awake_no_sentinel, mo
     assert wake_state.get_last_note_ts(cfg) == before  # baseline NOT advanced
 
 
+def test_ear_delivery_and_baseline_advance_are_atomic_under_shared_lock(
+        awake_no_sentinel, monkeypatch):
+    """Dup-replay bug: the ear delivery and the last_note_ts advance must commit
+    together under the ONE advisory lock the marrow replay hook reads under
+    (lock_path / _flock, byte-coupled with cortex_bridge._wake_state_lock).
+
+    Old split code wrote the ear line with NO lock held, then took a SEPARATE
+    lock to advance the baseline. In that gap the ear line already triggered a
+    cortex turn whose replay hook read the STALE watermark and re-injected the
+    just-delivered rows.
+
+    This models the production split: at the instant the ear line is written, a
+    concurrent watermark reader (the hook) tries to grab the shared lock. If
+    delivery+advance are atomic the lock is HELD during the write, so a
+    non-blocking acquire from inside the ear write MUST fail — proving no reader
+    can observe the ear line while the baseline is still stale. Under the old
+    two-step code the probe would succeed (write happened lock-free)."""
+    import fcntl
+    import os
+
+    cfg = awake_no_sentinel
+    wake_state.update(cfg, user_replied_this_wake=True, wait_spent=True)
+    conn = db.connect(cfg)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "session_id TEXT, timestamp TEXT, role TEXT, content TEXT, channel TEXT)")
+    conn.execute(
+        "INSERT INTO events (session_id, timestamp, role, content, channel) "
+        "VALUES ('s', '2026-07-08T03:00:00+00:00', 'user', 'delivered row', 'wx')")
+    conn.commit()
+    conn.close()
+
+    lock_file = str(wake_state.lock_path(cfg))
+    probe = {"lock_held_during_ear_write": None}
+    real_write = watchdog._write_tuck_in_line
+
+    def _instrumented_write(cfg_, line):
+        # Emulate the replay hook racing in the moment the ear line lands: try to
+        # take the shared lock non-blockingly from a foreign fd. Success == the
+        # ear write ran with no lock held (the bug); failure == atomic (fixed).
+        fd = os.open(lock_file, os.O_CREAT | os.O_RDWR, 0o644)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                probe["lock_held_during_ear_write"] = False
+            except OSError:
+                probe["lock_held_during_ear_write"] = True
+        finally:
+            os.close(fd)
+        return real_write(cfg_, line)
+
+    monkeypatch.setattr(watchdog, "_write_tuck_in_line", _instrumented_write)
+
+    past = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat()
+    wake_state.set_wait_until(cfg, past)
+    assert watchdog.silence_action(cfg, silent_min=0.0) == \
+        "wait-expiry free-round appended"
+
+    # Ear line landed AND the shared lock was held while it was written.
+    assert "delivered row" in "\n".join(_signal_lines(cfg))
+    assert probe["lock_held_during_ear_write"] is True
+    # Baseline advanced in the same section -> no stale window for the reader.
+    assert wake_state.get_last_note_ts(cfg) == "2026-07-08T03:00:00+00:00"
+
+
 # --- F9: ct-note claim tied to a VISIBLE round (death replay) ----------------
 
 def _make_outbox(cfg, body="睡了吗", note_id=9):

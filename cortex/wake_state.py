@@ -524,6 +524,36 @@ def set_last_note_ts(cfg: dict, ts_iso: str) -> None:
     update(cfg, last_note_ts=ts_iso)
 
 
+def deliver_then_advance(cfg: dict, deliver, pending_ts: str | None) -> None:
+    """Atomic ear-delivery + baseline-advance under ONE advisory _flock section,
+    the same lock the marrow replay hook (cortex_bridge._wake_state_lock, byte-
+    coupled via lock_path) takes to read last_note_ts. Closes the dup-replay gap:
+    the old two-step (write ear line, THEN a separate set_last_note_ts lock) left
+    a window where the ear delivery already triggered a cortex turn whose replay
+    hook read the STALE watermark and re-injected the just-delivered rows.
+
+    Order inside the lock: run deliver() (the ear write) -> only if it returns a
+    truthy value and does not raise, monotonic-advance last_note_ts to
+    pending_ts. A failed/raising deliver never advances, so its events stay
+    replayable next round (FIX 6 preserved). While the lock is held no concurrent
+    watermark reader can observe the ear line without also seeing the advanced
+    baseline. Best-effort — never raises."""
+    with _flock(cfg):
+        try:
+            ok = deliver()
+        except Exception:
+            return  # ear write failed -> do NOT advance (no lost events)
+        if ok is False:
+            return  # deliver signalled failure -> keep events replayable
+        if not pending_ts:
+            return
+        d = load(cfg)
+        cur = d.get("last_note_ts")
+        if not cur or str(pending_ts) > str(cur):
+            d["last_note_ts"] = str(pending_ts)
+            _save(cfg, d)
+
+
 def wait_spent(cfg: dict) -> bool:
     """True when the current round has already consumed its one wait (a manual
     wait() or the auto observe gate stamped it). F5: a consecutive empty wait is
