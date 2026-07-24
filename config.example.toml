@@ -258,6 +258,11 @@ title = ""                   # first line of the wakeup note, e.g. a nickname fo
 replay_events = 6            # trailing user/assistant events in the replay section
 replay_event_chars = 300     # per-event truncation in the replay section
 replay_exclude_channels = ["ct"]  # channels excluded from replay (ct = cortex self-talk); [] to include all
+# Per-shell override of the line above: each shell excludes its OWN channel, so
+# no shell replays itself. Applied when the renderer is told which shell it
+# renders for (`python -m cortex.note_render --shell tg`); a shell id absent
+# here falls back to replay_exclude_channels.
+shell_replay_exclude = { cli = ["ct"], tg = ["tg"] }
 daily_budget = 1000000       # daily wake-token (NET spend) budget the "today X/Y" line renders against; must match gates.daily_budget.tokens
 pending_window_min = 15      # surface a self-schedule entry only when due within this window
 # One "<label> Today" line per shell, shared daily_budget denominator, same two

@@ -64,12 +64,37 @@ class _ClampDefaults(dict):
 # Replay so the wakeup note does not replay itself back into its own context.
 _DEFAULT_REPLAY_EXCLUDE_CHANNELS = ("ct",)
 
+# Every shell excludes its OWN channel, not just the cli shell's: the cli shell
+# talks on 'ct', the tg shell on 'tg'. replay_exclude_channels stays the
+# unqualified (cli) set; this maps a shell id -> the set that shell renders
+# with, applied only when the renderer was told which shell it renders for
+# (note_render --shell). Absent shell id -> the unqualified set.
+_DEFAULT_SHELL_REPLAY_EXCLUDE = {"cli": ["ct"], "tg": ["tg"]}
+
 
 def _replay_exclude_channels(cfg: dict) -> tuple[str, ...]:
     raw = _note_cfg(cfg).get("replay_exclude_channels")
     if raw is None:
         return _DEFAULT_REPLAY_EXCLUDE_CHANNELS
     return tuple(str(c) for c in raw if str(c).strip())
+
+
+def for_shell(cfg: dict, shell: str) -> dict:
+    """`cfg` with Replay excluding `shell`'s own channel
+    ([note].shell_replay_exclude). A shell with no mapping returns `cfg`
+    untouched, so an unspecified render is byte-identical to before. Never
+    mutates the caller's dict."""
+    mapping = _note_cfg(cfg).get("shell_replay_exclude")
+    if not isinstance(mapping, dict):
+        mapping = _DEFAULT_SHELL_REPLAY_EXCLUDE
+    channels = mapping.get(str(shell))
+    if channels is None:
+        return cfg
+    out = dict(cfg)
+    ncfg = dict(_note_cfg(cfg))
+    ncfg["replay_exclude_channels"] = [str(c) for c in channels]
+    out["note"] = ncfg
+    return out
 
 
 def _consume_kick_reasons(cfg: dict, ws: dict, settle: bool = True) -> list[str]:

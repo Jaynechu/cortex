@@ -26,9 +26,17 @@ def main() -> None:
                         help="skip ct-note peek — the marrow hook delivers ct "
                              "notes via outbox.deliver, so rendering them here "
                              "would double them in the same payload")
+    parser.add_argument("--shell", default=None,
+                        help="shell id this note is rendered for; its own "
+                             "channel drops out of Replay so the note does not "
+                             "replay the shell back at itself "
+                             "([note].shell_replay_exclude). Unset = the "
+                             "unqualified (cli) set")
     args = parser.parse_args()
 
     cfg = config.load()
+    if args.shell:
+        cfg = note.for_shell(cfg, args.shell)
     tz = ZoneInfo(cfg.get("core", {}).get("timezone", "Australia/Melbourne"))
     now = datetime.now(tz)
 

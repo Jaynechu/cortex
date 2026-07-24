@@ -759,6 +759,68 @@ def test_replay_exclude_channels_configurable(marrow_conn):
     assert [e["content"] for e in ev] == ["ct turn"]
 
 
+# --------------------------------------------------------------------------- #
+# per-shell replay exclude — every shell drops its OWN channel
+# --------------------------------------------------------------------------- #
+
+def _shell_events(conn):
+    make_events_table(conn)
+    conn.executemany(
+        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
+        [
+            ("s", "2026-07-08T03:00:00+00:00", "user", "tg user turn", "tg"),
+            ("s", "2026-07-08T03:01:00+00:00", "assistant", "tg shell自言自语", "tg"),
+            ("s", "2026-07-08T03:02:00+00:00", "assistant", "cli shell自言自语", "ct"),
+            ("s", "2026-07-08T03:03:00+00:00", "user", "wx user turn", "wx"),
+        ],
+    )
+    conn.commit()
+
+
+def test_for_shell_tg_excludes_tg_and_keeps_ct(marrow_conn, cfg):
+    """The tg shell renders through the same renderer — without this it reads
+    its own conversation replayed back at itself."""
+    _shell_events(marrow_conn)
+    ev = note._replay_events(marrow_conn, note.for_shell(cfg, "tg"), 6, 300)
+    assert [e["content"] for e in ev] == ["cli shell自言自语", "wx user turn"]
+
+
+def test_for_shell_cli_matches_the_unqualified_render(marrow_conn, cfg):
+    _shell_events(marrow_conn)
+    plain = note._replay_events(marrow_conn, cfg, 6, 300)
+    cli = note._replay_events(marrow_conn, note.for_shell(cfg, "cli"), 6, 300)
+    assert cli == plain
+    assert [e["content"] for e in plain] == ["tg user turn", "tg shell自言自语",
+                                             "wx user turn"]
+
+
+def test_for_shell_unknown_shell_returns_the_config_untouched(cfg):
+    assert note.for_shell(cfg, "wx") is cfg
+
+
+def test_for_shell_never_mutates_the_caller_config(cfg):
+    before = cfg["note"].get("replay_exclude_channels")
+    note.for_shell(cfg, "tg")
+    assert cfg["note"].get("replay_exclude_channels") == before
+
+
+def test_for_shell_map_is_config_driven(cfg, marrow_conn):
+    _shell_events(marrow_conn)
+    cfg["note"]["shell_replay_exclude"] = {"tg": ["tg", "wx"]}
+    ev = note._replay_events(marrow_conn, note.for_shell(cfg, "tg"), 6, 300)
+    assert [e["content"] for e in ev] == ["cli shell自言自语"]
+
+
+def test_latest_replay_ts_follows_the_shell_exclude(marrow_conn, cfg):
+    """The diff baseline must use the same exclude set as the replay it feeds,
+    else a shell's own turns keep advancing it."""
+    _shell_events(marrow_conn)
+    assert note._latest_replay_ts(marrow_conn, cfg) == "2026-07-08T03:03:00+00:00"
+    only_tg = dict(cfg, note={**cfg["note"], "shell_replay_exclude": {"tg": ["tg", "wx"]}})
+    assert note._latest_replay_ts(
+        marrow_conn, note.for_shell(only_tg, "tg")) == "2026-07-08T03:02:00+00:00"
+
+
 def test_window_tokens_absent_key_is_none(marrow_conn):
     marrow_conn.execute(
         "INSERT INTO ct_pacemaker_state (id, state, updated_at) VALUES (1, ?, ?)",
@@ -1408,3 +1470,53 @@ def test_note_render_main_prints_fresh_note_no_writes(tmp_path, monkeypatch, cap
     assert "SID feed1234" in out
     # no wake_state written, DB not mutated by a fresh render
     assert not (tmp_path / "ws.json").exists()
+
+
+def _render_cli(tmp_path, monkeypatch, capsys, argv):
+    """note_render.main() over a fixed DB, returning its stdout."""
+    from cortex import config as _config, db as _db, note_render
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    dbp = tmp_path / "marrow.db"
+    conn = _db.connect_path(dbp)
+    make_events_table(conn)
+    conn.executemany(
+        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
+        [
+            ("s", "2026-07-08T03:00:00+00:00", "assistant", "tg shell self talk", "tg"),
+            ("s", "2026-07-08T03:01:00+00:00", "assistant", "cli shell self talk", "ct"),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+    _cfg = _config.load(path=tmp_path / "absent.toml")
+    _cfg["paths"]["marrow_db"] = str(dbp)
+    _cfg["paths"]["wake_state_file"] = str(tmp_path / "ws.json")
+    monkeypatch.setattr(_config, "load", lambda path=None: _cfg)
+    monkeypatch.setattr(note, "_frontmost_app", lambda: None)
+    monkeypatch.setattr("sys.argv", ["note_render", *argv])
+
+    class _FrozenNow(datetime):          # a minute boundary must not flake this
+        @classmethod
+        def now(cls, tz=None):
+            return NOW.astimezone(tz) if tz else NOW
+
+    monkeypatch.setattr(note_render, "datetime", _FrozenNow)
+    note_render.main()
+    return capsys.readouterr().out
+
+
+def test_note_render_shell_tg_drops_the_tg_channel_from_replay(
+        tmp_path, monkeypatch, capsys):
+    out = _render_cli(tmp_path, monkeypatch, capsys, ["--shell", "tg"])
+    assert "tg shell self talk" not in out
+    assert "cli shell self talk" in out
+
+
+def test_note_render_default_and_cli_shell_render_identically(
+        tmp_path, monkeypatch, capsys):
+    """Unspecified = the cli shell's own render, byte-identical to before."""
+    plain = _render_cli(tmp_path / "a", monkeypatch, capsys, [])
+    cli = _render_cli(tmp_path / "b", monkeypatch, capsys, ["--shell", "cli"])
+    assert plain == cli
+    assert "tg shell self talk" in plain and "cli shell self talk" not in plain
