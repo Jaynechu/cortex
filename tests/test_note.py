@@ -371,21 +371,19 @@ def test_ct_note_claimed_by_hook_not_reclaimed_by_note(cfg, tmp_path):
     assert note.gather(conn, cfg, NOW, consume_kick=True)["ct_notes"] == []
 
 
-def test_render_turn_end_line_appears_every_render(cfg):
-    # Clamp numbers render from config (wait 1-20, next_wake 21-240, idle 20) — no hardcode.
+def test_render_turn_end_line_omitted_by_default(cfg):
+    # Default turn_end_text is "" (T2: the silence cycle carries this info now).
+    text = note.render(cfg, NOW, {})
+    assert "NOTE:" not in text
+
+
+def test_render_turn_end_line_appears_with_custom_template(cfg):
+    # Clamp numbers still render from config when a custom template is set.
+    cfg["note"]["turn_end_text"] = (
+        "NOTE: lie_down(next_wake_min=N) [{next_wake_min}-{next_wake_max}].")
     text = note.render(cfg, NOW, {})
     assert text.rstrip().endswith(
-        "NOTE: End activity with wait(N) or lie_down unless user is "
-        "actively sending msg. Auto "
-        "20 min idle without wait/lie_down. User's message resets all "
-        "timers. No consecutive waits. wait(N) [1-20]; "
-        "lie_down(next_wake_min=N) [21-240].")
-
-
-def test_render_turn_end_line_omitted_when_blank(cfg):
-    cfg["note"]["turn_end_text"] = ""
-    text = note.render(cfg, NOW, {})
-    assert "NOTE: Call MCP tool" not in text
+        "NOTE: lie_down(next_wake_min=N) [21-240].")
 
 
 def test_render_title_prepended_with_blank_line(cfg):

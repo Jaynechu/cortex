@@ -17,8 +17,8 @@ from pathlib import Path
 from cortex import config
 
 _AWAKE_KEYS = ("awake", "awake_since", "wake_log_id", "transcript",
-               "silence_wait_until", "wait_spent", "user_replied_this_wake",
-               "tuck_pending", "last_note_ts")
+               "user_replied_this_wake", "tuck_pending", "last_note_ts",
+               "kick_round")
 
 _LOCK_TIMEOUT_SEC = 5.0
 
@@ -343,7 +343,7 @@ def set_awake(cfg: dict, wake_log_id: int | None, transcript: str | None,
             d.update(awake=True, next_wake_at=None,
                      awake_since=datetime.now(timezone.utc).isoformat(),
                      wake_log_id=wake_log_id, transcript=transcript,
-                     wait_spent=False, user_replied_this_wake=False,
+                     user_replied_this_wake=False,
                      tuck_pending=None, last_note_ts=None)
             if session_id is not None:
                 d["session_id"] = session_id
@@ -445,72 +445,6 @@ def awake_since_min(cfg: dict) -> float | None:
     return (datetime.now(timezone.utc) - dt).total_seconds() / 60.0
 
 
-def commit_wait(cfg: dict, until_iso: str) -> dict:
-    """Accept one wait() as a single atomic strict-locked mutation: verify the
-    session is still awake and the wait quota is not already spent (F5: blocks a
-    CONSECUTIVE empty wait — any activity this round clears wait_spent first),
-    BUMP gen (an accepted wait re-arms the silence window, invalidating the prior
-    alarm token), set silence_wait_until, mark wait_spent, clear tuck_pending.
-    Returns {"ok": bool, ...}. Never raises: a lock/parse failure returns
-    ok=False, refused=True (fail closed — no half-applied wait)."""
-    try:
-        with _strict_flock(cfg):
-            d = _load_strict(cfg)
-            _ensure_epoch(d)
-            if not d.get("awake"):
-                wake_audit(cfg, "wait_refused", "not awake", f"gen={d.get('gen')}")
-                return {"ok": False, "refused": True, "reason": "not awake"}
-            if d.get("wait_spent"):
-                wake_audit(cfg, "wait_refused", "consecutive",
-                           f"gen={d.get('gen')} awake={d.get('awake')}")
-                return {"ok": False, "refused": True, "reason": "consecutive"}
-            old_gen = int(d["gen"])
-            d["gen"] = old_gen + 1
-            new_gen = d["gen"]
-            d["silence_wait_until"] = until_iso
-            d["wait_spent"] = True
-            d.pop("tuck_pending", None)
-            _save(cfg, d)
-    except StateValidationError:
-        return {"ok": False, "refused": True, "reason": "state locked"}
-    # Audit OUTSIDE the strict lock (parity with claim_lie_down): an accepted
-    # wait bumps gen — a new cancellation epoch that must be visible in the
-    # trail (a silent bump hid the wait during incident forensics).
-    wake_audit(cfg, "commit_wait", f"gen {old_gen}->{new_gen}",
-               f"until={until_iso}")
-    return {"ok": True}
-
-
-def set_wait_until(cfg: dict, until_iso: str) -> None:
-    """Declare a one-shot silence window: the watchdog holds off its routine
-    timeout lie-down until this UTC instant (the model is e.g. waiting for the
-    user to come back). Cleared once the watchdog acts on it (take_wait_until)."""
-    update(cfg, silence_wait_until=until_iso)
-
-
-def get_wait_until(cfg: dict) -> datetime | None:
-    """Peek the declared silence deadline (UTC-aware) or None — the watchdog
-    reads this every poll: still-future = keep holding; past/absent = the
-    routine silent_max_min threshold applies. Non-destructive; the watchdog
-    calls clear_wait_until() once it acts, so the extension fires only once."""
-    raw = load(cfg).get("silence_wait_until")
-    if raw is None:
-        return None
-    try:
-        dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
-
-
-def clear_wait_until(cfg: dict) -> None:
-    """Reset the silence window to default (no permanent extension)."""
-    with _flock(cfg):
-        d = load(cfg)
-        if d.pop("silence_wait_until", None) is not None:
-            _save(cfg, d)
-
-
 def get_last_note_ts(cfg: dict) -> str | None:
     """ISO timestamp baseline for the diff-mode Replay section: the newest
     replayed event's ts as of the last rendered note (wake's initial note or
@@ -554,22 +488,54 @@ def deliver_then_advance(cfg: dict, deliver, pending_ts: str | None) -> None:
             _save(cfg, d)
 
 
-def wait_spent(cfg: dict) -> bool:
-    """True when the current round has already consumed its one wait (a manual
-    wait() or the auto observe gate stamped it). F5: a consecutive empty wait is
-    refused while this is True; any activity (tool call / user msg / kick) calls
-    restore_wait_quota to clear it. Absent -> False."""
-    return bool(load(cfg).get("wait_spent"))
+def mark_kick_round(cfg: dict) -> bool:
+    """External-wake carrier primitive (kick.py replacement for the retired
+    wait-expiry ride): stamp kick_round=True under the strict lock so the next
+    silence_action poll (watchdog / tick awake gate) treats the silence timer as
+    immediately elapsed and injects a free-round note NOW, regardless of
+    silent_min. Only stamps while awake with no kick_round already pending
+    (idempotent — a second kick before the first is consumed is a no-op).
+    Returns True on a fresh stamp, False otherwise (not awake / already
+    pending / lock failure)."""
+    try:
+        with _strict_flock(cfg):
+            d = _load_strict(cfg)
+            _ensure_epoch(d)
+            if not d.get("awake"):
+                return False
+            if d.get("kick_round"):
+                return False
+            d["kick_round"] = True
+            _save(cfg, d)
+            return True
+    except StateValidationError:
+        return False
 
 
-def restore_wait_quota(cfg: dict) -> None:
-    """F5 quota restore: clear wait_spent so the next wait() is allowed. Called
-    on any non-wait activity round (marrow pretool hook) or external trigger
-    (user reset / kick). Best-effort via the advisory lock; only writes on a
-    real change."""
+def take_kick_round(cfg: dict) -> bool:
+    """Consume the kick_round marker (read-and-clear, advisory lock). True if it
+    was pending. silence_action calls this once it has decided to act on it, so
+    the carrier fires exactly once per kick."""
     with _flock(cfg):
         d = load(cfg)
-        if d.pop("wait_spent", None):
+        val = bool(d.pop("kick_round", None))
+        if val:
+            _save(cfg, d)
+        return val
+
+
+def peek_kick_round(cfg: dict) -> bool:
+    """Non-destructive read of the kick_round marker."""
+    return bool(load(cfg).get("kick_round"))
+
+
+def clear_kick_round(cfg: dict) -> None:
+    """Drop the kick_round marker without consuming it as a fire (e.g. an
+    interrupt kick replacing a still-pending carrier). Best-effort no-op when
+    unset."""
+    with _flock(cfg):
+        d = load(cfg)
+        if d.pop("kick_round", None) is not None:
             _save(cfg, d)
 
 

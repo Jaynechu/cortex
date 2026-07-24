@@ -230,12 +230,12 @@ def test_bug_b_tuck_in_suppressed_after_claim(cfg, monkeypatch):
 
 
 def test_silence_action_tuck_in_happy_path(cfg):
-    """No interleaving: chat tier past silent_max stamps tuck_pending and appends
-    exactly one tuck-in line (regression that the fix keeps the normal path)."""
+    """No interleaving: past silent_max stamps tuck_pending and appends exactly
+    one free-round line (regression that the fix keeps the normal path)."""
     _seed_awake(cfg)
     wake_state.update(cfg, user_replied_this_wake=True)
     action = watchdog.silence_action(cfg, 999.0)
-    assert action == "tuck-in appended"
+    assert action == "free-round appended"
     st = wake_state.load(cfg)
     assert st.get("tuck_pending") is not None
     sig = config.wake_signal_log_path(cfg)

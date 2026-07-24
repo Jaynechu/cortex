@@ -217,24 +217,17 @@ def _handoff_written(handoff, before_mtime: float | None) -> bool:
         return False
 
 
-def _wait_until_live(cfg: dict) -> bool:
-    """True if a one-shot silence window (cortex.wait) is still in the future.
-    A live wait_until holds off every silence action (tuck-in / auto sleep)."""
-    wu = wake_state.get_wait_until(cfg)
-    return wu is not None and datetime.now(timezone.utc) < wu
-
-
 def _free_round_note(cfg: dict) -> tuple[str, str | None]:
-    """Freshly rendered wakeup note for a free-round tuck-in (silence-gate OR
-    wait-expiry — every free-round injection carries one, D6). Returns
+    """Freshly rendered wakeup note for a free-round injection (silence-cycle OR
+    kick carrier — every free-round injection carries one). Returns
     (text, pending_baseline_ts): text is "" when the toggle is off / render
     fails; pending_baseline_ts is the newest eligible replay ts that the caller
-    must persist as the new diff baseline ONLY AFTER the tuck-in write + epoch
+    must persist as the new diff baseline ONLY AFTER the line write + epoch
     commit succeed (FIX 6 — advancing it during render lost replay events forever
     when a stale-epoch / failed write dropped the injection). Diff mode: gather
     replays only events newer than the wake's last rendered note. Never raises —
-    the tuck-in must land regardless."""
-    if not cfg["wake"].get("wait_expiry_note", True):
+    the injection must land regardless."""
+    if not cfg["wake"].get("free_round_note", True):
         return "", None
     try:
         from datetime import datetime
@@ -291,9 +284,9 @@ def _build_tuck_in_line(cfg: dict, mins: float) -> tuple[str, str | None]:
     """Render the free-round line OUTSIDE any lock (BUG B: the slow note render +
     template fill must not run inside the strict section). {mins} = real minutes
     since the user's last message, {user} = marrow user_name. Every free-round
-    injection (silence-gate AND wait-expiry, D6) prepends a freshly rendered
-    (diff-mode) wakeup note ABOVE the 3-choice marker line — intel before choice
-    (acceptance), and the marker lands LAST so it is the final decision cue.
+    injection (silence-cycle AND kick carrier) prepends a freshly rendered
+    (diff-mode) wakeup note ABOVE the marker line — intel before the marker
+    (acceptance), and the marker lands LAST so it is the final cue.
     Returns (line, pending_baseline_ts): the caller advances the diff baseline to
     pending_baseline_ts ONLY AFTER the line is committed + written (FIX 6). ("",
     None) when disabled."""
@@ -345,112 +338,62 @@ def _deliver_ct_notes_to_ear(cfg: dict) -> None:
         pass
 
 
-def _wait_expired(cfg: dict) -> bool:
-    """True when a wait(N) window was declared and its deadline is now in the PAST
-    (exists but no longer live). Distinct from _wait_until_live: a future deadline
-    holds silence; a past one triggers the free-round injection."""
-    wu = wake_state.get_wait_until(cfg)
-    return wu is not None and datetime.now(timezone.utc) >= wu
-
-
-def _clear_wait_and_stamp():
-    """Mutator (run under conditional_mutate): on a wait-expiry, atomically drop
-    silence_wait_until AND stamp tuck_pending so the 5-min grace auto-lie arms.
-    Stamps only when still awake + no tuck_pending yet. Returns True on a fresh
-    stamp (caller appends the free-round line), False otherwise. The epoch check
-    is conditional_mutate's token guard — a user message between expiry and poll
-    (stale token) drops this whole branch (wait already cleared by the reset)."""
+def _stamp_free_round():
+    """Mutator (run under conditional_mutate): stamp tuck_pending = now as the
+    "last free-round injection" marker, unconditionally (used by both the
+    silence-cycle and the kick-carrier fires — each successful injection re-arms
+    from this instant, closed loop). Awake-only; a session that already slept
+    under us must not be stamped. Returns True on stamp."""
     def _m(d: dict) -> bool:
         if not d.get("awake"):
             return False
-        d.pop("silence_wait_until", None)  # clear regardless (fires once)
-        if d.get("tuck_pending") is not None:
-            return False
         d["tuck_pending"] = datetime.now(timezone.utc).isoformat()
-        return True
-    return _m
-
-
-def _stamp_tuck_pending():
-    """Mutator (run under conditional_mutate): stamp tuck_pending ONLY if the
-    session is still awake, has no live wait window, and no tuck_pending yet.
-    Returns True when it stamped (caller then appends the line), False otherwise
-    (nothing appended). The epoch check is done by conditional_mutate's token
-    guard; these are the in-lock content invariants.
-
-    Auto observe consumes the round's wait quota (F5): stamping the tuck-in also
-    sets wait_spent, so a later manual wait() this round is refused (menu only)
-    until some activity restores the quota. Idempotent — already-set stays set."""
-    def _m(d: dict) -> bool:
-        if not d.get("awake"):
-            return False
-        if d.get("tuck_pending") is not None:
-            return False
-        raw = d.get("silence_wait_until")
-        if raw is not None:
-            try:
-                dt = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-                if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
-                if dt > datetime.now(timezone.utc):
-                    return False  # live wait -> hold, no tuck-in
-            except ValueError:
-                pass
-        d["tuck_pending"] = datetime.now(timezone.utc).isoformat()
-        d["wait_spent"] = True  # auto observe consumes the round's wait quota
         return True
     return _m
 
 
 def silence_action(cfg: dict, silent_min: float, *, allow_tuck: bool = True) -> str | None:
-    """One idle rule regardless of user presence, shared by the watchdog and the
-    tick awake gate: at silent_max_min, with no live wait_until, append the
-    TUCK-IN marker once (tuck_pending stamped so it isn't re-appended); after
-    tuck_grace_min more with no wait/lie_down -> proxy lie_down(auto). When the
-    user never spoke this wake, `silent_min` (derived from a user-message ts
-    that doesn't exist) is timed from awake_since instead, so the gate still
-    elapses. A live wait_until holds everything. Returns an action label for
-    logging, or None (keep waiting / handled without sleeping)."""
-    from cortex import lie_down as lie_down_mod
-
+    """Perpetual free-round cycle, shared by the watchdog and the tick awake
+    gate: every silent_max_min of user silence, inject one free-round note +
+    marker line and re-arm the SAME timer from that instant — repeat forever,
+    no forced sleep, no menu. tuck_pending doubles as the "last injection at"
+    marker (renamed at the API surface only; the persisted field stays
+    tuck_pending, T5 territory). When the user never spoke this wake,
+    `silent_min` is timed from awake_since instead so the gate still elapses.
+    An external kick carrier (kick.py mark_kick_round) short-circuits the
+    silent_min gate and fires the injection immediately, then re-arms the same
+    cycle. Returns an action label for logging, or None (keep waiting)."""
     wcfg = cfg["wake"].get("watchdog", {})
     # Capture the epoch at the START of the silence decision (BUG B): if a
-    # lie_down / user reset bumps gen between here and the tuck-in commit, the
-    # commit is dropped so no tuck-in is appended after the session already slept.
+    # lie_down / user reset bumps gen between here and the commit, the commit is
+    # dropped so no line is appended after the session already slept.
     try:
         gen0, sid0 = wake_state.current_epoch(cfg)
         token0 = (gen0, sid0)
     except wake_state.StateValidationError:
         return None
-    if _wait_until_live(cfg):
-        return None
 
-    # Wait-expiry free-round (D1): a wait(N) window that has now elapsed injects
-    # the free-round line IMMEDIATELY, bypassing the silent_min gate. Epoch-guarded
-    # (BUG A): a user message between expiry and this poll bumps gen -> the token
-    # is stale -> conditional_mutate raises and nothing is injected (the reset
-    # already cleared the wait). On a fresh epoch: clear the wait + stamp
-    # tuck_pending (grace arms) + append the free-round line.
-    if _wait_expired(cfg):
+    # Kick carrier (replaces the retired wait-expiry ride): an external kick
+    # stamped kick_round=True to force this round's injection NOW, regardless of
+    # silent_min. Consume it (read-and-clear) before deciding anything else so a
+    # kick always gets exactly one carrier fire.
+    if wake_state.peek_kick_round(cfg):
         line, pending_ts = ("", None)
         if allow_tuck:
             line, pending_ts = _build_tuck_in_line(cfg, silent_min)
         try:
             committed = wake_state.conditional_mutate(
-                cfg, token0, _clear_wait_and_stamp())
+                cfg, token0, _stamp_free_round())
         except wake_state.StateValidationError:
             return None  # stale epoch (user returned) / lock lost -> inject nothing
         if not committed:
-            return None  # not awake / already stamped -> no double injection
+            return None  # not awake -> no injection
+        wake_state.take_kick_round(cfg)  # consume: exactly one carrier fire
         if allow_tuck:
-            # Ear delivery + baseline advance in ONE locked section (same lock the
-            # replay hook reads under): the ear line and the advanced watermark
-            # become visible together, so the turn the ear triggers can't replay
-            # the just-delivered rows off a stale baseline.
             wake_state.deliver_then_advance(
                 cfg, lambda: _write_tuck_in_line(cfg, line), pending_ts)
             _deliver_ct_notes_to_ear(cfg)  # F9: claim ct notes now the round surfaces
-        return "wait-expiry free-round appended"
+        return "kick free-round appended"
 
     if not wake_state.user_replied_this_wake(cfg):
         # No user message this wake -> silent_min (derived from a user-message ts)
@@ -461,46 +404,43 @@ def silence_action(cfg: dict, silent_min: float, *, allow_tuck: bool = True) -> 
             silent_min = elapsed
 
     silent_max = float(wcfg.get("silent_max_min", 20))
-    grace = float(wcfg.get("tuck_grace_min", 5))
     if silent_min < silent_max:
         return None
     st = wake_state.load(cfg)
-    tuck_at = st.get("tuck_pending")
-    if tuck_at is None:
-        # Build the (slow) tuck-in text OUTSIDE the lock, then commit atomically:
-        # re-check awake + epoch + no-live-wait + tuck_pending-still-absent under
-        # the strict lock and stamp tuck_pending in the same section (fixes the
-        # TOCTOU at the old :214-219). Only a committed stamp appends the line.
-        line, pending_ts = ("", None)
-        if allow_tuck:
-            line, pending_ts = _build_tuck_in_line(cfg, silent_min)
+    last_at = st.get("tuck_pending")
+    if last_at is not None:
+        # Already injected once this wake -> only re-fire once ANOTHER full
+        # silent_max_min has elapsed since that injection (perpetual cycle, not
+        # a re-fire on every poll past the threshold).
         try:
-            committed = wake_state.conditional_mutate(
-                cfg, token0, _stamp_tuck_pending())
-        except wake_state.StateValidationError:
-            return None  # slept / re-armed under us -> no tuck-in
-        if not committed:
-            return None  # awake cleared / wait live / already stamped
-        if allow_tuck:
-            # Same atomic deliver+advance as the wait-expiry path (see above): the
-            # ear line and advanced watermark commit under one lock.
-            wake_state.deliver_then_advance(
-                cfg, lambda: _write_tuck_in_line(cfg, line), pending_ts)
-            _deliver_ct_notes_to_ear(cfg)  # F9: claim ct notes now the round surfaces
-        return "tuck-in appended"
-    # Marker already sent; wait out the grace window (measured from the marker).
+            marked = datetime.fromisoformat(str(last_at).replace("Z", "+00:00"))
+            if marked.tzinfo is None:
+                marked = marked.replace(tzinfo=timezone.utc)
+            since_last = (datetime.now(timezone.utc) - marked).total_seconds() / 60.0
+        except ValueError:
+            since_last = silent_max  # unparseable marker -> treat as due
+        if since_last < silent_max:
+            return None
+
+    # Build the (slow) tuck-in text OUTSIDE the lock, then commit atomically:
+    # re-check awake + epoch under the strict lock and stamp the injection
+    # marker in the same section (TOCTOU-safe). Only a committed stamp appends
+    # the line.
+    line, pending_ts = ("", None)
+    if allow_tuck:
+        line, pending_ts = _build_tuck_in_line(cfg, silent_min)
     try:
-        marked = datetime.fromisoformat(str(tuck_at).replace("Z", "+00:00"))
-        if marked.tzinfo is None:
-            marked = marked.replace(tzinfo=timezone.utc)
-    except ValueError:
-        marked = None
-    grace_over = marked is None or (
-        datetime.now(timezone.utc) - marked).total_seconds() / 60.0 >= grace
-    if grace_over:
-        lie_down_mod.lie_down(cfg, force_slept="auto")
-        return "tuck grace elapsed -> auto sleep"
-    return None
+        committed = wake_state.conditional_mutate(
+            cfg, token0, _stamp_free_round())
+    except wake_state.StateValidationError:
+        return None  # slept / re-armed under us -> no injection
+    if not committed:
+        return None  # awake cleared under us -> no injection
+    if allow_tuck:
+        wake_state.deliver_then_advance(
+            cfg, lambda: _write_tuck_in_line(cfg, line), pending_ts)
+        _deliver_ct_notes_to_ear(cfg)  # F9: claim ct notes now the round surfaces
+    return "free-round appended"
 
 
 def _log(msg: str) -> None:

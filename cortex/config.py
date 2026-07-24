@@ -82,37 +82,31 @@ _DEFAULTS: dict[str, Any] = {
         "receipt_ttl_min": 15,
         "rearm_suffix": " (ear died — rearm)",
         "say_sound": "Glass",
-        # wait() clamp bounds (minutes). Own bounds, decoupled from the floor
-        # draw window (triggers.floor_*): a short one-shot hold on the hot cache.
-        "wait_min": 1,
-        "wait_max": 20,
-        # wait() success ack (C: model misreads the instant return as "the wait
-        # has already elapsed" — this one-liner reframes it as "alarm armed").
-        # {until_local} = wait() deadline rendered HH:MM in core.timezone.
-        "wait_ack_template": "Alarm set {until_local}",
         # lie_down(next_wake_min=N) clamp (minutes): [next_wake_min, next_wake_max].
         "next_wake_min": 21,
         "next_wake_max": 240,
         # Exact-time wake: arm cortex.sentinel (one-shot detached sleep-then-tick)
         # at every lie_down. false = tick-only (launchd 5-min fallback).
         "sentinel": True,
-        # Marker line written to wake_signal.log when the observe window (auto
-        # silence gate or a declared wait) expires. MARKER ONLY — the 3-choice
-        # menu body (C2) is NOT written here: it would render on screen in the
-        # ear Monitor event. Instead marrow's UserPromptSubmit hook injects the
-        # menu invisibly via additionalContext ([cortex].tuck_in_menu_text on the
-        # marrow side) when it sees this marker turn. "⏳ [NEW ROUND]" is the
-        # machine-line marker (tuck_in_marker family) so the line never resets the
-        # silence timer. {mins}/{user} kept as optional placeholders.
-        "tuck_in_text": "⏳ [NEW ROUND]",
+        # Line written to wake_signal.log at every free-round injection (silence
+        # cycle or kick carrier): the free-round note above it, this line last as
+        # the final cue. MUST contain the tuck_in_marker family string
+        # ("[NEW ROUND]") — that machine-line detection is what keeps the line
+        # from resetting the silence timer; without it every injection would
+        # re-arm its own cycle (perpetual loop trap). {mins}/{user} optional
+        # placeholders; {user} = marrow user_name.
+        "tuck_in_text": "⏳ [NEW ROUND] Time for a new turn — try something else "
+                         "you fancy, go talk to {user} if you miss her, or "
+                         "lie_down for a rest.",
         # Markers that identify a NON-user turn (wake bell / free-round / night /
         # fuse / ctl / slash-command line), so they never reset the silence timer
         # and downstream memory drops them. The bell prefix (lineage_marker) is
         # added automatically. Substring match, so "[CMD" catches every ⚙️ [CMD ct-*].
         "machine_line_markers": list(DEFAULT_MACHINE_LINE_MARKERS),
-        # When a declared wait(N) expires, append a freshly rendered wakeup note
-        # to the free-round marker (note content only, no behavioural nudge).
-        "wait_expiry_note": True,
+        # Every free-round injection (silence cycle or kick carrier) appends a
+        # freshly rendered wakeup note above the marker line (note content only,
+        # no behavioural nudge).
+        "free_round_note": True,
         # Covert-delivery markers written to wake_signal.log (bell via the ear
         # Monitor; typed only if the ear is dead). Only the marker line reaches
         # the window; the full instruction body is injected invisibly by the
@@ -256,16 +250,9 @@ _DEFAULTS: dict[str, Any] = {
         # marrow outbox row at note time. "" omits receipts entirely.
         "receipt_line": 'Note #{id} ({channel} {sent_hm}): she replied {replied_hm} "{text}"',
         # One-line turn-end reminder appended at the very end of every rendered
-        # note. "" omits it. {wait_min}/{wait_max}/{next_wake_min}/{next_wake_max}/
-        # {silent_max_min} render from the wake clamps at note time (never
-        # hardcoded).
-        "turn_end_text":
-            "NOTE: End activity with wait(N) or lie_down unless user is "
-            "actively sending msg. Auto {silent_max_min} min idle without "
-            "wait/lie_down. User's message resets all timers. "
-            "No consecutive waits. "
-            "wait(N) [{wait_min}-{wait_max}]; "
-            "lie_down(next_wake_min=N) [{next_wake_min}-{next_wake_max}].",
+        # note. "" omits it (default: the silence cycle + free-round injection
+        # already carries this information, no reminder needed).
+        "turn_end_text": "",
         # Header written into a freshly-created wishlist.md (append-only file,
         # never overwritten). Display text — customise freely.
         "wishlist_header":
@@ -295,8 +282,6 @@ def wake_clamps(cfg: dict) -> dict[str, int]:
     n = cfg.get("night", {})
     wd = w.get("watchdog", {})
     return {
-        "wait_min": int(w.get("wait_min", 1)),
-        "wait_max": int(w.get("wait_max", 20)),
         "next_wake_min": int(w.get("next_wake_min", 21)),
         "next_wake_max": int(w.get("next_wake_max", 240)),
         "night_min": int(n.get("floor_min", 120)),

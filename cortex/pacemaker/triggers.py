@@ -95,16 +95,6 @@ def evaluate(
     return _floor_trigger(next_floor_due_at, now)
 
 
-def clamp_window_minutes(minutes: float, config: dict) -> float:
-    """Clamp a wait(N) choice to [wake.wait_min, wake.wait_max] — the min guards
-    against thrash, the max protects the hot cache TTL. Own bounds, decoupled
-    from the floor draw window (triggers.floor_*)."""
-    wcfg = config.get("wake", {})
-    lo = wcfg.get("wait_min", 1)
-    hi = wcfg.get("wait_max", 20)
-    return max(lo, min(hi, minutes))
-
-
 def clamp_next_wake_minutes(minutes: float, config: dict, rotate: bool = False,
                             night: bool = False, human_override: bool = False) -> float:
     """Clamp a lie_down(next_wake_min=N) choice. Day = [wake.next_wake_min,

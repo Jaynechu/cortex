@@ -9,8 +9,10 @@ sleeping case: under the wake_state flock + cancellation epoch it
 
   1. appends a rendered reason flag (config [kick].reason_*, cleared by note.py
      on delivery), then
-  2. if cortex is ALREADY AWAKE -> stop. The reason lands via the next watchdog
-     free-round note; no wake machinery is touched.
+  2. if cortex is ALREADY AWAKE -> marks the silence cycle's timer as
+     immediately elapsed (wake_state.mark_kick_round) and spawns one detached
+     tick so the watchdog/tick's silence_action fires the carrier free-round
+     now, delivering the reason inline.
   3. if cortex is ASLEEP -> bump gen (cancel any in-flight alarm), clear the
      floor ledger hold (next_floor_due_at=None => DUE) + the durable next-wake
      ledger (next_wake_at), kill the recorded sentinel, then spawn ONE detached
@@ -27,8 +29,6 @@ import os
 import signal
 import subprocess
 import sys
-from datetime import datetime, timedelta, timezone
-
 from cortex import config, wake_state
 
 
@@ -90,22 +90,6 @@ def _clear_floor_deadline(cfg: dict) -> None:
         conn.close()
 
 
-def _append_wake_signal(cfg: dict, line: str) -> bool:
-    """Append a kick reason to wake_signal.log so the ear Monitor surfaces it as
-    a session turn on an already-awake cortex (mirror of watchdog's tuck-in
-    write). Best-effort: any I/O failure is swallowed. Returns True on write."""
-    if not line:
-        return False
-    try:
-        p = config.wake_signal_log_path(cfg)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        with open(p, "a") as f:
-            f.write(line + "\n")
-        return True
-    except (OSError, KeyError, TypeError):
-        return False
-
-
 def _sigterm(pid) -> None:
     try:
         p = int(pid)
@@ -135,54 +119,39 @@ def _spawn_tick(cfg: dict) -> None:
         pass
 
 
-def _live_wait(cfg: dict) -> bool:
-    """True when a declared silence window (cortex.wait) is still in the future —
-    an ear is armed and the wait-expiry free-round will surface the kick. Absent /
-    past = no live wait: the awake window may have no ear, so the kick must open
-    its own carrier round (F3)."""
-    wu = wake_state.get_wait_until(cfg)
-    return wu is not None and datetime.now(timezone.utc) < wu
-
-
 def kick(cfg: dict, kind: str, **fields) -> dict:
     """Run one kick. `kind` (reply/timeout/morning/note) selects a config reason
     template; `fields` (id, text, minutes, ...) fill it. Returns a small result
     dict.
 
-    'note' (F9): a ct-targeted outbox note was just dropped — same treatment as a
-    non-interrupt kick (queue the reason, F3 carrier round while awake, wake while
-    asleep). The note body itself is claimed + rendered by note.py on the visible
-    round; this kick only opens that round.
+    'note' (F9): a ct-targeted outbox note was just dropped — same treatment as
+    any other kick (queue the reason, carrier round while awake, wake while
+    asleep). The note body itself is claimed + rendered by note.py on the
+    visible round; this kick only opens that round.
 
     Asleep -> reason flag + wake machinery (tick).
-    Awake + interrupt (reply/timeout) + LIVE wait -> P12 C2 path: clear the wait
-      in the SAME lock and push the reason down the ear (wake_signal.log).
-    Awake + NO live wait (ANY kind) -> F3 carrier: queue the reason AND stamp an
-      already-expired wait in the SAME lock, then spawn one tick so the tested
-      wait-expiry free-round fires now and renders/consumes the reason inline —
-      giving the kick a carrier round even when no ear is listening.
+    Awake (ANY kind) -> queue the reason AND mark the silence cycle's timer as
+      immediately elapsed (wake_state.mark_kick_round) in the SAME lock, then
+      spawn one tick so the watchdog/tick's silence_action fires the carrier
+      free-round now and renders/consumes the reason inline — no ear-ride
+      distinction needed (interrupt vs plain), every awake kick opens a round
+      the same way. A kick landing while an earlier carrier is still pending is
+      a no-op on the marker (idempotent) but still queues its own reason, so the
+      next round surfaces both (interrupt semantics preserved: it never waits
+      behind a live hold).
     Best-effort throughout: a lock/state failure drops the kick silently."""
     detail = " ".join(f"{k}={v}" for k, v in fields.items() if v is not None)
     reason = _reason_text(cfg, kind, **fields)
     morning = kind == "morning"
-    interrupt = kind in ("reply", "timeout")
-    live_wait = _live_wait(cfg)
     sentinel_pid = None
     was_awake = False
     flag_cleared = False
-    wait_cleared = False
-    open_round = False
+    round_marked = False
     try:
         def _mutate(d):
-            nonlocal sentinel_pid, was_awake, flag_cleared
-            nonlocal wait_cleared, open_round
+            nonlocal sentinel_pid, was_awake, flag_cleared, round_marked
             was_awake = bool(d.get("awake"))
-            # Awake + interrupt + live wait: reason rides the ear (out-of-lock),
-            # NOT kick_reasons — else the next note render duplicates it. Every
-            # other case queues the reason (wake note / free-round renders it).
-            ear_ride = was_awake and interrupt and live_wait
-            if not ear_ride:
-                _append_reason(cfg, d, reason)
+            _append_reason(cfg, d, reason)
             # Morning kick clears the night flag under the SAME lock — awake or
             # asleep. Mid-night kicks (reply/timeout) never touch the flag. Also
             # clear the night_kick marker so the next night re-arms its bell.
@@ -191,20 +160,12 @@ def kick(cfg: dict, kind: str, **fields) -> dict:
                 if d.pop("mode", None) is not None:
                     flag_cleared = True
             if was_awake:
-                # F5: a kick is an external trigger -> restore the round's wait
-                # quota so the carrier/interrupt round may wait again if it ends
-                # empty (in the same lock as the reason append).
-                d.pop("wait_spent", None)
-                if ear_ride and d.pop("silence_wait_until", None) is not None:
-                    wait_cleared = True
-                elif not live_wait:
-                    # F3: no live wait -> stamp an expired wait (atomic with the
-                    # reason append) so the tick's wait-expiry free-round opens a
-                    # carrier round for the queued reason.
-                    d["silence_wait_until"] = (
-                        datetime.now(timezone.utc) - timedelta(seconds=1)
-                    ).isoformat()
-                    open_round = True
+                # Mark the silence cycle as immediately due (idempotent — a
+                # second kick before the first carrier fires still queues its
+                # own reason but does not re-stamp an already-pending marker).
+                if not d.get("kick_round"):
+                    d["kick_round"] = True
+                    round_marked = True
                 return
             # Asleep: cancel any in-flight alarm epoch, drop the durable ledger,
             # release the recorded sentinel. Floor hold is cleared out-of-lock.
@@ -219,14 +180,10 @@ def kick(cfg: dict, kind: str, **fields) -> dict:
     wake_state.wake_audit(cfg, "kick", kind,
                           f"{detail} flag_cleared={flag_cleared}".strip())
     if was_awake:
-        signalled = False
-        if interrupt and live_wait:  # C2: reason rides the armed ear
-            signalled = _append_wake_signal(cfg, reason)
-        if open_round:
-            _spawn_tick(cfg)  # tick -> wait-expiry free-round = carrier round
+        if round_marked:
+            _spawn_tick(cfg)  # tick -> silence_action carrier free-round
         return {"ok": True, "kind": kind, "awake": True, "ticked": False,
-                "flag_cleared": flag_cleared, "wait_cleared": wait_cleared,
-                "signalled": signalled, "round_opened": open_round}
+                "flag_cleared": flag_cleared, "round_opened": round_marked}
 
     _sigterm(sentinel_pid)
     _clear_floor_deadline(cfg)

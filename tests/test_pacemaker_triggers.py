@@ -2,7 +2,7 @@ import random
 from datetime import datetime, timedelta, timezone
 
 from cortex.pacemaker.triggers import (
-    clamp_next_wake_minutes, clamp_window_minutes, evaluate, reschedule_floor)
+    clamp_next_wake_minutes, evaluate, reschedule_floor)
 
 TZ = timezone(timedelta(hours=10))
 NOW = datetime(2026, 7, 3, 12, 0, tzinfo=TZ)
@@ -15,8 +15,6 @@ def base_config():
             "floor_max_min": 55,
         },
         "wake": {
-            "wait_min": 1,
-            "wait_max": 20,
             "next_wake_min": 21,
             "next_wake_max": 240,
         },
@@ -128,15 +126,6 @@ def test_reschedule_floor_explicit_minutes_no_reclamp():
     assert next_due == NOW + timedelta(minutes=999)
     next_due = reschedule_floor(NOW, config, random.Random(1), minutes=1)
     assert next_due == NOW + timedelta(minutes=1)
-
-
-def test_clamp_window_minutes_uses_wait_bounds():
-    # wait(N) clamp now reads [wake.wait_min, wake.wait_max], decoupled from
-    # the floor draw window.
-    config = base_config()
-    assert clamp_window_minutes(10, config) == 10
-    assert clamp_window_minutes(0, config) == 1    # below wait_min -> 1
-    assert clamp_window_minutes(90, config) == 20  # above wait_max -> 20
 
 
 def test_clamp_next_wake_minutes_bounds():
