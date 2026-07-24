@@ -260,11 +260,11 @@ replay_event_chars = 300     # per-event truncation in the replay section
 replay_exclude_channels = ["ct"]  # channels excluded from replay (ct = cortex self-talk); [] to include all
 daily_budget = 1000000       # daily wake-token (NET spend) budget the "today X/Y" line renders against; must match gates.daily_budget.tokens
 pending_window_min = 15      # surface a self-schedule entry only when due within this window
-# One "Cortex Today" line per shell, shared daily_budget denominator, same two
+# One "<label> Today" line per shell, shared daily_budget denominator, same two
 # figures on every line (today's tokens + live occupancy). cli = this repo's own
 # token sum; any other key reads tokens_today_base + occupancy from
 # <paths.shell_state_dir>/<shell>.json and drops its line when unreadable.
-shell_labels = { cli = "ct-cli", tg = "ct-tg" }
+shell_labels = { cli = "Cortex-Cli", tg = "Cortex-Tg" }
 handoff_title = "碎碎念"   # title of the handoff-note section (customisable display name)
 replay_title = "最近对话回放"     # title of the conversation-replay section
 handoff_wake_kinds = ["rotate"]  # wake kinds that get the handoff (fresh window only)

@@ -100,7 +100,7 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
 - Sections: header Now/Plan Used/Active [+ force_slept | died_no_handoff catchup] · Pending self-schedule (note.pending_window_min 15).
 - Replay (note.replay_events 4, excl channels ('ct',), marker-stripped, 300ch) · turn_end_text · title prefix. "Wake:" reason line retired.
 - Diff mode: replay filters events newer than wake_state.last_note_ts (baseline = wake's initial note); every gather() advances it to the newest eligible event (note.py:359-374).
-- Budget line (note.py:449-475): `Plan Used: 5h X% | 7d Y% | Cortex Today Nk/Mk | Net Session Token: Wk`. 5h/7d from ct_rate_limit kv.
+- Budget line (note.py:449-475): `Plan Used: 5h X% | 7d Y% | <label> Today Nk/Mk P% | Net Session Token: Wk`. 5h/7d from ct_rate_limit kv. One line per shell, label-first, note.shell_labels (Cortex-Cli / Cortex-Tg).
 - Cortex Today via note._today_tokens (delegates to integration._today_tokens, parity by construction).
 - Net Session = window_tokens key from ct_pacemaker_state (label kept for marrow parity, not net spend).
 - _last_wake skips rows <90s to avoid self-reporting current wake (note.py:106-127). Handoff injection at marrow SessionStart not note.py; cal/rem lines retired pending global inject (note.py:9-10).

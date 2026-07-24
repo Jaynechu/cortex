@@ -987,12 +987,12 @@ def render(cfg: dict, now: datetime, data: dict) -> str:
 
 def _render_budget(budget: dict | None) -> str | None:
     """Plan Used line — shows utilization (USED %, statusline口径), pipe-joined:
-    `Plan Used: 5h 5% (04:50) | 7d 50% (1d2h) | Cortex Today ct-cli 250k/1M 25%
+    `Plan Used: 5h 5% (04:50) | 7d 50% (1d2h) | Cortex-Cli Today 250k/1M 25%
     | Net Session Token: 50k`. Net Session Token is window occupancy (statusline
     total), not net spend — label kept for cross-system consistency with
     marrow's threshold line. Any missing datum drops just its segment.
 
-    One `Cortex Today` line per shell against the shared daily budget: the cli
+    One `<label> Today` line per shell against the shared daily budget: the cli
     shell rides the Plan Used line, every other hosted shell (budget["shells"])
     adds its own line below with the same two figures — today's cumulative
     tokens and the live window occupancy."""
@@ -1031,7 +1031,7 @@ def _render_budget(budget: dict | None) -> str | None:
 def _today_seg(label, tokens: int, daily: int) -> str:
     pct = (tokens / daily * 100) if daily else 0
     head = f"{label} " if label else ""
-    return f"Cortex Today {head}{tokens // 1000}k/{_fmt_budget(daily)} {pct:.0f}%"
+    return f"{head}Today {tokens // 1000}k/{_fmt_budget(daily)} {pct:.0f}%"
 
 
 def _net_seg(tokens: int) -> str:

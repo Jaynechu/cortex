@@ -203,16 +203,16 @@ _DEFAULTS: dict[str, Any] = {
         "replay_events": 4,
         # Per-event truncation inside the Replay block.
         "replay_event_chars": 300,
-        # Daily wake-token (NET spend) budget the "Cortex Today X/Y" segment
+        # Daily wake-token (NET spend) budget the "<label> Today X/Y" segment
         # renders against — must match gates.daily_budget.tokens (display=gate).
         "daily_budget": 1_000_000,
-        # Display label per shell on the "Cortex Today" lines (one line per
-        # shell, shared daily_budget denominator, same two figures on each:
-        # today's tokens + live occupancy). cli reads this repo's own today-token
-        # sum; every other key reads tokens_today_base + occupancy from
+        # Display label leading each "<label> Today" line (one line per shell,
+        # shared daily_budget denominator, same two figures on each: today's
+        # tokens + live occupancy). cli reads this repo's own today-token sum;
+        # every other key reads tokens_today_base + occupancy from
         # <paths.shell_state_dir>/<shell>.json and drops its line when that
         # file is absent/unreadable. "" as a label renders the line unlabelled.
-        "shell_labels": {"cli": "ct-cli", "tg": "ct-tg"},
+        "shell_labels": {"cli": "Cortex-Cli", "tg": "Cortex-Tg"},
         # Pending self-schedule entries surface only when due within this window.
         "pending_window_min": 15,
         # Prior window force-slept without a handoff -> backfill hint line.
