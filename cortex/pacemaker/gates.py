@@ -1,7 +1,7 @@
 """Gate chain: each gate is a pure function (state, context, config, now)
--> GateResult. A wake is allowed only if every gate allows. Two gates: the
-night cap (flag-based roaming ceiling) and the daily token budget; every other
-spend protection is the 150k per-wake fuse + wakeup note battery gauge.
+-> GateResult. A wake is allowed only if every gate allows. One gate: the
+daily token budget; every other spend protection is the 150k per-wake fuse +
+wakeup note battery gauge.
 
 Expected config shape (config["gates"]):
     {
@@ -9,7 +9,6 @@ Expected config shape (config["gates"]):
     }
 
 Expected context keys used here:
-    "mode": str | None                   # "night" = the flag is set (low-freq roaming)
     "today_tokens": int                  # Cortex Today: today's finished-window final occupancies + live window (integration)
 """
 
@@ -26,21 +25,6 @@ class GateResult:
     reason: str
 
 
-def gate_night_cap(state, context: dict, config: dict, now: datetime) -> GateResult:
-    """Night-flag cap: while the night flag is set, self-wakes are allowed but
-    bounded by [night].cap per flag-set->clear night (a safety ceiling, not zero —
-    roaming needs headroom). Day (no flag) -> always allowed. The per-night
-    counter (night_cap_key / night_wake_count) is keyed on the flag lifecycle by
-    core.tick, not on a clock window."""
-    if context.get("mode") != "night":
-        return GateResult("night-cap", True, "day (no night flag)")
-    cap = int(config.get("night", {}).get("cap", 6))
-    count = getattr(state, "night_wake_count", 0)
-    if count >= cap:
-        return GateResult("night-cap", False, f"night cap reached ({count}/{cap})")
-    return GateResult("night-cap", True, f"night wake {count}/{cap} used")
-
-
 def gate_daily_budget(state, context: dict, config: dict, now: datetime) -> GateResult:
     """Daily token budget: once today's wake-token spend (SUM ct_wake_log.tokens,
     supplied as context["today_tokens"]) reaches the cap, all self-wakes fall
@@ -55,7 +39,6 @@ def gate_daily_budget(state, context: dict, config: dict, now: datetime) -> Gate
 
 
 ALL_GATES = (
-    gate_night_cap,
     gate_daily_budget,
 )
 

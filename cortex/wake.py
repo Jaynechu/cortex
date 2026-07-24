@@ -2,8 +2,7 @@
 call marrow's resumed full-env cortex session, and persist the session_id.
 Freshness (a fresh marrow session, no resume_sid) comes only from the
 rotate/dead-window detection: a rotated or dead resident window is a new brain
-that reads the previous brain's handoff via SessionStart. The night package
-(lie_down(mode='night')) forces a rotate, so the next wake is a plain fresh spawn.
+that reads the previous brain's handoff via SessionStart.
 
 marrow lives in its own repo/venv (separate deps) — invoked as a subprocess
 against marrow's own venv python rather than imported in-process, so cortex
@@ -331,7 +330,7 @@ def _classify_wake(cfg) -> tuple[str, bool]:
     """Classify how the resident window should be woken, in ONE protected read.
     Returns (plan, rotate_driven):
       plan="fresh"  — a deliberate new brain: EITHER the rotate flag is set
-                 (night package / explicit rotate / rebirth / token-cap fresh;
+                 (explicit rotate / rebirth / token-cap fresh;
                  rotate_driven=True) OR the transcript rolled to a different
                  session since the last wake (a /clear; rotate_driven=False).
                  A brand-new session; the handoff (or died_no_handoff catchup)

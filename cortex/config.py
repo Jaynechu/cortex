@@ -22,10 +22,10 @@ DEFAULT_NY_DB_PAGES = Path.home() / "Desktop" / "NY" / "db-pages"
 DEFAULT_MARROW_REPO = Path.home() / "CC-Lab" / "marrow"
 DEFAULT_WAKE_TIMING_LOG = Path.home() / ".config" / "marrow" / "logs" / "wake_timing.log"
 
-# Single source of truth for the machine-line marker family (wake bell / free-
-# round / night / fuse / ctl / slash-command). Referenced by _DEFAULTS below AND
+# Single source of truth for the machine-line marker family (wake bell /
+# free-round / fuse / ctl / slash-command). Referenced by _DEFAULTS below AND
 # by transcript._line_markers' fallback so the two can never drift.
-DEFAULT_MACHINE_LINE_MARKERS = ["[TUCK-IN]", "[NEW ROUND]", "[NIGHT]",
+DEFAULT_MACHINE_LINE_MARKERS = ["[TUCK-IN]", "[NEW ROUND]",
                                 "[FUSE]", "[CTL]", "[CMD"]
 
 _DEFAULTS: dict[str, Any] = {
@@ -82,8 +82,8 @@ _DEFAULTS: dict[str, Any] = {
         "receipt_ttl_min": 15,
         "rearm_suffix": " (ear died — rearm)",
         "say_sound": "Glass",
-        # lie_down(next_wake_min=N) clamp (minutes): [next_wake_min, next_wake_max].
-        "next_wake_min": 21,
+        # lie_down(next_wake_min=N) clamp (minutes): [0, next_wake_max], every
+        # hour (0 = immediate re-wake).
         "next_wake_max": 240,
         # Exact-time wake: arm cortex.sentinel (one-shot detached sleep-then-tick)
         # at every lie_down. false = tick-only (launchd 5-min fallback).
@@ -98,8 +98,8 @@ _DEFAULTS: dict[str, Any] = {
         "tuck_in_text": "⏳ [NEW ROUND] Time for a new turn — try something else "
                          "you fancy, go talk to {user} if you miss her, or "
                          "lie_down for a rest.",
-        # Markers that identify a NON-user turn (wake bell / free-round / night /
-        # fuse / ctl / slash-command line), so they never reset the silence timer
+        # Markers that identify a NON-user turn (wake bell / free-round / fuse /
+        # ctl / slash-command line), so they never reset the silence timer
         # and downstream memory drops them. The bell prefix (lineage_marker) is
         # added automatically. Substring match, so "[CMD" catches every ⚙️ [CMD ct-*].
         "machine_line_markers": list(DEFAULT_MACHINE_LINE_MARKERS),
@@ -131,30 +131,6 @@ _DEFAULTS: dict[str, Any] = {
         # subprocess kill = this + margin. Must match marrow's own default.
         "call_timeout_s": 600,
     },
-    # Night mode (flag-based low-frequency roaming). floor_min/floor_max =
-    # lie_down(mode='night') draw + clamp under the flag. start = self-check
-    # window opens (insert precondition); morning_start = her first message from
-    # here clears the flag; silence_hours = all-channel silence to insert the
-    # flag; in_flight_min = raw transcript mtime idle (min) below which a turn is
-    # treated as in flight, so the self-check holds (Stop-only user-silence can
-    # fake quiet mid-turn); cap = max self-wakes counted per flag-set->clear night (safety ceiling,
-    # not zero — roaming needs headroom). ack_text (C6) = INVISIBLE audit-log line
-    # written when the night package runs ({next_wake} renders at lie_down); it
-    # never reaches the window.
-    "night": {"floor_min": 120, "floor_max": 360,
-              "start": "22:00", "morning_start": "06:00",
-              "silence_hours": 1.5, "in_flight_min": 5, "cap": 6,
-              "ack_text": "Night shift: handoff ✓ → rotate to free up context "
-                          "→ next wake {next_wake}",
-              # Stage-1 bell: the pacemaker self-check kicks cortex awake with
-              # this reason so it runs its OWN lie_down(mode="night") four-piece
-              # (handoff + rotate + night band + flag). {silent_h} = hours of
-              # all-channel silence at kick time. Rendered via the night_due kick.
-              "package_due_text":
-                  "🌙 Night window reached ({silent_h}h silent). Pack up for "
-                  "the night: write handoff,  stop ALL running background "
-                  "tasks (TaskList → TaskStop each), then "
-                  'lie_down(next_wake_min=N, mode="night").'},
     "knowledgec": {"stream_name": "/app/usage"},
     "knowledgec.categories": {"default": "uncategorized"},
     "geofence": {"enabled": False},
@@ -196,10 +172,6 @@ _DEFAULTS: dict[str, Any] = {
         "reason_timeout": "Msg #{id} no reply in {minutes}min",
         "reason_morning": "She's up — day mode",
         "reason_note": "New note #{id}",
-        # Night self-check bell (Stage 1): passthrough of [night].package_due_text
-        # (already rendered by the tick and passed as {text}). Kept as a template
-        # so the copy stays single-sourced under [night].
-        "reason_night_due": "{text}",
         # Cap the pending-flag list so a stuck bridge can't grow it unbounded.
         "max_reasons": 8,
     },
@@ -239,12 +211,6 @@ _DEFAULTS: dict[str, Any] = {
         "died_no_handoff_catchup_text":
             "Previous window died without a handoff — recover context from its "
             "transcript, then write the handoff.",
-        # Night-mode (C4) last-activity line: rendered only while the night flag
-        # is set. {channel}/{hm}/{silent_h} render from the newest all-channel
-        # ct_activity row at note time. "" omits it.
-        "night_activity_text":
-            "Last activity: {channel} {hm} ({silent_h}h silent); Turn on "
-            "night mode if you think user is asleep.",
         # Reply-receipt line (C11): one per sent note she has replied to since the
         # last note. {id}/{channel}/{sent_hm}/{replied_hm}/{text} render from the
         # marrow outbox row at note time. "" omits receipts entirely.
@@ -270,31 +236,21 @@ _DEFAULTS: dict[str, Any] = {
 _SECTIONS = (
     "core", "paths", "knowledgec", "geofence", "health",
     "tick", "pacemaker", "gates", "triggers", "marrow",
-    "wake", "note", "kick", "night", "outbox",
+    "wake", "note", "kick", "outbox",
 )
 
 
 def wake_clamps(cfg: dict) -> dict[str, int]:
     """The wake-clamp numbers rendered into note/tool text (never hardcoded).
-    Day lie_down bounds from [wake]; night bounds from [night].floor_*; idle bar
-    from [wake.watchdog].silent_max_min."""
+    lie_down bounds [0, next_wake_max] from [wake]; idle bar from
+    [wake.watchdog].silent_max_min."""
     w = cfg.get("wake", {})
-    n = cfg.get("night", {})
     wd = w.get("watchdog", {})
     return {
-        "next_wake_min": int(w.get("next_wake_min", 21)),
+        "next_wake_min": 0,
         "next_wake_max": int(w.get("next_wake_max", 240)),
-        "night_min": int(n.get("floor_min", 120)),
-        "night_max": int(n.get("floor_max", 360)),
         "silent_max_min": int(wd.get("silent_max_min", 20)),
     }
-
-
-def night_cfg(cfg: dict) -> dict:
-    """The [night] section (flag-based roaming knobs). Missing -> defaults."""
-    n = dict(_DEFAULTS["night"])
-    n.update(cfg.get("night", {}) or {})
-    return n
 
 
 def _config_path() -> Path:

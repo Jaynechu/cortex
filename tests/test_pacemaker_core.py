@@ -13,7 +13,6 @@ def base_config():
             "floor_min_min": 10,
             "floor_max_min": 55,
         },
-        "night": {"floor_min": 120, "floor_max": 360, "cap": 1},
         "gates": {},
     }
 
@@ -65,68 +64,3 @@ def test_next_check_is_next_floor_due():
     assert decision["next_check"] > NOW
 
 
-def test_explanation_string_contains_gate_names_when_blocked():
-    # Night flag set + cap reached -> floor wake is gated, gate name appears.
-    state = PacemakerState(
-        next_floor_due_at=NIGHT_NOW - timedelta(seconds=1),
-        night_cap_key="night",
-        night_wake_count=1,
-    )
-    decision, _ = tick(state, NIGHT_CTX, base_config(), NIGHT_NOW, random.Random(1))
-    assert decision["wake"] is False
-    assert "gated:" in decision["explanation"]
-    assert "night-cap" in decision["explanation"]
-
-
-# --- night wake counter (flag-based) ------------------------------------------
-
-NIGHT_NOW = datetime(2026, 7, 4, 2, 0, tzinfo=TZ)
-NIGHT_CTX = {"mode": "night"}  # the persistent night flag is set
-DAY_CTX = {"mode": None}       # day (no flag)
-
-
-def test_tick_increments_night_counter_when_flag_set():
-    state = PacemakerState(
-        next_floor_due_at=NIGHT_NOW - timedelta(seconds=1),
-        night_cap_key="night",
-        night_wake_count=0,
-    )
-    decision, new_state = tick(state, NIGHT_CTX, base_config(), NIGHT_NOW, random.Random(1))
-    assert decision["wake"] is True  # count 0 < cap 1, still allowed this once
-    assert any(r.kind == "floor" for r in decision["reasons"])
-    assert new_state.night_cap_key == "night"
-    assert new_state.night_wake_count == 1
-
-
-def test_tick_starts_counter_on_flag_entry():
-    # Entering night (flag set, no key yet) starts a fresh count.
-    state = PacemakerState(
-        next_floor_due_at=NIGHT_NOW - timedelta(seconds=1),
-        night_cap_key=None,
-        night_wake_count=0,
-    )
-    decision, new_state = tick(state, NIGHT_CTX, base_config(), NIGHT_NOW, random.Random(1))
-    assert new_state.night_cap_key == "night"
-    assert new_state.night_wake_count == 1  # reset to 0, then incremented once
-
-
-def test_tick_night_counter_reset_when_flag_absent():
-    # Day (no flag): counter is reset to None/0 and never incremented.
-    state = PacemakerState(
-        next_floor_due_at=NOW - timedelta(seconds=1),
-        night_cap_key="night",
-        night_wake_count=5,
-    )
-    decision, new_state = tick(state, DAY_CTX, base_config(), NOW, random.Random(1))
-    assert decision["wake"] is True
-    assert new_state.night_cap_key is None
-    assert new_state.night_wake_count == 0
-
-
-def test_tick_floor_uses_night_band_when_flag_set():
-    # A night floor redraw lands in [floor_min, floor_max] (120-360), not the
-    # day band (10-55) — proves the flag drives the roaming band.
-    state = PacemakerState(next_floor_due_at=NIGHT_NOW - timedelta(seconds=1))
-    _, new_state = tick(state, NIGHT_CTX, base_config(), NIGHT_NOW, random.Random(1))
-    delta_min = (new_state.next_floor_due_at - NIGHT_NOW).total_seconds() / 60.0
-    assert 120 <= delta_min <= 360

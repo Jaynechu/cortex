@@ -219,23 +219,6 @@ def test_lie_down_reports_real_next_wake(cfg):
     assert r["next_wake"] in ledger  # HH:MM substring of the ISO ledger
 
 
-def test_lie_down_night_mode_sets_flag_and_night_band(cfg):
-    """lie_down(mode='night') sets the persistent flag and clamps N to the night
-    band [120, 360]."""
-    wake_state.set_awake(cfg, 1, None)
-    r = lie_down.lie_down(cfg, next_wake_min=10, mode="night")  # 10 < 120 -> clamps up
-    assert r["mode"] == "night"
-    assert r["rotated"] is True  # night forces rotate
-    assert wake_state.is_night_mode(cfg) is True
-    ledger = wake_state.get_next_wake_at(cfg)
-    from datetime import datetime as _dt
-    from zoneinfo import ZoneInfo
-    due = _dt.fromisoformat(ledger)
-    tz = ZoneInfo(cfg["core"]["timezone"])
-    delta_min = (due - _dt.now(tz)).total_seconds() / 60.0
-    assert 119 <= delta_min <= 361  # ~120 (clamped up from 10)
-
-
 # --- reconcile decision matrix ------------------------------------------------
 
 def _fire_spy(monkeypatch):
@@ -374,33 +357,6 @@ def test_fire_dead_window_dry_run_consumes_ledger(cfg):
     new_due = wake_state.get_next_wake_at(cfg)
     assert new_due is not None
     assert new_due != stale_due.isoformat()
-
-
-def test_fire_dead_window_night_cap_gated_holds_ledger(cfg):
-    """P8: a due-ledger fire while the night flag is set AND the per-night cap is
-    exhausted must HOLD (night-cap gate disallows) and leave next_wake_at
-    UN-consumed, so reconcile retries once the flag clears / a new night starts."""
-    cfg["night"]["cap"] = 1
-    wake_state.update(cfg, mode="night")
-    # Persist a pacemaker state already at cap for this night.
-    conn0 = db.connect(cfg)
-    try:
-        from cortex.pacemaker import integration
-        from cortex.pacemaker.core import PacemakerState
-        integration.save_state(conn0, PacemakerState(
-            night_cap_key="night", night_wake_count=1))
-    finally:
-        conn0.close()
-    now = datetime.now(_tz(cfg))
-    stale_due = now - timedelta(minutes=1)
-    wake_state.set_next_wake_at(cfg, stale_due.isoformat())
-    conn = db.connect(cfg)
-    try:
-        msg = pacemaker_tick._fire_dead_window(conn, cfg, "ledger due, window dead")
-    finally:
-        conn.close()
-    assert "gated" in msg.lower()
-    assert wake_state.get_next_wake_at(cfg) == stale_due.isoformat()  # untouched
 
 
 def test_fire_dead_window_daily_budget_gated_holds_ledger(cfg):

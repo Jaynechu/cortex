@@ -22,9 +22,6 @@ class PacemakerState:
     last_wake_at: datetime | None = None
     # C-wm timing: lie-down = wake finished; floor clock redraws from here.
     last_lie_down_at: datetime | None = None
-    # Night mode: capped floor wakes used in the night keyed here.
-    night_cap_key: str | None = None
-    night_wake_count: int = 0
     # Cortex session resume (C3). Opaque to tick() — only the wake caller
     # (cortex.wake) reads/writes this.
     cortex_session_id: str | None = None
@@ -55,8 +52,7 @@ def tick(
     floor_fired = any(r.kind == "floor" for r in reasons)
     new_next_floor_due_at = state.next_floor_due_at
     if floor_fired:
-        new_next_floor_due_at = reschedule_floor(
-            now, config, rng, night=context.get("mode") == "night")
+        new_next_floor_due_at = reschedule_floor(now, config, rng)
 
     # 2. gates
     gate_results = gates.run_gates(state, context, config, now)
@@ -64,31 +60,12 @@ def tick(
 
     wake = bool(reasons) and not gated_by
 
-    # Night cap accounting: keyed on the flag lifecycle (one flag-set->clear =
-    # one night), not a clock window. The flag's own set-time is opaque to tick;
-    # the marker key here is just "counting a night" (a fixed sentinel) vs None
-    # (day). Entering night (flag set, no key yet) starts a fresh count; leaving
-    # night (flag cleared) resets it. Each night wake consumes the cap.
-    _NIGHT_KEY = "night"
-    night_on = context.get("mode") == "night"
-    new_night_cap_key = state.night_cap_key
-    new_night_wake_count = state.night_wake_count
-    if night_on:
-        if state.night_cap_key != _NIGHT_KEY:
-            new_night_cap_key, new_night_wake_count = _NIGHT_KEY, 0
-    else:
-        new_night_cap_key, new_night_wake_count = None, 0
-    if wake and night_on:
-        new_night_wake_count += 1
-
     new_last_wake_at = now if wake else state.last_wake_at
 
     new_state = PacemakerState(
         next_floor_due_at=new_next_floor_due_at,
         last_wake_at=new_last_wake_at,
         last_lie_down_at=state.last_lie_down_at,
-        night_cap_key=new_night_cap_key,
-        night_wake_count=new_night_wake_count,
         cortex_session_id=state.cortex_session_id,
     )
 

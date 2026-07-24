@@ -107,41 +107,6 @@ def test_reason_list_capped_at_max(cfg, _stub_spawn):
     assert reasons[-1] == 'Msg #4 replied: "x"'       # newest kept
 
 
-# --- night flag clear (P8) ---------------------------------------------------
-
-def test_morning_kick_clears_flag_asleep(cfg, _stub_spawn):
-    wake_state.update(cfg, awake=False, mode="night")
-    r = kick.kick(cfg, "morning")
-    assert r["flag_cleared"] is True
-    assert "mode" not in _ws(cfg)  # day cadence: flag gone
-
-
-def test_morning_kick_clears_flag_awake(cfg, _stub_spawn):
-    # Morning clears the flag even while awake (flag clear is separate from the
-    # wake machinery). It also opens a carrier round like any awake kick.
-    wake_state.update(cfg, awake=True, mode="night")
-    r = kick.kick(cfg, "morning")
-    assert r["awake"] is True and r["ticked"] is False
-    assert r["flag_cleared"] is True
-    assert "mode" not in _ws(cfg)
-    assert r["round_opened"] is True
-
-
-def test_midnight_reply_kick_keeps_flag(cfg, _stub_spawn):
-    # A watch reply/timeout mid-night wakes cortex but does NOT clear the flag
-    # (dawdling is not morning).
-    wake_state.update(cfg, awake=False, mode="night")
-    r = kick.kick(cfg, "reply", id=3)
-    assert r.get("flag_cleared") is False
-    assert _ws(cfg)["mode"] == "night"  # flag survives
-
-
-def test_morning_kick_no_flag_is_noop(cfg, _stub_spawn):
-    wake_state.update(cfg, awake=False)  # day, no flag
-    r = kick.kick(cfg, "morning")
-    assert r["flag_cleared"] is False
-
-
 def test_asleep_interrupt_queues_reason(cfg, _stub_spawn):
     wake_state.update(cfg, awake=False)
     r = kick.kick(cfg, "reply", id=3, text="hi")
@@ -180,21 +145,9 @@ def test_awake_timeout_opens_carrier(cfg, _stub_spawn):
 
 
 def test_awake_morning_opens_carrier(cfg, _stub_spawn):
-    # Morning-awake opens a carrier round; the night flag still clears.
-    wake_state.update(cfg, awake=True, mode="night")
-    r = kick.kick(cfg, "morning")
-    _assert_carrier(cfg, r, _stub_spawn, "She's up — day mode")
-    assert r["flag_cleared"] is True
-    assert "mode" not in _ws(cfg)                        # day cadence resumes
-
-
-def test_awake_morning_no_flag_still_carrier(cfg, _stub_spawn):
-    # Morning-awake with no night flag: no flag to clear, but the reason still
-    # gets a carrier round.
     wake_state.update(cfg, awake=True)
     r = kick.kick(cfg, "morning")
     _assert_carrier(cfg, r, _stub_spawn, "She's up — day mode")
-    assert r["flag_cleared"] is False
 
 
 def test_second_kick_before_carrier_fires_queues_both_no_double_mark(cfg, _stub_spawn):

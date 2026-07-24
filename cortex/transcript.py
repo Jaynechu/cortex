@@ -238,8 +238,8 @@ def _entry_ts(o: dict) -> float | None:
 def last_user_message_mtime(cfg: dict) -> float | None:
     """Epoch-seconds timestamp of the LAST real user message in the current
     transcript, tail-read (never loads the whole file). Assistant turns, system
-    writes and the ear-delivered injections (wake bell / tuck-in / free-round /
-    night lines — `_line_markers`) do NOT count: those are machine writes that
+    writes and the ear-delivered injections (wake bell / tuck-in / free-round
+    lines — `_line_markers`) do NOT count: those are machine writes that
     must not reset the silence timer (the "永远睡不到alarm" bug family). Returns
     None when no qualifying user message is found or the transcript is
     missing/unreadable — callers fall back to hold behaviour.
@@ -299,8 +299,7 @@ def user_silent_min(cfg: dict) -> float | None:
     """Minutes since the last real user message (`last_user_message_mtime`), or
     None when it cannot be determined. The single silence source shared by the
     watchdog poll and the tick awake gate. WINDOW-LOCAL: reads only the resident
-    cortex transcript. For all-channel silence (night self-check) use
-    `global_user_silent_min`."""
+    cortex transcript. For all-channel silence use `global_user_silent_min`."""
     import time
     ts = last_user_message_mtime(cfg)
     return (time.time() - ts) / 60.0 if ts is not None else None
@@ -351,10 +350,9 @@ def _marrow_db_last_user_ts(cfg: dict) -> float | None:
 
 
 def global_user_silent_min(cfg: dict) -> float | None:
-    """Minutes since the last user message across ALL channels (marrow db) — the
-    silence source for the night self-check. The user active on cli/tg/wx all
-    night must not be judged silent just because THIS cortex window's own
-    transcript is quiet.
+    """Minutes since the last user message across ALL channels (marrow db). The
+    user active on cli/tg/wx must not be judged silent just because THIS cortex
+    window's own transcript is quiet.
 
     result = minutes since max(marrow-db last user ts, resident-transcript last
     user ts). The transcript term can only SHORTEN silence, never substitute for

@@ -1,7 +1,7 @@
 """cortex.kick — external wake primitive (CLI main, callable as a subprocess).
 
 A bridge (tg/wx) or a cli session pokes cortex awake to peek at a channel: a
-watch reply/timeout fired, or her first morning message cleared the night flag.
+watch reply/timeout fired, or her first morning message.
 A bare pacemaker_tick is NOT a wake primitive — a future next_wake_at is a
 ledger hold and an awake window short-circuits to the watchdog. This module
 does what the marrow user-wake reset does for cortex windows, but for the
@@ -142,23 +142,14 @@ def kick(cfg: dict, kind: str, **fields) -> dict:
     Best-effort throughout: a lock/state failure drops the kick silently."""
     detail = " ".join(f"{k}={v}" for k, v in fields.items() if v is not None)
     reason = _reason_text(cfg, kind, **fields)
-    morning = kind == "morning"
     sentinel_pid = None
     was_awake = False
-    flag_cleared = False
     round_marked = False
     try:
         def _mutate(d):
-            nonlocal sentinel_pid, was_awake, flag_cleared, round_marked
+            nonlocal sentinel_pid, was_awake, round_marked
             was_awake = bool(d.get("awake"))
             _append_reason(cfg, d, reason)
-            # Morning kick clears the night flag under the SAME lock — awake or
-            # asleep. Mid-night kicks (reply/timeout) never touch the flag. Also
-            # clear the night_kick marker so the next night re-arms its bell.
-            if morning:
-                d.pop("night_kick", None)
-                if d.pop("mode", None) is not None:
-                    flag_cleared = True
             if was_awake:
                 # Mark the silence cycle as immediately due (idempotent — a
                 # second kick before the first carrier fires still queues its
@@ -177,27 +168,24 @@ def kick(cfg: dict, kind: str, **fields) -> dict:
     except wake_state.StateValidationError:
         return {"ok": False, "reason": "state locked", "kind": kind}
 
-    wake_state.wake_audit(cfg, "kick", kind,
-                          f"{detail} flag_cleared={flag_cleared}".strip())
+    wake_state.wake_audit(cfg, "kick", kind, detail)
     if was_awake:
         if round_marked:
             _spawn_tick(cfg)  # tick -> silence_action carrier free-round
         return {"ok": True, "kind": kind, "awake": True, "ticked": False,
-                "flag_cleared": flag_cleared, "round_opened": round_marked}
+                "round_opened": round_marked}
 
     _sigterm(sentinel_pid)
     _clear_floor_deadline(cfg)
     _spawn_tick(cfg)
-    return {"ok": True, "kind": kind, "awake": False, "ticked": True,
-            "flag_cleared": flag_cleared}
+    return {"ok": True, "kind": kind, "awake": False, "ticked": True}
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Poke cortex awake to peek at a channel (watch / morning).")
     parser.add_argument("--kind", required=True,
-                        choices=("reply", "timeout", "morning", "note",
-                                 "night_due"),
+                        choices=("reply", "timeout", "morning", "note"),
                         help="reason template to render into the wakeup note")
     parser.add_argument("--note-id", default=None,
                         help="outbox note id (reply / timeout)")

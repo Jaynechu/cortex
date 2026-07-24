@@ -95,47 +95,29 @@ def evaluate(
     return _floor_trigger(next_floor_due_at, now)
 
 
-def clamp_next_wake_minutes(minutes: float, config: dict, rotate: bool = False,
-                            night: bool = False, human_override: bool = False) -> float:
-    """Clamp a lie_down(next_wake_min=N) choice. Day = [wake.next_wake_min,
-    wake.next_wake_max]; night = [night.floor_min, night.floor_max] (the
-    low-frequency roaming band under the flag); rotate = [0, wake.next_wake_max]
-    (floor 0 so a rotate can start the successor window immediately — the next
-    tick fires it). Precedence: night wins over rotate (night forces rotate but
-    keeps the night band, never the 0 floor). `human_override` (explicit ctl
+def clamp_next_wake_minutes(minutes: float, config: dict,
+                            human_override: bool = False) -> float:
+    """Clamp a lie_down(next_wake_min=N) choice to [0, wake.next_wake_max] —
+    one merged band for every hour (0 = immediate re-wake, e.g. a rotate
+    starting the successor window right away). `human_override` (explicit ctl
     minutes) passes unclamped. Proxy paths pass None and skip this clamp."""
     if human_override:
         return minutes
-    if night:
-        ncfg = config.get("night", {})
-        lo = ncfg.get("floor_min", 120)
-        hi = ncfg.get("floor_max", 360)
-    elif rotate:
-        wcfg = config.get("wake", {})
-        hi = wcfg.get("next_wake_max", 240)
-        lo = 0
-    else:
-        wcfg = config.get("wake", {})
-        hi = wcfg.get("next_wake_max", 240)
-        lo = wcfg.get("next_wake_min", 21)
-    return max(lo, min(hi, minutes))
+    wcfg = config.get("wake", {})
+    hi = wcfg.get("next_wake_max", 240)
+    return max(0, min(hi, minutes))
 
 
 def reschedule_floor(now: datetime, config: dict, rng: random.Random,
-                     minutes: float | None = None, night: bool = False) -> datetime:
+                     minutes: float | None = None) -> datetime:
     """Draw the next wake due time from `now`. `minutes` = an explicit choice
-    (already clamped by the caller); None = a uniform "dice" draw within the floor
-    band: day = [floor_min_min, floor_max_min], night = [night.floor_min,
-    night.floor_max] (low-frequency roaming). Callers pass lie-down time as `now`
-    on the wake path (C-wm: the clock runs from lie-down, not wake); gated firings
-    redraw from tick time so a blocked floor doesn't re-fire every tick."""
-    if night:
-        ncfg = config.get("night", {})
-        lo = ncfg.get("floor_min", 120)
-        hi = ncfg.get("floor_max", 360)
-    else:
-        trig_config = config.get("triggers", {})
-        lo = trig_config.get("floor_min_min", 10)
-        hi = trig_config.get("floor_max_min", 55)
+    (already clamped by the caller); None = a uniform "dice" draw within the
+    floor band [floor_min_min, floor_max_min]. Callers pass lie-down time as
+    `now` on the wake path (C-wm: the clock runs from lie-down, not wake);
+    gated firings redraw from tick time so a blocked floor doesn't re-fire
+    every tick."""
+    trig_config = config.get("triggers", {})
+    lo = trig_config.get("floor_min_min", 10)
+    hi = trig_config.get("floor_max_min", 55)
     draw = rng.uniform(lo, hi) if minutes is None else minutes
     return now + timedelta(minutes=draw)

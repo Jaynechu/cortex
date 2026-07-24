@@ -101,25 +101,6 @@ def test_render_full_note(cfg):
     assert "Cal:" not in text and "Rem:" not in text
 
 
-def test_render_night_activity_line(cfg):
-    # C4: night flag set -> the all-channel Last-activity line renders.
-    data = {
-        "night_mode": True,
-        "last_activity_any": {"channel": "tg", "hm": "23:40", "silent_h": 2.3},
-    }
-    text = note.render(cfg, NOW, data)
-    assert "Last activity: tg 23:40 (2.3h silent)" in text
-
-
-def test_render_night_activity_omitted_when_day(cfg):
-    # No flag -> C4 line never renders even if the datum is present.
-    data = {
-        "night_mode": False,
-        "last_activity_any": {"channel": "tg", "hm": "23:40", "silent_h": 2.3},
-    }
-    assert "Last activity:" not in note.render(cfg, NOW, data)
-
-
 def test_render_omits_absent_lines(cfg):
     text = note.render(cfg, NOW, {})
     assert "Wake:" not in text  # reason line retired
@@ -379,11 +360,12 @@ def test_render_turn_end_line_omitted_by_default(cfg):
 
 def test_render_turn_end_line_appears_with_custom_template(cfg):
     # Clamp numbers still render from config when a custom template is set.
+    # T3: the merged clamp floor is 0 for every hour (0 = immediate re-wake).
     cfg["note"]["turn_end_text"] = (
         "NOTE: lie_down(next_wake_min=N) [{next_wake_min}-{next_wake_max}].")
     text = note.render(cfg, NOW, {})
     assert text.rstrip().endswith(
-        "NOTE: lie_down(next_wake_min=N) [21-240].")
+        "NOTE: lie_down(next_wake_min=N) [0-240].")
 
 
 def test_render_title_prepended_with_blank_line(cfg):

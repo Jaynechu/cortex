@@ -71,12 +71,11 @@ def test_free_round_injection_does_not_reset(cfg):
     assert 19.0 < transcript.user_silent_min(cfg) < 21.0
 
 
-def test_wake_bell_and_night_lines_do_not_reset(cfg):
+def test_wake_bell_line_does_not_reset(cfg):
     # Shipped default bell template prefix ('☀️ {hm}' -> '☀️').
     _write(cfg, [
         _user("q", 25),
         _user("☀️ 14:03", 2),
-        _user("⏳ [NIGHT] Night window is open ...", 1),
     ])
     assert 24.0 < transcript.user_silent_min(cfg) < 26.0
 
@@ -89,7 +88,6 @@ def test_wake_bell_zwj_static_template_does_not_reset(cfg):
     _write(cfg, [
         _user("q", 25),
         _user("[🧚‍♀️ 笨鸭换岗成功]", 2),
-        _user("⏳ [NIGHT] Night window is open ...", 1),
     ])
     assert 24.0 < transcript.user_silent_min(cfg) < 26.0
 

@@ -15,7 +15,6 @@ def base_config():
             "floor_max_min": 55,
         },
         "wake": {
-            "next_wake_min": 21,
             "next_wake_max": 240,
         },
     }
@@ -129,33 +128,15 @@ def test_reschedule_floor_explicit_minutes_no_reclamp():
 
 
 def test_clamp_next_wake_minutes_bounds():
-    # Normal clamp = [next_wake_min (21), next_wake_max (240)].
+    # T3 merged band = [0, next_wake_max (240)] for every hour.
     config = base_config()
     assert clamp_next_wake_minutes(120, config) == 120
-    assert clamp_next_wake_minutes(10, config) == 21        # below floor -> 21
-    assert clamp_next_wake_minutes(999, config) == 240      # above ceiling -> 240
-
-
-def test_clamp_next_wake_minutes_rotate_band_floor_zero():
-    # P17: rotate=True uses [0, next_wake_max] — floor 0 so a rotate can start
-    # the successor window immediately (the next tick fires it).
-    config = base_config()
-    assert clamp_next_wake_minutes(30, config, rotate=True) == 30    # in-range kept
-    assert clamp_next_wake_minutes(0, config, rotate=True) == 0      # 0 passes through
-    assert clamp_next_wake_minutes(999, config, rotate=True) == 240  # above ceiling -> 240
-
-
-def test_clamp_next_wake_minutes_night_precedence_over_rotate():
-    # night forces rotate but keeps the night band -> night must NOT inherit the
-    # rotate 0 floor.
-    config = base_config()
-    config["night"] = {"floor_min": 120, "floor_max": 360}
-    assert clamp_next_wake_minutes(0, config, rotate=True, night=True) == 120
-    assert clamp_next_wake_minutes(500, config, rotate=True, night=True) == 360
+    assert clamp_next_wake_minutes(0, config) == 0        # 0 = immediate re-wake
+    assert clamp_next_wake_minutes(-10, config) == 0      # below floor -> 0
+    assert clamp_next_wake_minutes(999, config) == 240    # above ceiling -> 240
 
 
 def test_clamp_next_wake_minutes_human_override_unclamped():
     config = base_config()
     assert clamp_next_wake_minutes(3, config, human_override=True) == 3
     assert clamp_next_wake_minutes(9999, config, human_override=True) == 9999
-    assert clamp_next_wake_minutes(3, config, rotate=True, human_override=True) == 3

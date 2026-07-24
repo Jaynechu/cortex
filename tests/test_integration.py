@@ -38,16 +38,12 @@ def test_state_round_trip(conn):
         next_floor_due_at=now + timedelta(minutes=60),
         last_wake_at=now,
         last_lie_down_at=now - timedelta(minutes=1),
-        night_cap_key="2026-07-04",
-        night_wake_count=1,
     )
     integration.save_state(conn, state)
     loaded = integration.load_state(conn)
     assert loaded.next_floor_due_at == state.next_floor_due_at
     assert loaded.last_wake_at == state.last_wake_at
     assert loaded.last_lie_down_at == state.last_lie_down_at
-    assert loaded.night_cap_key == "2026-07-04"
-    assert loaded.night_wake_count == 1
 
 
 def test_load_state_empty_default(conn):
@@ -55,8 +51,9 @@ def test_load_state_empty_default(conn):
 
 
 def test_load_state_legacy_desire_json_loads_gracefully(conn):
-    # A pre-retirement row still carries desire/expect_reply/cortex_session_date
-    # keys — they are ignored (not migrated), and loading must not crash.
+    # A pre-retirement row still carries desire/expect_reply/cortex_session_date/
+    # night_cap_key/night_wake_count keys — they are ignored (not migrated), and
+    # loading must not crash.
     now = datetime.now(MEL)
     old_json = json.dumps({
         "desire": {"attachment": 0.1, "curiosity": 0.0, "worry": 0.0, "duty": 0.0,
@@ -64,6 +61,8 @@ def test_load_state_legacy_desire_json_loads_gracefully(conn):
         "expect_reply": {"pending": True, "sent_at": now.isoformat(),
                          "checks_done": 3, "tone_level": 2},
         "cortex_session_date": "2026-07-04",
+        "night_cap_key": "night",
+        "night_wake_count": 3,
         "next_floor_due_at": now.isoformat(),
         "last_wake_at": None,
     })
@@ -75,15 +74,16 @@ def test_load_state_legacy_desire_json_loads_gracefully(conn):
     state = integration.load_state(conn)
     assert state.next_floor_due_at is not None
     assert state.last_lie_down_at is None
-    assert state.night_cap_key is None
-    assert state.night_wake_count == 0
-    # A save drops the stale desire/expect_reply/cortex_session_date keys.
+    # A save drops the stale desire/expect_reply/cortex_session_date/night_*
+    # keys.
     integration.save_state(conn, state)
     raw = json.loads(conn.execute(
         "SELECT state FROM ct_pacemaker_state WHERE id = 1").fetchone()["state"])
     assert "desire" not in raw
     assert "expect_reply" not in raw
     assert "cortex_session_date" not in raw
+    assert "night_cap_key" not in raw
+    assert "night_wake_count" not in raw
 
 
 # --- lie_down ---------------------------------------------------------------
@@ -259,41 +259,3 @@ def test_daily_budget_finished_window_final_over_cap_gates(conn, cfg):
     assert any(g.name == "daily_budget" for g in decision["gated_by"])
 
 
-def test_night_cap_gates_floor_wake(conn, cfg, tmp_path):
-    # Night FLAG set + cap reached -> floor wake gated by night-cap.
-    from cortex import wake_state
-    home = tmp_path / "cortex"
-    (home / "state").mkdir(parents=True)
-    cfg["paths"]["cortex_home"] = str(home)
-    cfg["paths"]["wake_state_file"] = str(home / "state" / "wake_state.json")
-    cfg["night"]["cap"] = 1
-    wake_state.update(cfg, mode="night")
-
-    now = datetime(2026, 7, 4, 2, 0, tzinfo=MEL)
-    state = PacemakerState(
-        next_floor_due_at=now - timedelta(minutes=1),  # force a floor trigger
-        night_cap_key="night",
-        night_wake_count=1,  # at cap 1 -> silenced
-    )
-    integration.save_state(conn, state)
-    decision = integration.run_tick(conn, cfg, now=now, rng=random.Random(1))
-    assert decision["wake"] is False
-    assert any(g.name == "night-cap" for g in decision["gated_by"])
-
-
-def test_night_flag_drives_floor_band(conn, cfg, tmp_path):
-    # With the flag set, a floor redraw lands in the 120-360 roaming band.
-    from cortex import wake_state
-    home = tmp_path / "cortex"
-    (home / "state").mkdir(parents=True)
-    cfg["paths"]["cortex_home"] = str(home)
-    cfg["paths"]["wake_state_file"] = str(home / "state" / "wake_state.json")
-    wake_state.update(cfg, mode="night")
-
-    now = datetime(2026, 7, 4, 2, 0, tzinfo=MEL)
-    integration.save_state(conn, PacemakerState(
-        next_floor_due_at=now - timedelta(minutes=1)))
-    integration.run_tick(conn, cfg, now=now, rng=random.Random(1))
-    loaded = integration.load_state(conn)
-    delta_min = (loaded.next_floor_due_at - now).total_seconds() / 60.0
-    assert 120 <= delta_min <= 360

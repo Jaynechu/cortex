@@ -60,17 +60,18 @@ def parse_due_at(value: str | None, tz: ZoneInfo) -> datetime | None:
 
 def _state_to_json(state: PacemakerState, base: dict | None = None) -> str:
     obj = dict(base or {})  # preserve side-channel keys (window_tokens)
-    # Drop any legacy desire/expect_reply/cortex_session_date keys carried in
-    # from an old row (cortex_session_date: rebirth retired, 3155246).
+    # Drop any legacy desire/expect_reply/cortex_session_date/night_cap_key/
+    # night_wake_count keys carried in from an old row (cortex_session_date:
+    # rebirth retired, 3155246; night_* : night package retired, T3).
     obj.pop("desire", None)
     obj.pop("expect_reply", None)
     obj.pop("cortex_session_date", None)
+    obj.pop("night_cap_key", None)
+    obj.pop("night_wake_count", None)
     obj.update({
         "next_floor_due_at": _iso(state.next_floor_due_at),
         "last_wake_at": _iso(state.last_wake_at),
         "last_lie_down_at": _iso(state.last_lie_down_at),
-        "night_cap_key": state.night_cap_key,
-        "night_wake_count": state.night_wake_count,
         "cortex_session_id": state.cortex_session_id,
     })
     return json.dumps(obj)
@@ -78,14 +79,13 @@ def _state_to_json(state: PacemakerState, base: dict | None = None) -> str:
 
 def _state_from_json(text: str) -> PacemakerState:
     # Tolerant load: legacy rows may still carry desire/expect_reply/
-    # cortex_session_date keys — they are simply ignored (retired engines).
+    # cortex_session_date/night_cap_key/night_wake_count keys — they are simply
+    # ignored (retired engines).
     o = json.loads(text)
     return PacemakerState(
         next_floor_due_at=_parse_dt(o.get("next_floor_due_at")),
         last_wake_at=_parse_dt(o.get("last_wake_at")),
         last_lie_down_at=_parse_dt(o.get("last_lie_down_at")),
-        night_cap_key=o.get("night_cap_key"),
-        night_wake_count=o.get("night_wake_count", 0),
         cortex_session_id=o.get("cortex_session_id"),
     )
 
@@ -229,17 +229,6 @@ def _self_scheduled(cfg: dict) -> list[dict]:
     return out
 
 
-def _night_mode(cfg: dict) -> bool:
-    """True when the persistent night flag is set (wake_state mode == 'night').
-    An INPUT to the pure tick (mode drives floor bounds + the cap gate); the tick
-    itself never sets it. Best-effort: a read failure reads as day."""
-    from cortex import wake_state
-    try:
-        return wake_state.is_night_mode(cfg)
-    except Exception:
-        return False
-
-
 def build_context(conn: sqlite3.Connection, cfg: dict, now: datetime, state: PacemakerState) -> dict:
     pm = cfg["pacemaker"]
     last_activity = _latest_activity_at(conn)
@@ -254,7 +243,6 @@ def build_context(conn: sqlite3.Connection, cfg: dict, now: datetime, state: Pac
         "affect_flag": _read_json_file(config.affect_flag_path(cfg), None),
         "self_scheduled": _self_scheduled(cfg),
         "today_tokens": _today_tokens(conn, now),
-        "mode": "night" if _night_mode(cfg) else None,
         "events": [],
     }
 
@@ -310,9 +298,7 @@ def lie_down(conn: sqlite3.Connection, cfg: dict, now: datetime | None = None,
     now = now or _now(cfg)
     rng = rng or random.Random()
 
-    # Proxy/gated-tick redraws (minutes=None) must honour the night flag too, so a
-    # blocked-then-redrawn floor lands in the roaming band, not the day band.
-    next_floor = reschedule_floor(now, cfg, rng, minutes, night=_night_mode(cfg))
+    next_floor = reschedule_floor(now, cfg, rng, minutes)
     state = load_state(conn)
     new_state = dataclasses.replace(
         state,

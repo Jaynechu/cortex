@@ -133,78 +133,6 @@ def _stale_suspect_count(cfg: dict, snap_gen: int | None) -> int:
         return 0
 
 
-def _in_night_window(now, cfg: dict) -> bool:
-    """True when `now` (tz-aware, config tz) sits in [night.start, morning_start).
-    Both are HH:MM local; the window wraps midnight (start >= morning_start), so
-    22:00->06:00 spans two dates. Malformed bounds -> False (never auto-flag)."""
-    n = config.night_cfg(cfg)
-    try:
-        sh, sm = (int(x) for x in str(n.get("start", "22:00")).split(":"))
-        mh, mm = (int(x) for x in str(n.get("morning_start", "06:00")).split(":"))
-    except (ValueError, AttributeError):
-        return False
-    cur = now.hour * 60 + now.minute
-    start = sh * 60 + sm
-    morning = mh * 60 + mm
-    if start <= morning:
-        return start <= cur < morning
-    return cur >= start or cur < morning  # wraps midnight
-
-
-def _night_self_check(cfg: dict, now) -> tuple[str | None, bool]:
-    """Asleep-branch night bell-ringer — two facts only: all-channel silence +
-    the bell. NO forced teardown. Returns (log line or None, short_circuit):
-    short_circuit=True when the bell rang — the bell spawns its OWN wake tick, so
-    the caller must NOT also run its wake path this tick (else two windows open).
-    The formal night package (handoff + rotate + night band + flag) is cortex's
-    OWN lie_down(mode='night'); this only makes cortex wake to run it.
-
-    Preconditions: inside [night.start, morning_start), all-channel user silence
-    (`global_user_silent_min`: max over marrow-db all channels + resident
-    transcript) >= [night].silence_hours, the night flag unset, no turn in flight.
-    In-flight guard: user-silence does NOT reset during a long assistant turn, so
-    raw transcript mtime freshness ([night].in_flight_min) is the mid-turn guard.
-
-    The bell (marker unset): mark the once-per-window night_kick flag atomically
-    (asleep + flag-unset + not-yet-kicked, one strict-lock hold), then send ONE
-    wake kick carrying [night].package_due_text so cortex wakes and runs its own
-    four-piece (handoff enforced by the marrow gate). At most one bell per window.
-
-    If the window never acts on the bell, NOTHING forces it: a dead window is
-    handled at its next due by the existing died_no_handoff / ghost-handoff path
-    (no forged rotate markers, so catchup is preserved)."""
-    if wake_state.is_night_mode(cfg):
-        return None, False  # already set -> no-op
-    if not _in_night_window(now, cfg):
-        return None, False
-    n = config.night_cfg(cfg)
-    silent_min = transcript.global_user_silent_min(cfg)
-    if silent_min is None or silent_min < float(n.get("silence_hours", 1.5)) * 60.0:
-        return None, False  # not silent long enough (or unknown -> hold)
-    mt = transcript.mtime(cfg)
-    if mt is not None:
-        idle_min = (time.time() - mt) / 60.0
-        if idle_min < float(n.get("in_flight_min", 5)):
-            return "night self-check: turn in flight (mtime fresh) -> hold", False
-    if bool(wake_state.load(cfg).get("night_kick")):
-        return None, False  # bell already fired this window -> nothing forces it
-    # Ring the bell once so cortex runs its own night package.
-    if not wake_state.try_mark_night_kick(cfg):
-        return None, False  # awake / flag / already-kicked landed under lock
-    silent_h = silent_min / 60.0
-    text = str(n.get("package_due_text") or "")
-    if text:
-        try:
-            text = text.format(silent_h=f"{silent_h:.1f}")
-        except (KeyError, IndexError, ValueError):
-            pass
-    from cortex import kick as kick_mod
-    kick_mod.kick(cfg, "night_due", text=text or None)
-    wake_state.wake_audit(cfg, "night_kick", "self-check",
-                          f"silent={silent_min:.0f}min")
-    return f"night self-check: bell sent (silent {silent_min:.0f}min)", True
-
-
 def _parse_local(iso: str | None, cfg: dict):
     from datetime import datetime
     from zoneinfo import ZoneInfo
@@ -229,11 +157,10 @@ def _fire_dead_window(conn, cfg: dict, why: str) -> str:
     next_wake_at stays due and reconcile re-fires it again next tick (headless
     wake every ~5 min).
 
-    Runs the same night/daily-budget gates run_tick would (state + context ->
-    gates.run_gates), so an alarm due mid-night or after budget exhaustion
-    does not fire anyway. Gated -> HOLD, ledger left UN-consumed (reconcile
-    retries every tick, firing naturally once the gate opens — a night-time
-    accidental close then resumes at gate end, matching the night design)."""
+    Runs the same daily-budget gate run_tick would (state + context ->
+    gates.run_gates), so an alarm due after budget exhaustion does not fire
+    anyway. Gated -> HOLD, ledger left UN-consumed (reconcile retries every
+    tick, firing naturally once the gate opens)."""
     from cortex.pacemaker import gates as gates_mod
     now = integration._now(cfg)
     state = integration.load_state(conn)
@@ -300,7 +227,7 @@ def _adopt_manual_window(cfg: dict) -> str | None:
 
 
 def _reconcile(conn, cfg: dict, st: dict, now) -> str | None:
-    """Ledger reconcile (runs every tick, after night close). Returns a log line
+    """Ledger reconcile (runs every tick). Returns a log line
     when it acts / short-circuits the rest of the tick, else None (let the normal
     flow proceed). HARD RULE: an ALIVE recorded session is never touched here.
 
@@ -363,14 +290,6 @@ def main() -> int:
             return 0
 
         now = integration._now(cfg)
-        # Asleep-branch night bell: ring once so cortex runs its own night
-        # package; no forced teardown ever. The bell spawns its own wake tick,
-        # so short-circuit here to avoid opening a second window.
-        nc, nc_short = _night_self_check(cfg, now)
-        if nc is not None:
-            print(f"{db.utcnow_iso()} {nc}", flush=True)
-        if nc_short:
-            return 0
         t_tick = time.monotonic()
         decision = integration.run_tick(conn, cfg, now=now)
         t_gate = time.monotonic()

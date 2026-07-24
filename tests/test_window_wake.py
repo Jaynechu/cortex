@@ -1111,8 +1111,8 @@ def test_lie_down_returns_next_wake_hm(cfg):
 
 
 def test_lie_down_clamps_next_wake_min_to_ceiling(cfg):
-    """lie_down(next_wake_min=N) clamps to [next_wake_min=21, next_wake_max=240] —
-    the session-facing window, not the floor draw. 999 -> 240."""
+    """lie_down(next_wake_min=N) clamps to [0, next_wake_max=240] — the
+    session-facing window, not the floor draw. 999 -> 240."""
     from datetime import datetime as _dt
     from zoneinfo import ZoneInfo
 
@@ -1133,8 +1133,9 @@ def test_lie_down_clamps_next_wake_min_to_ceiling(cfg):
         expected, (_dt.now(tz) + timedelta(minutes=241)).strftime("%H:%M"))
 
 
-def test_lie_down_clamps_next_wake_min_to_floor(cfg):
-    """A sub-floor value clamps up to next_wake_min=21 (anti-thrash)."""
+def test_lie_down_zero_is_immediate_rewake(cfg):
+    """T3: the merged clamp floor is 0 for every hour — lie_down(next_wake_min=0)
+    schedules an immediate re-wake, never clamped up."""
     from datetime import datetime as _dt
     from zoneinfo import ZoneInfo
 
@@ -1150,9 +1151,31 @@ def test_lie_down_clamps_next_wake_min_to_floor(cfg):
 
     r = lie_down.lie_down(cfg, next_wake_min=0)
     tz = ZoneInfo(cfg["core"]["timezone"])
-    expected = (_dt.now(tz) + timedelta(minutes=21)).strftime("%H:%M")
+    expected = _dt.now(tz).strftime("%H:%M")
     assert r["next_wake"] in (
-        expected, (_dt.now(tz) + timedelta(minutes=22)).strftime("%H:%M"))
+        expected, (_dt.now(tz) + timedelta(minutes=1)).strftime("%H:%M"))
+
+
+def test_lie_down_negative_clamps_to_zero(cfg):
+    """A sub-zero value clamps up to 0 (still immediate, never negative)."""
+    from datetime import datetime as _dt
+    from zoneinfo import ZoneInfo
+
+    cfg["gates"]["night"] = {"start": "23:00", "end": "23:00", "cap": 0}  # disabled
+    conn = db.connect(cfg)
+    conn.execute(
+        "INSERT INTO ct_wake_log (ts, wake, dry_run, explanation) VALUES (?,1,0,?)",
+        (db.utcnow_iso(), "clamp-neg"))
+    conn.commit()
+    wid = conn.execute("SELECT MAX(id) AS id FROM ct_wake_log").fetchone()["id"]
+    conn.close()
+    wake_state.set_awake(cfg, wid, None)
+
+    r = lie_down.lie_down(cfg, next_wake_min=-30)
+    tz = ZoneInfo(cfg["core"]["timezone"])
+    expected = _dt.now(tz).strftime("%H:%M")
+    assert r["next_wake"] in (
+        expected, (_dt.now(tz) + timedelta(minutes=1)).strftime("%H:%M"))
 
 
 # --- resume vs fresh (item 6) -------------------------------------------------

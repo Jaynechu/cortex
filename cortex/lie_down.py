@@ -86,23 +86,17 @@ def _record_tokens(conn, cfg: dict, state: dict, force_slept: str | None) -> int
 
 
 def lie_down(cfg: dict, force_slept: str | None = None, rotate: bool = False,
-             next_wake_min: float | None = None, mode: str | None = None,
+             next_wake_min: float | None = None,
              human_override: bool = False) -> dict:
-    """End the current wake. `next_wake_min` picks the next internal wake:
-    an explicit minutes-from-now (clamped to the day/night/rotate band), or None
-    = a uniform "dice" draw within the floor window (proxy paths: watchdog auto,
-    stale reap, fuse — session-facing dice retired, N required at the MCP/CLI
-    layer). `rotate` respawns a fresh window next wake and lowers the clamp floor
-    to 0 (immediate successor allowed). `mode='night'` = the night package: rotate
-    is forced (light window), the explicit next_wake_min clamps to
-    [night.floor_min, night.floor_max], and the persistent night flag is set as a
-    child of this claim's epoch. `human_override` (explicit ctl minutes) passes
-    next_wake_min unclamped."""
+    """End the current wake. `next_wake_min` picks the next internal wake: an
+    explicit minutes-from-now, clamped to [0, next_wake_max] regardless of hour
+    (0 = immediate re-wake) — or None = a uniform "dice" draw within the floor
+    window (proxy paths: watchdog auto, stale reap, fuse — session-facing dice
+    retired, N required at the MCP/CLI layer). `rotate` respawns a fresh window
+    next wake. `human_override` (explicit ctl minutes) passes next_wake_min
+    unclamped."""
     from cortex.pacemaker.triggers import clamp_next_wake_minutes
 
-    night = mode == "night"
-    if night:
-        rotate = True  # night package always frees context with a fresh window
     # Rotate precondition (P17): refuse a rotate while THIS window's own
     # wake-signal ear tail is still alive — a live monitor task replays its
     # completion notification when the rotated window resumes. Refuse BEFORE
@@ -117,8 +111,7 @@ def lie_down(cfg: dict, force_slept: str | None = None, rotate: bool = False,
                 "refused": _rotate_refuse_text(cfg)}
     if next_wake_min is not None:
         next_wake_min = clamp_next_wake_minutes(
-            next_wake_min, cfg, rotate=rotate, night=night,
-            human_override=human_override)
+            next_wake_min, cfg, human_override=human_override)
     # Atomic awake claim: the watchdog (60s poll) and the tick awake-branch can
     # both run silence_action in the same window; only the caller that clears the
     # awake marker here proceeds, so the ct_wake_log update + floor redraw fire
@@ -176,32 +169,13 @@ def lie_down(cfg: dict, force_slept: str | None = None, rotate: bool = False,
                 # the successor spawns later. Alarm sentinel/ledger/watchdog and
                 # every other wake_state key are untouched.
                 _kill_ear_tails(cfg)
-        # Night flag: set AFTER rotate, BEFORE floor/sentinel — a conditional
-        # CHILD of the claim gen (no bump, same as rotate) so a superseding user
-        # reset suppresses it. The flag persists across wakes until the morning
-        # kick clears it; day lie_downs never touch it.
-        if night:
-            try:
-                wake_state.conditional_mutate(cfg, token, _set_night_mode)
-            except wake_state.StateValidationError:
-                pass  # superseded -> newer epoch owns the window, no flag
         # awake marker already cleared atomically by claim_lie_down at entry. The
-        # sentinel arms at the real due time now (no gate-end clamp — that would
-        # defeat the 120-360 roaming band).
+        # sentinel arms at the real due time now.
         next_floor = _arm_sentinel(cfg, next_floor, token)
         next_wake = _local_hm(next_floor, cfg)
-        if night:
-            # C6 ack: INVISIBLE — audit-log line only, never a window inject.
-            ack = (cfg.get("night", {}).get("ack_text") or "")
-            if ack:
-                try:
-                    ack = ack.format(next_wake=next_wake or "?")
-                except (KeyError, IndexError, ValueError):
-                    pass
-                wake_state.wake_audit(cfg, "night_package", "ack", ack)
         return {"tokens": tokens, "cleared_due": cleared,
                 "force_slept": force_slept, "rotated": rotated,
-                "next_wake": next_wake, "mode": mode}
+                "next_wake": next_wake}
     finally:
         conn.close()
 
@@ -230,21 +204,13 @@ def _mark_rotated(transcript_path):
     return _m
 
 
-def _set_night_mode(d: dict):
-    """Mutator (used under conditional_mutate): set the persistent night flag as
-    a child of the claim gen (no bump). Cleared later by the morning kick."""
-    d["mode"] = "night"
-    return True
-
-
 def _arm_sentinel(cfg: dict, next_floor: datetime, token=None) -> datetime | None:
     """Persist the durable next-wake ledger and arm the one-shot exact-time wake
     sentinel for `next_floor`, all as CONDITIONAL children of the claim `token`.
     Ledger first (survives a compact/kill that loses the sentinel args). Kills the
     recorded predecessor sentinel (never orphaned), then spawns a fresh one
     carrying (gen, state_id, target) as CLI args and conditionally registers its
-    pid. No night-end clamp: the flag drives low-frequency roaming, so a night
-    alarm fires at its real due time.
+    pid.
 
     BUG A: if a user reset / newer claim bumps gen mid-body, the ledger write and
     the pid registration are both dropped under the strict lock; a sentinel that
@@ -447,17 +413,13 @@ def main(argv: list[str] | None = None) -> int:
                         help="respawn a fresh window on the next wake")
     parser.add_argument("--next-wake-min", type=float, required=True,
                         help="minutes until the next internal wake (required, "
-                             "clamped to the day or night band)")
-    parser.add_argument("--mode", default=None, choices=("night",),
-                        help="'night' = night package (forces rotate, night "
-                             "floor band, sets the persistent night flag)")
+                             "clamped to [0, next_wake_max])")
     parser.add_argument("--human-override", action="store_true",
-                        help="explicit ctl minutes pass unclamped (no day/night "
-                             "band floor)")
+                        help="explicit ctl minutes pass unclamped")
     args = parser.parse_args(argv)
     cfg = config.load()
     result = lie_down(cfg, force_slept=args.force_slept, rotate=args.rotate,
-                      next_wake_min=args.next_wake_min, mode=args.mode,
+                      next_wake_min=args.next_wake_min,
                       human_override=args.human_override)
     print(json.dumps(result, ensure_ascii=False))  # surface next_wake harmlessly
     return 0
