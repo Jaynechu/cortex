@@ -784,12 +784,41 @@ def gather(
     }
 
 
+CLI_SHELL = "cli"
+
+
+def _shell_labels(ncfg: dict) -> dict:
+    labels = ncfg.get("shell_labels")
+    return labels if isinstance(labels, dict) else {}
+
+
+def _hosted_shells(cfg: dict, ncfg: dict) -> list[dict]:
+    """Occupancy of every non-cli shell that has a readable ledger. Each shell
+    host (e.g. the tg bridge) writes its own <shell_state_dir>/<shell>.json;
+    absent / unreadable / occupancy-less file -> the shell drops its line.
+    Plain read: writers replace the file atomically."""
+    base = config.shell_state_dir(cfg)
+    out: list[dict] = []
+    for shell, label in _shell_labels(ncfg).items():
+        if shell == CLI_SHELL:
+            continue
+        try:
+            data = json.loads((base / f"{shell}.json").read_text())
+            tokens = int(data["occupancy"])
+        except (OSError, ValueError, TypeError, KeyError):
+            continue
+        out.append({"label": str(label or ""), "tokens": tokens})
+    return out
+
+
 def _build_budget(conn, cfg, now, kv, ncfg) -> dict:
     five = kv.get(_FIVE_HOUR[0])
     seven = kv.get(_SEVEN_DAY[0])
     five_reset = kv.get(_FIVE_HOUR[1])
     seven_reset = kv.get(_SEVEN_DAY[1])
     return {
+        "cli_label": str(_shell_labels(ncfg).get(CLI_SHELL, "")),
+        "shells": _safe(_hosted_shells, cfg, ncfg) or [],
         "five_h_pct": _as_float(five),
         "five_h_reset": _local_hm(five_reset, cfg) if five_reset else None,
         "seven_d_pct": _as_float(seven),
@@ -945,10 +974,14 @@ def render(cfg: dict, now: datetime, data: dict) -> str:
 
 def _render_budget(budget: dict | None) -> str | None:
     """Plan Used line — shows utilization (USED %, statusline口径), pipe-joined:
-    `Plan Used: 5h 5% (04:50) | 7d 50% (1d2h) | Cortex Today 250k/1M 25% |
-    Net Session Token: 50k`. Net Session Token is window occupancy (statusline
+    `Plan Used: 5h 5% (04:50) | 7d 50% (1d2h) | Cortex Today ct-cli 250k/1M 25%
+    | Net Session Token: 50k`. Net Session Token is window occupancy (statusline
     total), not net spend — label kept for cross-system consistency with
-    marrow's threshold line. Any missing datum drops just its segment."""
+    marrow's threshold line. Any missing datum drops just its segment.
+
+    One `Cortex Today` line per shell against the shared daily budget: the cli
+    shell rides the Plan Used line, every other hosted shell (budget["shells"])
+    adds its own line below."""
     if not budget:
         return None
     parts = []
@@ -966,12 +999,22 @@ def _render_budget(budget: dict | None) -> str | None:
         parts.append(seg)
     daily = int(budget.get("daily_budget", 1_000_000))
     today = int(budget.get("today_tokens", 0))
-    pct = (today / daily * 100) if daily else 0
-    parts.append(f"Cortex Today {today // 1000}k/{_fmt_budget(daily)} {pct:.0f}%")
+    parts.append(_today_seg(budget.get("cli_label"), today, daily))
     window = budget.get("window_tokens")
     if window is not None:
         parts.append(f"Net Session Token: {window // 1000}k")
-    return "Plan Used: " + " | ".join(parts) if parts else None
+    if not parts:
+        return None
+    lines = ["Plan Used: " + " | ".join(parts)]
+    for shell in budget.get("shells") or []:
+        lines.append(_today_seg(shell.get("label"), int(shell.get("tokens", 0)), daily))
+    return "\n".join(lines)
+
+
+def _today_seg(label, tokens: int, daily: int) -> str:
+    pct = (tokens / daily * 100) if daily else 0
+    head = f"{label} " if label else ""
+    return f"Cortex Today {head}{tokens // 1000}k/{_fmt_budget(daily)} {pct:.0f}%"
 
 
 def _fmt_budget(n: int) -> str:

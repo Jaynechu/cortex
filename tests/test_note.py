@@ -76,6 +76,7 @@ def test_render_full_note(cfg):
             "five_h_pct": 5.0, "five_h_reset": "04:50",
             "seven_d_pct": 50.0, "seven_d_countdown": "1d2h",
             "window_tokens": 50000, "today_tokens": 250000, "daily_budget": 1_000_000,
+            "cli_label": "ct-cli",
         },
         "active_app": "Google Chrome",
         "pending": [{"hm": "00:18", "intent": "去看看老婆睡了没"}],
@@ -89,7 +90,7 @@ def test_render_full_note(cfg):
     assert text.startswith("Now: 14:30 Wed | Last active: 12min ago")
     # Plan Used line: USED %, pipe-joined, template口径
     assert ("Plan Used: 5h 5% (04:50) | 7d 50% (1d2h) | "
-            "Cortex Today 250k/1M 25% | Net Session Token: 50k") in text
+            "Cortex Today ct-cli 250k/1M 25% | Net Session Token: 50k") in text
     assert "Active (Mac): Google Chrome" in text
     assert "Pending self-schedule: due 00:18 去看看老婆睡了没" in text
     assert "### Replay" in text
@@ -413,6 +414,55 @@ def test_render_budget_segments_optional(cfg):
          "seven_d_countdown": None, "window_tokens": None,
          "today_tokens": 50000, "daily_budget": 1_000_000}
     assert note._render_budget(b) == "Plan Used: Cortex Today 50k/1M 5%"
+
+
+def _shell_budget(shells):
+    return {"five_h_pct": None, "five_h_reset": None, "seven_d_pct": None,
+            "seven_d_countdown": None, "window_tokens": None,
+            "today_tokens": 250_000, "daily_budget": 1_000_000,
+            "cli_label": "ct-cli", "shells": shells}
+
+
+def test_render_budget_one_line_per_shell():
+    """Two shells -> two Cortex Today lines, same daily denominator."""
+    out = note._render_budget(_shell_budget([{"label": "ct-tg", "tokens": 60_000}]))
+    assert out.split("\n") == [
+        "Plan Used: Cortex Today ct-cli 250k/1M 25%",
+        "Cortex Today ct-tg 60k/1M 6%",
+    ]
+
+
+def test_render_budget_no_hosted_shell_keeps_cli_line_only():
+    assert note._render_budget(_shell_budget([])) == \
+        "Plan Used: Cortex Today ct-cli 250k/1M 25%"
+
+
+def _shell_dir(cfg, tmp_path):
+    cfg["paths"]["shell_state_dir"] = str(tmp_path / "shells")
+    (tmp_path / "shells").mkdir()
+    return tmp_path / "shells"
+
+
+def test_hosted_shells_reads_ledger_occupancy(cfg, tmp_path):
+    d = _shell_dir(cfg, tmp_path)
+    (d / "tg.json").write_text(json.dumps({"session_id": "x", "occupancy": 60_000}))
+    assert note._hosted_shells(cfg, cfg["note"]) == [
+        {"label": "ct-tg", "tokens": 60_000}]
+
+
+@pytest.mark.parametrize("body", [None, "{not json", json.dumps({"session_id": "x"})])
+def test_hosted_shells_absent_or_corrupt_drops_the_line(cfg, tmp_path, body):
+    d = _shell_dir(cfg, tmp_path)
+    if body is not None:
+        (d / "tg.json").write_text(body)
+    assert note._hosted_shells(cfg, cfg["note"]) == []
+
+
+def test_hosted_shells_skips_the_cli_shell(cfg, tmp_path):
+    """cli rides today_tokens — its ledger, if any, is never read here."""
+    d = _shell_dir(cfg, tmp_path)
+    (d / "cli.json").write_text(json.dumps({"occupancy": 999}))
+    assert note._hosted_shells(cfg, cfg["note"]) == []
 
 
 def test_render_budget_shows_used_pct():

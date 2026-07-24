@@ -45,6 +45,10 @@ _DEFAULTS: dict[str, Any] = {
         "ny_db_pages": "",
         "wake_timing_log": "",
         "wake_audit_log": "",
+        # Non-cli shell ledgers (<dir>/<shell>.json, written by each shell's
+        # host). Mirror of marrow [cortex].shell_state_dir. Empty =
+        # <marrow config dir>/state/shells.
+        "shell_state_dir": "",
     },
     # Per-wake safety valve: cap tokens spent in one wake; breach or the marrow
     # wall-clock timeout (marrow.call_timeout_s) forces a fresh session next wake.
@@ -202,6 +206,12 @@ _DEFAULTS: dict[str, Any] = {
         # Daily wake-token (NET spend) budget the "Cortex Today X/Y" segment
         # renders against — must match gates.daily_budget.tokens (display=gate).
         "daily_budget": 1_000_000,
+        # Display label per shell on the "Cortex Today" lines (one line per
+        # shell, shared daily_budget denominator). cli reads this repo's own
+        # today-token sum; every other key reads occupancy from
+        # <paths.shell_state_dir>/<shell>.json and drops its line when that
+        # file is absent/unreadable. "" as a label renders the line unlabelled.
+        "shell_labels": {"cli": "ct-cli", "tg": "ct-tg"},
         # Pending self-schedule entries surface only when due within this window.
         "pending_window_min": 15,
         # Prior window force-slept without a handoff -> backfill hint line.
@@ -358,6 +368,15 @@ def self_schedule_path(cfg: dict) -> Path:
 def handoff_path(cfg: dict) -> Path:
     raw = cfg["paths"].get("handoff_file") or ""
     return Path(raw).expanduser() if raw else DEFAULT_HANDOFF
+
+
+def shell_state_dir(cfg: dict) -> Path:
+    """Directory holding the non-cli shell ledgers (<shell>.json). Mirror of
+    marrow's [cortex].shell_state_dir; empty = <marrow config dir>/state/shells."""
+    raw = cfg["paths"].get("shell_state_dir") or ""
+    if raw:
+        return Path(raw).expanduser()
+    return marrow_db_path(cfg).parent / "state" / "shells"
 
 
 def cortex_home(cfg: dict) -> Path:
