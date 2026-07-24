@@ -105,3 +105,51 @@ def test_user_name_defaults_when_marrow_config_absent(tmp_path):
     cfg = config.load(tmp_path / "cortex.toml")
     cfg["paths"]["marrow_db"] = str(tmp_path / "does_not_exist" / "marrow.db")
     assert config.user_name(cfg) == "the user"
+
+
+# ── T8: per-shell switch ([core].shells) ──────────────────────────────────────
+
+def test_shells_defaults_to_cli(tmp_path):
+    cfg = config.load(tmp_path / "cortex.toml")
+    assert cfg["core"]["shells"] == ["cli"]
+    assert config.shell_enabled(cfg) is True
+    assert config.shell_enabled(cfg, "tg") is False
+
+
+def test_shells_override_switches_cli_off(tmp_path):
+    toml_path = tmp_path / "cortex.toml"
+    toml_path.write_text('[core]\nshells = ["tg"]\n')
+    cfg = config.load(toml_path)
+    assert config.shell_enabled(cfg) is False
+    assert config.shell_enabled(cfg, "TG") is True
+
+
+def test_pacemaker_tick_noops_when_cli_shell_off(tmp_path, monkeypatch, capsys):
+    """Heartbeat entry exits before touching the DB when cli is not a shell."""
+    from cortex import pacemaker_tick
+
+    cfg = config.load(tmp_path / "cortex.toml")
+    cfg["core"]["shells"] = []
+    monkeypatch.setattr(pacemaker_tick.config, "load", lambda: cfg)
+
+    def _boom(*a, **kw):
+        raise AssertionError("db.connect must not run with the cli shell off")
+
+    monkeypatch.setattr(pacemaker_tick.db, "connect", _boom)
+    assert pacemaker_tick.main() == 0
+    assert "cli shell off" in capsys.readouterr().out
+
+
+def test_watchdog_noops_when_cli_shell_off(tmp_path, monkeypatch):
+    """Watchdog entry never writes its pidfile with the cli shell off."""
+    from cortex import watchdog
+
+    cfg = config.load(tmp_path / "cortex.toml")
+    cfg["core"]["shells"] = []
+    monkeypatch.setattr(watchdog.config, "load", lambda: cfg)
+
+    def _boom(*a, **kw):
+        raise AssertionError("watchdog must not start with the cli shell off")
+
+    monkeypatch.setattr(watchdog.wake_state, "watchdog_pidfile_path", _boom)
+    assert watchdog.main([]) == 0

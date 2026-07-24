@@ -3,6 +3,9 @@
 
 [core]
 timezone = "Australia/Melbourne"
+# Shell ids running as cortex shells (mirror of marrow [cortex].shells).
+# "cli" absent = this repo's heartbeat (pacemaker tick + watchdog) stays down.
+shells = ["cli"]
 
 [paths]
 # Empty = use the default paths listed in comments.

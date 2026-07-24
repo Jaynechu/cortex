@@ -511,6 +511,9 @@ def run(cfg: dict) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     cfg = config.load()
+    if not config.shell_enabled(cfg):
+        _log("cli shell off ([core].shells): watchdog not started")
+        return 0
     pidfile = wake_state.watchdog_pidfile_path(cfg)
     pidfile.parent.mkdir(parents=True, exist_ok=True)
     pidfile.write_text(str(os.getpid()))

@@ -29,7 +29,9 @@ DEFAULT_MACHINE_LINE_MARKERS = ["[TUCK-IN]", "[NEW ROUND]",
                                 "[FUSE]", "[CTL]", "[CMD"]
 
 _DEFAULTS: dict[str, Any] = {
-    "core": {"timezone": "Australia/Melbourne"},
+    # shells = the shell ids running as cortex shells (mirror of marrow
+    # [cortex].shells). "cli" absent = this repo's heartbeat stays down.
+    "core": {"timezone": "Australia/Melbourne", "shells": ["cli"]},
     "paths": {
         "marrow_db": "",
         "knowledgec_db": "",
@@ -238,6 +240,15 @@ _SECTIONS = (
     "tick", "pacemaker", "gates", "triggers", "marrow",
     "wake", "note", "kick", "outbox",
 )
+
+
+def shell_enabled(cfg: dict, shell: str = "cli") -> bool:
+    """Is `shell` listed in [core].shells? The cli heartbeat entries exit early
+    when its own shell is switched off."""
+    raw = cfg.get("core", {}).get("shells")
+    if not isinstance(raw, list):
+        raw = ["cli"]
+    return shell.strip().lower() in [str(s).strip().lower() for s in raw]
 
 
 def wake_clamps(cfg: dict) -> dict[str, int]:

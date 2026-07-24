@@ -269,6 +269,10 @@ def _reconcile(conn, cfg: dict, st: dict, now) -> str | None:
 
 def main() -> int:
     cfg = config.load()
+    if not config.shell_enabled(cfg):
+        print(f"{db.utcnow_iso()} cli shell off ([core].shells): tick skipped",
+              flush=True)
+        return 0
     conn = db.connect(cfg)
     try:
         st = wake_state.load(cfg)

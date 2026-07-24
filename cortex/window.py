@@ -10,7 +10,7 @@ prompt is the only trace, no notification, but carries the same bell marker as
 the ear so the marrow UserPromptSubmit hook detects it and injects the full
 wakeup note. An alive resident window is woken by the signal-file ear (a Monitor
 tailing wake_signal.log) instead. The window body is one `claude` running in
-cortex_home with MARROW_CORTEX=1 set explicitly (identity marker).
+cortex_home with MARROW_CORTEX=cli set explicitly (shell id + identity marker).
 """
 from __future__ import annotations
 
@@ -186,7 +186,7 @@ def fresh_initial_prompt(cfg: dict, now, token=None) -> str:
 def launch_command(cfg: dict, initial_prompt: str | None = None,
                    resume_sid: str | None = None) -> str:
     # Identity + channel markers set explicitly (hooks derive channel from
-    # MARROW_CHANNEL; MARROW_CORTEX=1 = cortex identity / kickout immunity).
+    # MARROW_CHANNEL; MARROW_CORTEX=cli = shell id / kickout immunity).
     # --model/--effort pin tier + reasoning so the window never rides the
     # system default. Reused by every cortex window spawn. A non-empty
     # initial_prompt (fresh_initial_prompt: emoji + bell marker) is baked in as
@@ -209,7 +209,7 @@ def launch_command(cfg: dict, initial_prompt: str | None = None,
     if cfg["wake"].get("skip_permissions", True):
         flags += " --dangerously-skip-permissions"
     arg = f" {_shq(initial_prompt)}" if initial_prompt else ""
-    return f"cd {home} && MARROW_CORTEX=1 MARROW_CHANNEL=ct {cmd}{flags}{arg}"
+    return f"cd {home} && MARROW_CORTEX=cli MARROW_CHANNEL=ct {cmd}{flags}{arg}"
 
 
 def _shq(text: str) -> str:
