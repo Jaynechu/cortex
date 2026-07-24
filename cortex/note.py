@@ -792,22 +792,35 @@ def _shell_labels(ncfg: dict) -> dict:
     return labels if isinstance(labels, dict) else {}
 
 
-def _hosted_shells(cfg: dict, ncfg: dict) -> list[dict]:
-    """Occupancy of every non-cli shell that has a readable ledger. Each shell
-    host (e.g. the tg bridge) writes its own <shell_state_dir>/<shell>.json;
-    absent / unreadable / occupancy-less file -> the shell drops its line.
-    Plain read: writers replace the file atomically."""
-    base = config.shell_state_dir(cfg)
+def _hosted_shells(cfg: dict, ncfg: dict, now: datetime) -> list[dict]:
+    """Today-tokens + occupancy of every non-cli shell that has a readable
+    ledger. Each shell host (e.g. the tg bridge) writes its own
+    <shell_state_dir>/<shell>.json; absent / unreadable / occupancy-less file
+    -> the shell drops its line. Plain read: writers replace the file
+    atomically.
+
+    Today mirrors the cli figure: finished sessions' finals (tokens_today_base,
+    folded by the host) + the live session occupancy. A tokens_date other than
+    today's local date means the host has not rolled over yet -> base 0."""
+    base_dir = config.shell_state_dir(cfg)
+    today = now.astimezone(_tz(cfg)).strftime("%Y-%m-%d")
     out: list[dict] = []
     for shell, label in _shell_labels(ncfg).items():
         if shell == CLI_SHELL:
             continue
         try:
-            data = json.loads((base / f"{shell}.json").read_text())
-            tokens = int(data["occupancy"])
+            data = json.loads((base_dir / f"{shell}.json").read_text())
+            occupancy = int(data["occupancy"])
         except (OSError, ValueError, TypeError, KeyError):
             continue
-        out.append({"label": str(label or ""), "tokens": tokens})
+        base = 0
+        if str(data.get("tokens_date") or "") == today:
+            try:
+                base = max(int(data.get("tokens_today_base") or 0), 0)
+            except (TypeError, ValueError):
+                base = 0
+        out.append({"label": str(label or ""), "today": base + occupancy,
+                    "occupancy": occupancy})
     return out
 
 
@@ -818,7 +831,7 @@ def _build_budget(conn, cfg, now, kv, ncfg) -> dict:
     seven_reset = kv.get(_SEVEN_DAY[1])
     return {
         "cli_label": str(_shell_labels(ncfg).get(CLI_SHELL, "")),
-        "shells": _safe(_hosted_shells, cfg, ncfg) or [],
+        "shells": _safe(_hosted_shells, cfg, ncfg, now) or [],
         "five_h_pct": _as_float(five),
         "five_h_reset": _local_hm(five_reset, cfg) if five_reset else None,
         "seven_d_pct": _as_float(seven),
@@ -981,7 +994,8 @@ def _render_budget(budget: dict | None) -> str | None:
 
     One `Cortex Today` line per shell against the shared daily budget: the cli
     shell rides the Plan Used line, every other hosted shell (budget["shells"])
-    adds its own line below."""
+    adds its own line below with the same two figures — today's cumulative
+    tokens and the live window occupancy."""
     if not budget:
         return None
     parts = []
@@ -1002,12 +1016,15 @@ def _render_budget(budget: dict | None) -> str | None:
     parts.append(_today_seg(budget.get("cli_label"), today, daily))
     window = budget.get("window_tokens")
     if window is not None:
-        parts.append(f"Net Session Token: {window // 1000}k")
+        parts.append(_net_seg(int(window)))
     if not parts:
         return None
     lines = ["Plan Used: " + " | ".join(parts)]
     for shell in budget.get("shells") or []:
-        lines.append(_today_seg(shell.get("label"), int(shell.get("tokens", 0)), daily))
+        lines.append(" | ".join([
+            _today_seg(shell.get("label"), int(shell.get("today", 0)), daily),
+            _net_seg(int(shell.get("occupancy", 0))),
+        ]))
     return "\n".join(lines)
 
 
@@ -1015,6 +1032,10 @@ def _today_seg(label, tokens: int, daily: int) -> str:
     pct = (tokens / daily * 100) if daily else 0
     head = f"{label} " if label else ""
     return f"Cortex Today {head}{tokens // 1000}k/{_fmt_budget(daily)} {pct:.0f}%"
+
+
+def _net_seg(tokens: int) -> str:
+    return f"Net Session Token: {tokens // 1000}k"
 
 
 def _fmt_budget(n: int) -> str:

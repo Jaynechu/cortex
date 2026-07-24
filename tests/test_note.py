@@ -424,11 +424,13 @@ def _shell_budget(shells):
 
 
 def test_render_budget_one_line_per_shell():
-    """Two shells -> two Cortex Today lines, same daily denominator."""
-    out = note._render_budget(_shell_budget([{"label": "ct-tg", "tokens": 60_000}]))
-    assert out.split("\n") == [
-        "Plan Used: Cortex Today ct-cli 250k/1M 25%",
-        "Cortex Today ct-tg 60k/1M 6%",
+    """Hosted shell line carries the same two figures as the cli line: today's
+    tokens over the shared denominator, then the live window occupancy."""
+    b = _shell_budget([{"label": "ct-tg", "today": 194_000, "occupancy": 68_000}])
+    b["window_tokens"] = 50_000
+    assert note._render_budget(b).split("\n") == [
+        "Plan Used: Cortex Today ct-cli 250k/1M 25% | Net Session Token: 50k",
+        "Cortex Today ct-tg 194k/1M 19% | Net Session Token: 68k",
     ]
 
 
@@ -443,11 +445,25 @@ def _shell_dir(cfg, tmp_path):
     return tmp_path / "shells"
 
 
-def test_hosted_shells_reads_ledger_occupancy(cfg, tmp_path):
+def test_hosted_shells_today_is_base_plus_occupancy(cfg, tmp_path):
     d = _shell_dir(cfg, tmp_path)
-    (d / "tg.json").write_text(json.dumps({"session_id": "x", "occupancy": 60_000}))
-    assert note._hosted_shells(cfg, cfg["note"]) == [
-        {"label": "ct-tg", "tokens": 60_000}]
+    (d / "tg.json").write_text(json.dumps(
+        {"session_id": "x", "occupancy": 68_000,
+         "tokens_today_base": 126_000, "tokens_date": "2026-07-08"}))
+    assert note._hosted_shells(cfg, cfg["note"], NOW) == [
+        {"label": "ct-tg", "today": 194_000, "occupancy": 68_000}]
+
+
+@pytest.mark.parametrize("ledger", [
+    {"occupancy": 68_000},  # host has not folded anything yet
+    {"occupancy": 68_000, "tokens_today_base": 126_000, "tokens_date": "2026-07-07"},
+    {"occupancy": 68_000, "tokens_today_base": "oops", "tokens_date": "2026-07-08"},
+])
+def test_hosted_shells_stale_or_bad_base_counts_as_zero(cfg, tmp_path, ledger):
+    d = _shell_dir(cfg, tmp_path)
+    (d / "tg.json").write_text(json.dumps(ledger))
+    assert note._hosted_shells(cfg, cfg["note"], NOW) == [
+        {"label": "ct-tg", "today": 68_000, "occupancy": 68_000}]
 
 
 @pytest.mark.parametrize("body", [None, "{not json", json.dumps({"session_id": "x"})])
@@ -455,14 +471,14 @@ def test_hosted_shells_absent_or_corrupt_drops_the_line(cfg, tmp_path, body):
     d = _shell_dir(cfg, tmp_path)
     if body is not None:
         (d / "tg.json").write_text(body)
-    assert note._hosted_shells(cfg, cfg["note"]) == []
+    assert note._hosted_shells(cfg, cfg["note"], NOW) == []
 
 
 def test_hosted_shells_skips_the_cli_shell(cfg, tmp_path):
     """cli rides today_tokens — its ledger, if any, is never read here."""
     d = _shell_dir(cfg, tmp_path)
     (d / "cli.json").write_text(json.dumps({"occupancy": 999}))
-    assert note._hosted_shells(cfg, cfg["note"]) == []
+    assert note._hosted_shells(cfg, cfg["note"], NOW) == []
 
 
 def test_render_budget_shows_used_pct():

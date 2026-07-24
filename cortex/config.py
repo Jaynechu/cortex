@@ -207,8 +207,9 @@ _DEFAULTS: dict[str, Any] = {
         # renders against — must match gates.daily_budget.tokens (display=gate).
         "daily_budget": 1_000_000,
         # Display label per shell on the "Cortex Today" lines (one line per
-        # shell, shared daily_budget denominator). cli reads this repo's own
-        # today-token sum; every other key reads occupancy from
+        # shell, shared daily_budget denominator, same two figures on each:
+        # today's tokens + live occupancy). cli reads this repo's own today-token
+        # sum; every other key reads tokens_today_base + occupancy from
         # <paths.shell_state_dir>/<shell>.json and drops its line when that
         # file is absent/unreadable. "" as a label renders the line unlabelled.
         "shell_labels": {"cli": "ct-cli", "tg": "ct-tg"},
