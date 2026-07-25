@@ -236,12 +236,32 @@ _DEFAULTS: dict[str, Any] = {
     "outbox": {
         "inject_header": "📮 Message from {channel}·{sid4} {time}",
     },
+    # cortex.daemon: the always-on cli timing loop (scheduler-hosted). Owns the
+    # reconcile cadence and the business deadline (next_wake_at / silence round).
+    "daemon": {
+        "enabled": True,
+        # Scheduler shell key. The reconcile deadline uses "<shell>.reconcile";
+        # lie_down's socket kick sends "<shell>" (the business key).
+        "shell": "cli",
+        # Kick socket. "" -> <state_dir>/cortex-daemon.sock. Keep the resolved
+        # path under 104 bytes (AF_UNIX limit) — checked at resolve time.
+        "socket_path": "",
+        "kick_timeout_sec": 1.0,
+        # Reconcile cadence (also the scheduler's max sleep).
+        "reconcile_interval_sec": 60,
+        # Re-arm gap for the business key when nothing is pending.
+        "safety_horizon_sec": 300,
+        # Re-arm gap after a held/failed business fire (anti-spin).
+        "retry_interval_sec": 60,
+        # Singleton lock. "" -> <state_dir>/daemon.lock.
+        "lock_path": "",
+    },
 }
 
 _SECTIONS = (
     "core", "paths", "knowledgec", "geofence", "health",
     "tick", "pacemaker", "gates", "triggers", "marrow",
-    "wake", "note", "kick", "outbox",
+    "wake", "note", "kick", "outbox", "daemon",
 )
 
 
@@ -384,6 +404,21 @@ def state_dir(cfg: dict) -> Path:
     d = cortex_home(cfg) / "state"
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+_SOCKET_PATH_MAX = 104  # macOS sun_path (AF_UNIX) capacity, including the NUL
+
+
+def daemon_socket_path(cfg: dict) -> Path:
+    """The wake daemon's kick socket. [daemon].socket_path, or
+    <state_dir>/cortex-daemon.sock when unset. Raises ValueError when the
+    resolved path cannot fit an AF_UNIX address (a bind would fail at runtime)."""
+    raw = str((cfg.get("daemon") or {}).get("socket_path") or "").strip()
+    p = Path(raw).expanduser() if raw else state_dir(cfg) / "cortex-daemon.sock"
+    if len(str(p).encode("utf-8")) >= _SOCKET_PATH_MAX:
+        raise ValueError(
+            f"[daemon].socket_path too long for AF_UNIX ({_SOCKET_PATH_MAX} bytes): {p}")
+    return p
 
 
 def wishlist_path(cfg: dict) -> Path:

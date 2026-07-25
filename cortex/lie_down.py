@@ -236,14 +236,12 @@ def _notify_daemon(cfg: dict) -> None:
     ledger immediately instead of waiting for its safety tick. Silent no-op when
     unconfigured or the daemon is down."""
     dcfg = cfg.get("daemon") or {}
-    path = str(dcfg.get("socket_path") or "").strip()
-    if not path:
-        return
     shell = str(dcfg.get("shell") or "cli")
     try:
+        path = config.daemon_socket_path(cfg)
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
             s.settimeout(float(dcfg.get("kick_timeout_sec", 1.0)))
-            s.connect(os.path.expanduser(path))
+            s.connect(str(path))
             s.sendall((shell + "\n").encode("utf-8"))
     except (OSError, ValueError):
         pass

@@ -263,3 +263,17 @@ wishlist_header = "# Wishlist\n\n(owed treats / wants / self-rewards — append-
 # Cross-channel note delivery into the cortex window.
 [outbox]
 inject_header = "📮 Message from {channel}·{sid4} {time}"  # header for a ct-targeted outbox note rendered by the wakeup note; mirror of marrow [outbox].inject_header (keep in sync). {channel}/{sid4}/{time} from the outbox row; "" = body only
+
+# cortex.daemon — the always-on cli timing loop (scheduler-hosted; replaces the
+# launchd pacemaker cron). Two deadlines: "<shell>.reconcile" on a fixed cadence
+# and "<shell>" for business (next_wake_at ledger / silence free-round). lie_down
+# kicks "<shell>" over the socket so a new alarm is picked up instantly.
+[daemon]
+enabled = true
+shell = "cli"                  # scheduler shell key; reconcile key = "<shell>.reconcile"
+socket_path = ""               # kick socket; "" -> <cortex_home>/state/cortex-daemon.sock (must stay under 104 bytes — AF_UNIX limit)
+kick_timeout_sec = 1.0         # lie_down -> daemon kick connect/send timeout
+reconcile_interval_sec = 60    # reconcile cadence (also the scheduler's max sleep)
+safety_horizon_sec = 300       # business re-arm gap when nothing is pending
+retry_interval_sec = 60        # business re-arm gap after a held/failed fire (anti-spin)
+lock_path = ""                 # singleton lock; "" -> <cortex_home>/state/daemon.lock
