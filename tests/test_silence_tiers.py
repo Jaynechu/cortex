@@ -64,6 +64,13 @@ def _signal_lines(cfg):
     return "\n".join(_TYPED).splitlines()
 
 
+def _staged(cfg):
+    """The INVISIBLE free-round payload cortex staged for the marrow hook (the
+    note never reaches the screen — only the short marker line is typed)."""
+    p = wake_state.free_round_note_path(cfg)
+    return p.read_text(encoding="utf-8") if p.exists() else ""
+
+
 # --- no-user wake (same idle bar, timed from awake_since) ---------------------
 
 def test_no_user_wake_idles_to_free_round(awake_window):
@@ -207,7 +214,7 @@ def test_kick_round_fires_once_then_falls_through(awake_window):
 def test_free_round_line_carries_configured_copy(cfg):
     """Default free-round line renders the configured tuck_in_text (T2
     user-approved copy) with the [NEW ROUND] marker."""
-    line, _pending = watchdog._build_tuck_in_line(cfg, mins=17.0)
+    line, _note, _pending = watchdog._build_tuck_in_line(cfg, mins=17.0)
     assert "[NEW ROUND]" in line
     for stray in ("{mins}", "{user}", "{n}", "{cap}"):
         assert stray not in line
@@ -217,7 +224,7 @@ def test_free_round_template_still_substitutes_placeholders(cfg):
     """The substitution mechanism survives for a custom template: {mins}/{user}
     still fill."""
     cfg["wake"]["tuck_in_text"] = "⏳ [NEW ROUND] {mins} min since {user}"
-    line, _pending = watchdog._build_tuck_in_line(cfg, mins=17.0)
+    line, _note, _pending = watchdog._build_tuck_in_line(cfg, mins=17.0)
     assert "17 min" in line
     assert "the user" in line  # no marrow config -> fallback
 
@@ -225,8 +232,8 @@ def test_free_round_template_still_substitutes_placeholders(cfg):
 # --- free-round note (every injection carries one) -----------------------------
 
 def test_kick_carrier_tuck_in_carries_fresh_note(awake_window):
-    """A kick-carrier injection is followed by a freshly rendered note (a `Now:`
-    line)."""
+    """A kick-carrier injection carries a freshly rendered note (a `Now:` line)
+    — staged INVISIBLY for the marrow hook, never typed on screen."""
     cfg = awake_window
     wake_state.update(cfg, user_replied_this_wake=True)
     wake_state.mark_kick_round(cfg)
@@ -234,17 +241,20 @@ def test_kick_carrier_tuck_in_carries_fresh_note(awake_window):
     assert a1 == "kick free-round appended"
     text = "\n".join(_signal_lines(cfg))
     assert "[NEW ROUND]" in text
-    assert "Now:" in text  # fresh note appended
+    assert "Now:" not in text        # note stays off the screen
+    assert "Now:" in _staged(cfg)    # delivered invisibly instead
 
 
 def test_plain_silence_gate_tuck_in_also_carries_note(awake_window):
-    """The silence-cycle free-round ALSO carries a freshly rendered note."""
+    """The silence-cycle free-round ALSO carries a freshly rendered note, also
+    invisible: marker on screen, note staged for the hook."""
     cfg = awake_window
     wake_state.update(cfg, user_replied_this_wake=True)
     watchdog.silence_action(cfg, silent_min=21.0)
     text = "\n".join(_signal_lines(cfg))
     assert "[NEW ROUND]" in text
-    assert "Now:" in text  # note appended
+    assert "Now:" not in text
+    assert "Now:" in _staged(cfg)
 
 
 def test_free_round_note_toggle_off(awake_window):
@@ -256,6 +266,7 @@ def test_free_round_note_toggle_off(awake_window):
     text = "\n".join(_signal_lines(cfg))
     assert "[NEW ROUND]" in text
     assert "Now:" not in text
+    assert _staged(cfg) == ""  # nothing staged either
 
 
 def test_free_round_note_render_failure_falls_back(awake_window, monkeypatch):
@@ -323,8 +334,8 @@ def test_two_consecutive_injections_second_diffs_against_first(awake_window):
     wake_state.mark_kick_round(cfg)
     a1 = watchdog.silence_action(cfg, silent_min=0.0)
     assert a1 == "kick free-round appended"
-    text1 = "\n".join(_signal_lines(cfg))
-    assert "round one message" in text1
+    staged1 = _staged(cfg)
+    assert "round one message" in staged1
 
     # Activity on another channel lands between rounds.
     conn = db.connect(cfg)
@@ -338,12 +349,8 @@ def test_two_consecutive_injections_second_diffs_against_first(awake_window):
     wake_state.mark_kick_round(cfg)
     a2 = watchdog.silence_action(cfg, silent_min=0.0)
     assert a2 == "kick free-round appended"
-    joined = "\n".join(_signal_lines(cfg))
-    # Note now precedes its marker (intel-before-marker): round 2's note sits
-    # BETWEEN the first marker and the second. Slice from just after the first
-    # [NEW ROUND] -> only round 2's content; round 1's must not repeat.
-    first_marker_end = joined.index("[NEW ROUND]") + len("[NEW ROUND]")
-    text2_only = joined[first_marker_end:]
+    # Staging appends, so everything past round 1's payload is round 2's note.
+    text2_only = _staged(cfg)[len(staged1):]
     assert "round two message" in text2_only
     assert "round one message" not in text2_only
 
@@ -434,8 +441,10 @@ def test_ear_delivery_and_baseline_advance_are_atomic_under_shared_lock(
     assert watchdog.silence_action(cfg, silent_min=0.0) == \
         "kick free-round appended"
 
-    # Ear line landed AND the shared lock was held while it was written.
-    assert "delivered row" in "\n".join(_signal_lines(cfg))
+    # Round landed (marker typed, note staged) AND the shared lock was held
+    # while it was written.
+    assert "[NEW ROUND]" in "\n".join(_signal_lines(cfg))
+    assert "delivered row" in _staged(cfg)
     assert probe["lock_held_during_ear_write"] is True
     # Baseline advanced in the same section -> no stale window for the reader.
     assert wake_state.get_last_note_ts(cfg) == "2026-07-08T03:00:00+00:00"
@@ -490,12 +499,15 @@ def test_free_round_visible_round_claims_ct_note_with_audit(awake_window):
     wake_state.mark_kick_round(cfg)
     assert watchdog.silence_action(cfg, silent_min=0.0) == \
         "kick free-round appended"
-    # Note claimed by the free-round path and surfaced on the ear.
+    # Note claimed by the free-round path and surfaced in its own round: the
+    # short marker is typed, the body rides the invisible staging file.
     row = _outbox_row(cfg)
     assert row["status"] == "sent"
     assert row["claimed_by"] == "cortex.free_round"
     assert row["claimed_at"] is not None
-    assert "睡了吗" in "\n".join(_signal_lines(cfg))
+    assert "睡了吗" not in "\n".join(_signal_lines(cfg))
+    assert "睡了吗" in _staged(cfg)
+    assert "\n".join(_signal_lines(cfg)).count("[NEW ROUND]") == 2
 
 
 def test_free_round_stale_epoch_does_not_claim_ct_note(awake_window, monkeypatch):
@@ -515,15 +527,26 @@ def test_free_round_stale_epoch_does_not_claim_ct_note(awake_window, monkeypatch
     assert row["claimed_by"] is None
 
 
-def test_free_round_note_precedes_choice_marker(cfg):
-    """Acceptance (intel before marker): the rendered note (a `Now:` line) comes
-    ABOVE the [NEW ROUND] marker, and the marker is the LAST line of the block
-    so the ear's is_machine_line still matches the single-write chunk."""
-    line, _pending = watchdog._build_tuck_in_line(cfg, mins=17.0)
-    assert "Now:" in line and "[NEW ROUND]" in line
-    assert line.index("Now:") < line.index("[NEW ROUND]")  # intel first
-    # Marker on the final non-empty line -> single-write block stays machine-tagged.
-    assert line.rstrip().splitlines()[-1].lstrip().startswith("⏳ [NEW ROUND]")
+def test_free_round_typed_line_is_the_marker_only(cfg):
+    """The typed line is the SHORT marker alone (one line, machine-tagged); the
+    rendered note is returned separately for invisible delivery."""
+    line, note_text, _pending = watchdog._build_tuck_in_line(cfg, mins=17.0)
+    assert line.strip().splitlines() == [line.strip()]      # single line
+    assert line.lstrip().startswith("⏳ [NEW ROUND]")
+    assert "Now:" not in line
+    assert "Now:" in note_text                              # note rides invisibly
+
+
+def test_failed_type_unstages_the_invisible_note(awake_window, monkeypatch):
+    """No orphan payload: if the marker never lands, the staged note is dropped
+    (a later marker turn must not pick up an undelivered round) and the diff
+    baseline does not advance (FIX 6)."""
+    cfg = awake_window
+    wake_state.update(cfg, user_replied_this_wake=True)
+    monkeypatch.setattr(watchdog, "_type_tuck_in_line", lambda c, line: False)
+    assert watchdog.silence_action(cfg, silent_min=21.0) == "free-round appended"
+    assert _staged(cfg) == ""
+    assert wake_state.get_last_note_ts(cfg) is None
 
 
 def _fresh_transcript(cfg):

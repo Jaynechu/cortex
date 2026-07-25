@@ -1,9 +1,11 @@
 """Per-wake watchdog: spawned at note injection, killed at lie_down, never
 resident. Every poll_sec it reads the transcript (mtime + window tokens) and
 the awake marker, applying two judgements:
-  (b) silent past silent_max_min -> inject one free-round note + marker line and
-      re-arm the same timer (perpetual cycle, never forces sleep). User replies
-      keep the transcript mtime fresh, so an active conversation never elapses.
+  (b) silent past silent_max_min -> type ONE short free-round marker line (the
+      rendered note rides invisibly: staged to free_round_note_path, injected by
+      the marrow hook on that marker turn) and re-arm the same timer (perpetual
+      cycle, never forces sleep). User replies keep the transcript mtime fresh,
+      so an active conversation never elapses.
   (c) window tokens >= fuse -> esc, then prompt the session to write its
       handoff and lie_down(rotate=True), give it a bounded grace window
       (fuse_handoff_grace_sec) to do so itself, else force it down (fuse).
@@ -279,31 +281,72 @@ def _free_round_note(cfg: dict) -> tuple[str, str | None]:
         return "", None
 
 
-def _build_tuck_in_line(cfg: dict, mins: float) -> tuple[str, str | None]:
-    """Render the free-round line OUTSIDE any lock (BUG B: the slow note render +
-    template fill must not run inside the strict section). {mins} = real minutes
-    since the user's last message, {user} = marrow user_name. Every free-round
-    injection (silence-cycle AND kick carrier) prepends a freshly rendered
-    (diff-mode) wakeup note ABOVE the marker line — intel before the marker
-    (acceptance), and the marker lands LAST so it is the final cue.
-    Returns (line, pending_baseline_ts): the caller advances the diff baseline to
-    pending_baseline_ts ONLY AFTER the line is committed + written (FIX 6). ("",
-    None) when disabled."""
+def _build_tuck_in_line(cfg: dict, mins: float) -> tuple[str, str, str | None]:
+    """Render the free-round round OUTSIDE any lock (BUG B: the slow note render
+    + template fill must not run inside the strict section). {mins} = real
+    minutes since the user's last message, {user} = marrow user_name.
+
+    Returns (line, note_text, pending_baseline_ts):
+      line       — the SHORT marker line, the only thing typed on screen.
+      note_text  — the freshly rendered (diff-mode) note, delivered INVISIBLY:
+                   staged to free_round_note_path and injected by the marrow
+                   hook on the marker turn (same pattern as the wake bell), so
+                   the note never shows in the window.
+      pending_ts — the caller advances the diff baseline to it ONLY AFTER the
+                   marker line is committed + typed (FIX 6).
+    ("", "", None) when the marker template is empty (disabled)."""
     tmpl = str(cfg["wake"].get("tuck_in_text") or "").strip()
     if not tmpl:
-        return "", None
+        return "", "", None
     line = tmpl.replace("{mins}", str(int(round(mins)))) \
                .replace("{user}", config.user_name(cfg))
     fresh, pending = _free_round_note(cfg)
-    if fresh:
-        line = fresh + "\n" + line
-    return line, pending
+    return line, fresh, pending
+
+
+def _stage_free_round_note(cfg: dict, text: str) -> None:
+    """Stage the invisible free-round payload for the marrow hook. APPENDS: a
+    marker turn the hook has not consumed yet must never be overwritten by the
+    next one (the ct-note delivery types a second marker right after the first),
+    else a whole note is lost. Best-effort — a staging failure only costs the
+    invisible body, the marker still lands."""
+    if not text:
+        return
+    try:
+        p = wake_state.free_round_note_path(cfg)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with p.open("a", encoding="utf-8") as f:
+            if p.stat().st_size:
+                f.write("\n\n")
+            f.write(text.strip())
+    except OSError:
+        pass
+
+
+def _clear_free_round_note(cfg: dict) -> None:
+    """Drop a staged payload whose marker never landed — nothing typed means no
+    turn will ever consume it, and leaving it would double the next round."""
+    try:
+        wake_state.free_round_note_path(cfg).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def _deliver_free_round(cfg: dict, line: str, note_text: str) -> bool:
+    """Stage the invisible note, then type ONLY the short marker line. Returns
+    what the typing returned, so deliver_then_advance skips the baseline advance
+    on a failed delivery (FIX 6: no lost events). A failed type also un-stages
+    the note (no turn will consume it)."""
+    _stage_free_round_note(cfg, note_text)
+    ok = _type_tuck_in_line(cfg, line)
+    if not ok:
+        _clear_free_round_note(cfg)
+    return ok
 
 
 def _type_tuck_in_line(cfg: dict, line: str) -> bool:
-    """Type a prebuilt tuck-in line into the resident window (one submitted
-    turn). Same text as before, delivered by keystrokes instead of the retired
-    ear. Returns True when the line landed (or was empty), False when there is no
+    """Type the short marker line into the resident window (one submitted turn).
+    Returns True when the line landed (or was empty), False when there is no
     resident window / typing failed, so the atomic deliver+advance path skips the
     baseline advance on a failed delivery (no lost events)."""
     if not line:
@@ -314,12 +357,13 @@ def _type_tuck_in_line(cfg: dict, line: str) -> bool:
         return False
 
 
-def _deliver_ct_notes(cfg: dict) -> None:
+def _deliver_ct_notes(cfg: dict, line: str) -> None:
     """F9: after a free-round line has committed + landed, claim any pending ct
-    notes and type them too — a real visible round is now guaranteed to surface
-    them. Stamps claimed_by='cortex.free_round'. Done OUTSIDE the render (which
-    passed claim_ct_notes=False) so an off-screen tick whose delivery was dropped
-    never claims a note. Best-effort: never raises."""
+    notes and surface them in their own round — staged INVISIBLY (same file the
+    marrow hook consumes on a marker turn) with only the short marker line typed.
+    Stamps claimed_by='cortex.free_round'. Done OUTSIDE the render (which passed
+    claim_ct_notes=False) so an off-screen tick whose delivery was dropped never
+    claims a note. Best-effort: never raises."""
     try:
         from cortex import db, note
         conn = db.connect(cfg)
@@ -328,7 +372,7 @@ def _deliver_ct_notes(cfg: dict) -> None:
         finally:
             conn.close()
         if text:
-            _type_tuck_in_line(cfg, text)
+            _deliver_free_round(cfg, line, text)
     except Exception:
         pass
 
@@ -373,9 +417,9 @@ def silence_action(cfg: dict, silent_min: float, *, allow_tuck: bool = True) -> 
     # silent_min. Consume it (read-and-clear) before deciding anything else so a
     # kick always gets exactly one carrier fire.
     if wake_state.peek_kick_round(cfg):
-        line, pending_ts = ("", None)
+        line, note_text, pending_ts = ("", "", None)
         if allow_tuck:
-            line, pending_ts = _build_tuck_in_line(cfg, silent_min)
+            line, note_text, pending_ts = _build_tuck_in_line(cfg, silent_min)
         try:
             committed = wake_state.conditional_mutate(
                 cfg, token0, _stamp_free_round())
@@ -386,8 +430,8 @@ def silence_action(cfg: dict, silent_min: float, *, allow_tuck: bool = True) -> 
         wake_state.take_kick_round(cfg)  # consume: exactly one carrier fire
         if allow_tuck:
             wake_state.deliver_then_advance(
-                cfg, lambda: _type_tuck_in_line(cfg, line), pending_ts)
-            _deliver_ct_notes(cfg)  # F9: claim ct notes now the round surfaces
+                cfg, lambda: _deliver_free_round(cfg, line, note_text), pending_ts)
+            _deliver_ct_notes(cfg, line)  # F9: claim ct notes now the round surfaces
         return "kick free-round appended"
 
     if not wake_state.user_replied_this_wake(cfg):
@@ -421,9 +465,9 @@ def silence_action(cfg: dict, silent_min: float, *, allow_tuck: bool = True) -> 
     # re-check awake + epoch under the strict lock and stamp the injection
     # marker in the same section (TOCTOU-safe). Only a committed stamp appends
     # the line.
-    line, pending_ts = ("", None)
+    line, note_text, pending_ts = ("", "", None)
     if allow_tuck:
-        line, pending_ts = _build_tuck_in_line(cfg, silent_min)
+        line, note_text, pending_ts = _build_tuck_in_line(cfg, silent_min)
     try:
         committed = wake_state.conditional_mutate(
             cfg, token0, _stamp_free_round())
@@ -433,8 +477,8 @@ def silence_action(cfg: dict, silent_min: float, *, allow_tuck: bool = True) -> 
         return None  # awake cleared under us -> no injection
     if allow_tuck:
         wake_state.deliver_then_advance(
-            cfg, lambda: _type_tuck_in_line(cfg, line), pending_ts)
-        _deliver_ct_notes(cfg)  # F9: claim ct notes now the round surfaces
+            cfg, lambda: _deliver_free_round(cfg, line, note_text), pending_ts)
+        _deliver_ct_notes(cfg, line)  # F9: claim ct notes now the round surfaces
     return "free-round appended"
 
 

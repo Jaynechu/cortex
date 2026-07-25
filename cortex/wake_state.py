@@ -41,6 +41,16 @@ def wakeup_note_path(cfg: dict) -> Path:
     return Path(raw).expanduser() if raw else config.cortex_home(cfg) / "wakeup_note.md"
 
 
+def free_round_note_path(cfg: dict) -> Path:
+    """Staging file for the INVISIBLE free-round payload: cortex writes the
+    rendered note (and any claimed ct notes) here right before typing the short
+    ⏳ marker line, and the marrow UserPromptSubmit hook reads + consumes it on
+    the marker turn. Same bell->note pattern, so the window only ever shows the
+    marker. Must match marrow [cortex].free_round_note_file."""
+    raw = cfg["paths"].get("free_round_note_file") or ""
+    return Path(raw).expanduser() if raw else config.cortex_home(cfg) / "free_round_note.md"
+
+
 def watchdog_pidfile_path(cfg: dict) -> Path:
     raw = cfg["paths"].get("watchdog_pidfile") or ""
     return Path(raw).expanduser() if raw else config.state_dir(cfg) / "watchdog.pid"
