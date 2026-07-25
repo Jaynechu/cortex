@@ -7,7 +7,6 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from cortex import config, note
-from cortex.pacemaker.triggers import TriggerReason
 
 MEL = ZoneInfo("Australia/Melbourne")
 NOW = datetime(2026, 7, 8, 14, 30, tzinfo=MEL)
@@ -66,6 +65,13 @@ def _add_receipt(conn, *, id, target="tg", from_channel="ct",
 # --------------------------------------------------------------------------- #
 # render — full note + omissions
 # --------------------------------------------------------------------------- #
+
+class _FloorReason:
+    """Stand-in for a retired trigger-reason object (the Wake line is gone; the
+    renderer must still ignore whatever `reasons` carries)."""
+    kind = "floor"
+    detail = "floor check due"
+
 
 def test_render_full_note(cfg):
     data = {
@@ -856,7 +862,7 @@ def test_gather_end_to_end(marrow_conn, cfg, tmp_path, monkeypatch):
     monkeypatch.setattr(note, "_frontmost_app", lambda: None)
 
     data = note.gather(marrow_conn, cfg, NOW, decision={
-        "reasons": [TriggerReason(kind="floor", detail="floor check due")]})
+        "reasons": [_FloorReason()]})
     assert "wake_parts" not in data  # Wake reason line retired
     assert data["budget"]["five_h_pct"] == 40.0
     assert data["budget"]["five_h_reset"] == "14:30"  # 04:30Z -> AEST

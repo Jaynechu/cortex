@@ -124,19 +124,20 @@ def test_shells_override_switches_cli_off(tmp_path):
     assert config.shell_enabled(cfg, "TG") is True
 
 
-def test_pacemaker_tick_noops_when_cli_shell_off(tmp_path, monkeypatch, capsys):
-    """Heartbeat entry exits before touching the DB when cli is not a shell."""
-    from cortex import pacemaker_tick
+def test_wake_daemon_noops_when_cli_shell_off(tmp_path, monkeypatch, capsys):
+    """Heartbeat entry exits before touching the DB or the lock when cli is not
+    a shell."""
+    from cortex import daemon
 
     cfg = config.load(tmp_path / "cortex.toml")
     cfg["core"]["shells"] = []
-    monkeypatch.setattr(pacemaker_tick.config, "load", lambda: cfg)
+    monkeypatch.setattr(daemon.config, "load", lambda: cfg)
 
     def _boom(*a, **kw):
         raise AssertionError("db.connect must not run with the cli shell off")
 
-    monkeypatch.setattr(pacemaker_tick.db, "connect", _boom)
-    assert pacemaker_tick.main() == 0
+    monkeypatch.setattr(daemon.db, "connect", _boom)
+    assert daemon.main([]) == 0
     assert "cli shell off" in capsys.readouterr().out
 
 

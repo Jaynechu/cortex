@@ -47,7 +47,7 @@ def watchdog_pidfile_path(cfg: dict) -> Path:
 
 
 def spawn_lock_path(cfg: dict) -> Path:
-    """Exclusive flock file serialising EVERY window-spawn entrant (pacemaker
+    """Exclusive flock file serialising EVERY window-spawn entrant (daemon
     tick reconcile, ctl wake's no-resident branch, rotate succession) — see
     wake._spawn_serialized. Default: <cortex_home>/state/spawn.lock."""
     raw = cfg["paths"].get("spawn_lock_file") or ""
@@ -528,7 +528,7 @@ def clear_kick_round(cfg: dict) -> None:
 
 def set_next_wake_at(cfg: dict, iso_local: str | None) -> None:
     """Persist the scheduled next-wake instant (local ISO) as the durable ledger.
-    The scheduled time must never live only in the sentinel process args: a
+    The scheduled time must never live only in a process's args: a
     compact/kill loses those, but this survives so the tick reconcile can fire an
     overdue wake. None clears it (e.g. paused, or no schedule)."""
     if iso_local is None:
@@ -551,7 +551,7 @@ def clear_next_wake_at(cfg: dict) -> None:
 
 
 def set_paused(cfg: dict, paused: bool) -> None:
-    """DND flag: tick reconcile, watchdog, sentinel-fire and injections all
+    """DND flag: reconcile, watchdog and injections all
     respect it (no reaps, no wakes, no injections while paused). On unpause,
     overdue ledger alarms fire via the next reconcile."""
     if paused:
@@ -569,7 +569,7 @@ def is_paused(cfg: dict) -> bool:
 
 def set_rotated(cfg: dict) -> None:
     """Rotate flag: lie_down sets it when the window grew past the rotate line so
-    the NEXT pacemaker wake respawns a fresh window (SIGTERM claude + fresh spawn)
+    the NEXT wake respawns a fresh window (SIGTERM claude + fresh spawn)
     instead of resuming the oversized one."""
     update(cfg, rotated=True)
 
@@ -610,30 +610,3 @@ def set_retired_sid(cfg: dict, transcript_path: str | None) -> None:
 
 def get_retired_sid(cfg: dict) -> str | None:
     return load(cfg).get("retired_sid")
-
-
-def get_sentinel_pid(cfg: dict) -> int | None:
-    """Recorded pid of the one-shot exact-time wake sentinel (cortex.sentinel),
-    or None. Every new lie_down kills this predecessor before arming a fresh one."""
-    try:
-        v = load(cfg).get("sentinel_pid")
-        return int(v) if v is not None else None
-    except (TypeError, ValueError):
-        return None
-
-
-def set_sentinel_pid(cfg: dict, pid: int) -> None:
-    update(cfg, sentinel_pid=pid)
-
-
-def clear_sentinel_pid(cfg: dict, only_if_pid: int | None = None) -> None:
-    """Drop the recorded sentinel pid. only_if_pid = self-guard: the sentinel
-    clears its own record only when it still matches (a newer lie_down may have
-    already re-armed a different pid). None = unconditional clear."""
-    with _flock(cfg):
-        d = load(cfg)
-        cur = d.get("sentinel_pid")
-        if only_if_pid is not None and cur is not None and int(cur) != int(only_if_pid):
-            return
-        if d.pop("sentinel_pid", None) is not None:
-            _save(cfg, d)

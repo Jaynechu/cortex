@@ -4,7 +4,7 @@
 [core]
 timezone = "Australia/Melbourne"
 # Shell ids running as cortex shells (mirror of marrow [cortex].shells).
-# "cli" absent = this repo's heartbeat (pacemaker tick + watchdog) stays down.
+# "cli" absent = this repo's heartbeat (wake daemon + watchdog) stays down.
 shells = ["cli"]
 
 [paths]
@@ -66,7 +66,7 @@ call_timeout_s = 600
 [wake]
 token_cap = 150000
 # Auto-adopt a cortex window you opened `claude` in yourself (in cortex_home) but
-# never registered: the pacemaker tick records it as the resident (under the spawn
+# never registered: the reconcile pass records it as the resident (under the spawn
 # lock) instead of firing/spawning a duplicate window. Interactive-tty only, so a
 # headless `claude -p` run against the same cwd is never adopted. false = off.
 auto_adopt = true
@@ -110,7 +110,6 @@ rearm_suffix = " (ear died — rearm)"
 # plays a system sound (name of a /System/Library/Sounds/*.aiff; "" = silent).
 say_sound = "Glass"
 next_wake_max = 240         # lie_down(next_wake_min=N) clamp upper bound (minutes); floor is 0 (immediate re-wake) at every hour
-sentinel = true             # arm cortex.sentinel (one-shot exact-time wake) at every lie_down; false = tick-only fallback
 # Free-round line typed into the window at every silence-cycle injection
 # (last line of the block, after the freshly rendered note). MUST contain the
 # "[NEW ROUND]" machine-line marker — without it the line resets the silence

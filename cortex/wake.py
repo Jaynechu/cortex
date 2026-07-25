@@ -796,7 +796,7 @@ def run_wake(
 ) -> dict:
     """Full wake pipeline against real data. `caller` is injectable so tests
     never spawn a real claude process. Returns the caller's result dict.
-    `tick_started`/`gate_done` are monotonic anchors from pacemaker_tick so the
+    `tick_started`/`gate_done` are monotonic anchors from the caller so the
     latency probe covers tick fire -> gate eval -> the wake chain."""
     now = now or _now(cfg)
     today = now.date().isoformat()

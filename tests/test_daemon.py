@@ -4,11 +4,11 @@ Covers: both deadlines armed at start, re-arm after a firing AND after a raising
 callback (the alive-but-unarmed trap), kick delivery over a real tmp-path unix
 socket in lie_down's wire format, business reason precedence (awake gate /
 ledger / kick reasons / silence), next-deadline computation with the anti-spin
-retry floor, reconcile delegation to the ported pacemaker decision logic, the
+retry floor, reconcile delegation to cortex.reconcile, the
 singleton lock and the [daemon] config section surviving config.load.
 
 No real windows/processes/sockets outside tmp_path: run_wake, silence_action and
-the pacemaker reconcile internals are all stubbed.
+the reconcile internals are all stubbed.
 """
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from cortex import config, daemon, lie_down, pacemaker_tick, wake_state
+from cortex import config, daemon, lie_down, reconcile, wake_state
 
 
 @pytest.fixture
@@ -46,7 +46,6 @@ def cfg(tmp_path):
     c["paths"]["ny_db_pages"] = str(tmp_path / "ny")
     c["paths"]["wake_timing_log"] = str(home / "wake_timing.log")
     c["paths"]["handoff_file"] = str(home / "handoff.md")
-    c["wake"]["sentinel"] = False
     c["daemon"]["socket_path"] = str(tmp_path / "d.sock")
     return c
 
@@ -238,28 +237,28 @@ def test_business_silence_calls_silence_action(cfg, clock, monkeypatch):
 
 # --- reconcile ----------------------------------------------------------
 
-def test_reconcile_delegates_to_pacemaker_decision(cfg, clock, monkeypatch):
-    monkeypatch.setattr(pacemaker_tick, "_reconcile",
+def test_reconcile_delegates_to_reconcile_module(cfg, clock, monkeypatch):
+    monkeypatch.setattr(reconcile, "_reconcile",
                         lambda conn, c, st, now: "ledger hold: next wake 09:00")
     assert _daemon(cfg, clock).reconcile_once().startswith("ledger hold")
 
 
 def test_reconcile_awake_gate_gets_snapshot_gen(cfg, clock, monkeypatch):
-    monkeypatch.setattr(pacemaker_tick, "_reconcile", lambda *a, **k: None)
+    monkeypatch.setattr(reconcile, "_reconcile", lambda *a, **k: None)
     seen = {}
 
     def fake_awake(conn, c, st, snap_gen=None):
         seen["gen"] = snap_gen
         return "wake in progress"
 
-    monkeypatch.setattr(pacemaker_tick, "_handle_awake", fake_awake)
+    monkeypatch.setattr(reconcile, "_handle_awake", fake_awake)
     wake_state.set_awake(cfg, 1, None)
     assert _daemon(cfg, clock).reconcile_once() == "wake in progress"
     assert seen["gen"] == wake_state.load(cfg)["gen"]
 
 
 def test_reconcile_paused_holds_everything(cfg, clock, monkeypatch):
-    monkeypatch.setattr(pacemaker_tick, "_reconcile",
+    monkeypatch.setattr(reconcile, "_reconcile",
                         lambda *a, **k: pytest.fail("no reconcile while paused"))
     wake_state.set_paused(cfg, True)
     assert "paused (DND)" in _daemon(cfg, clock).reconcile_once()

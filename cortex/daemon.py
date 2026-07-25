@@ -5,9 +5,9 @@ Two logical deadlines, one per scheduler shell key (the scheduler holds ONE
 deadline per key, and firing consumes it):
 
   <shell>.reconcile — fixed cadence, self-rearming. Runs the ledger reconcile
-      ported from pacemaker_tick (imported, not copied): DND hold, manual adopt,
-      dead+due fire, accidental-close resume, watchdog heal, silence backup,
-      stale-suspect debounce.
+      (cortex.reconcile): DND hold, manual adopt, dead+due fire,
+      accidental-close resume, watchdog heal, silence backup, stale-suspect
+      debounce.
   <shell>            — business: min(next_wake_at, silence-round due). ALWAYS
       armed (safety horizon when nothing is pending) because Scheduler.kick()
       no-ops on a key with no entry, and the lie_down socket kick sends this
@@ -30,7 +30,7 @@ from pathlib import Path
 
 from synapse_core.scheduler import Scheduler
 
-from cortex import config, db, occupancy, pacemaker_tick, transcript, wake_state
+from cortex import config, db, occupancy, reconcile, transcript, wake_state
 
 RECONCILE_SUFFIX = ".reconcile"
 
@@ -84,7 +84,7 @@ def business_reason(cfg: dict, st: dict, now: datetime) -> str | None:
     if st.get("awake"):
         due_in = silence_due_in(cfg, st)
         return "silence" if due_in is not None and due_in <= 0 else None
-    due = pacemaker_tick._parse_local(wake_state.get_next_wake_at(cfg), cfg)
+    due = reconcile._parse_local(wake_state.get_next_wake_at(cfg), cfg)
     if due is not None:
         return "next_wake_at" if now >= due else None
     return "kick" if st.get("kick_reasons") else None
@@ -135,7 +135,7 @@ class WakeDaemon:
                 due_in = silence_due_in(self.cfg, st)
                 target = now + due_in if due_in is not None else now + self.horizon
             else:
-                due = pacemaker_tick._parse_local(
+                due = reconcile._parse_local(
                     wake_state.get_next_wake_at(self.cfg), self.cfg)
                 target = due.timestamp() if due is not None else now + self.horizon
         except Exception:  # noqa: BLE001 — state read must never unarm the daemon
@@ -167,8 +167,8 @@ class WakeDaemon:
     # --- work (blocking; runs in a worker thread) ------------------------
 
     def reconcile_once(self) -> str:
-        """Ledger reconcile, behaviour-identical to one pacemaker tick minus the
-        retired floor/gates decision engine (the ledger is the alarm now)."""
+        """Ledger reconcile: the durable alarm ledger is the only wake source
+        (the floor/trigger decision engine is retired)."""
         cfg = self.cfg
         if not config.shell_enabled(cfg, self.shell):
             return f"{self.shell} shell off ([core].shells): reconcile skipped"
@@ -178,11 +178,11 @@ class WakeDaemon:
             snap_gen = st.get("gen") if isinstance(st.get("gen"), int) else None
             if wake_state.is_paused(cfg):
                 return "paused (DND): reconcile + reaps + injections held"
-            rc = pacemaker_tick._reconcile(conn, cfg, st, occupancy._now(cfg))
+            rc = reconcile._reconcile(conn, cfg, st, occupancy._now(cfg))
             if rc is not None:
                 return rc
             if st.get("awake"):
-                return pacemaker_tick._handle_awake(conn, cfg, st, snap_gen=snap_gen)
+                return reconcile._handle_awake(conn, cfg, st, snap_gen=snap_gen)
             return "reconcile: nothing due"
         finally:
             conn.close()

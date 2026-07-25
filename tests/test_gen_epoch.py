@@ -1,5 +1,5 @@
-"""Generation-counter cancellation-epoch tests (BUG A + BUG B and the tick /
-sentinel / legacy-line guards).
+"""Generation-counter cancellation-epoch tests (BUG A + BUG B and the
+reconcile / legacy-line guards).
 
 The epoch (gen + state_id) is a fail-closed cancellation token: every deferred
 actor captures it at birth and re-validates under a strict lock before each
@@ -13,7 +13,7 @@ import threading
 
 import pytest
 
-from cortex import config, db, lie_down, sentinel, wake_state, watchdog
+from cortex import config, db, lie_down, wake_state, watchdog
 
 
 @pytest.fixture
@@ -42,14 +42,13 @@ def _seed_awake(cfg, transcript="/t/old.jsonl"):
 
 def _user_reset(cfg):
     """Mimic marrow's _cortex_user_wake_reset on the shared temp state: bump gen,
-    flip awake, clear next_wake_at + tuck_pending, drop the sentinel pid."""
+    flip awake, clear next_wake_at + tuck_pending."""
     def _m(d):
         d["gen"] = int(d.get("gen", 0)) + 1
         d["awake"] = True
         d["user_replied_this_wake"] = True
         d.pop("tuck_pending", None)
         d.pop("next_wake_at", None)
-        d.pop("sentinel_pid", None)
         return True
     # Unconditional bump via conditional_mutate(token=None).
     wake_state.conditional_mutate(cfg, None, _m)
@@ -102,7 +101,7 @@ def test_bug_a_user_reset_right_after_claim_suppresses_all(cfg, monkeypatch):
     """lie_down paused right after the claim (gen bumped), before the floor
     redraw; a user reset fires on the same state; on release EVERY late side
     effect is suppressed: no floor redraw, watchdog NOT killed, rotate suppressed,
-    no ledger, no sentinel spawn."""
+    no ledger."""
     _seed_awake(cfg, transcript="/t/old.jsonl")
 
     released = threading.Event()
@@ -120,9 +119,9 @@ def test_bug_a_user_reset_right_after_claim_suppresses_all(cfg, monkeypatch):
         return real_floor(conn, cfg_, **kw)
 
     monkeypatch.setattr("cortex.occupancy.lie_down", paused_floor)
-    spawned = []
-    monkeypatch.setattr(sentinel, "spawn",
-                        lambda cfg_, secs, **k: spawned.append(1) or 55555)
+    kicked = []
+    monkeypatch.setattr("cortex.lie_down._notify_daemon",
+                        lambda cfg_: kicked.append(1))
     killed_wd = []
     monkeypatch.setattr("cortex.lie_down._kill_watchdog",
                         lambda cfg_: killed_wd.append(True))
@@ -139,48 +138,12 @@ def test_bug_a_user_reset_right_after_claim_suppresses_all(cfg, monkeypatch):
     assert not t.is_alive()
 
     st = wake_state.load(cfg)
-    assert st.get("sentinel_pid") is None      # never registered
     assert st.get("next_wake_at") is None      # ledger not armed for stale claim
     assert not st.get("rotated")               # rotate suppressed
     assert st.get("retired_sid") is None
     assert killed_wd == []                      # watchdog kill gated out
-    assert spawned == []                        # no sentinel spawn for a dead claim
+    assert kicked == []                         # no daemon kick for a dead claim
     assert st.get("awake") is True              # user reset owns the live wake
-
-
-def test_bug_a_reset_between_spawn_and_register_sigterms(cfg, monkeypatch):
-    """The classic BUG A: the reset lands AFTER the sentinel is spawned but
-    BEFORE its pid is registered. The spawned sentinel loses the epoch race, is
-    SIGTERMed, and is never recorded — no surviving alarm."""
-    _seed_awake(cfg)
-
-    released = threading.Event()
-    reached = threading.Event()
-    sigtermed = []
-
-    def paused_spawn(cfg_, secs, **k):
-        reached.set()
-        released.wait(2.0)
-        return 55555
-
-    monkeypatch.setattr(sentinel, "spawn", paused_spawn)
-    monkeypatch.setattr("cortex.lie_down.os.kill",
-                        lambda pid, sig: sigtermed.append(pid))
-
-    def run_lie_down():
-        lie_down.lie_down(cfg, force_slept="auto", next_wake_min=20)
-
-    t = threading.Thread(target=run_lie_down)
-    t.start()
-    assert reached.wait(2.0)
-    _user_reset(cfg)
-    released.set()
-    t.join(3.0)
-    assert not t.is_alive()
-
-    st = wake_state.load(cfg)
-    assert st.get("sentinel_pid") is None   # registration lost the race
-    assert 55555 in sigtermed               # the orphan spawn was SIGTERMed
 
 
 @pytest.fixture
@@ -249,67 +212,25 @@ def test_silence_action_tuck_in_happy_path(cfg, typed):
     assert "\n".join(typed).count("[NEW ROUND]") == 1
 
 
-# ── tick: stale-snapshot side effects suppressed ──────────────────────────────
+# ── reconcile: stale-snapshot side effects suppressed ─────────────────────────
 
-def test_tick_stale_snapshot_suppresses_reap(cfg, monkeypatch):
+def test_reconcile_stale_snapshot_suppresses_reap(cfg, monkeypatch):
     """_handle_awake with a snapshot gen that no longer matches the live epoch
     holds instead of reaping."""
     _seed_awake(cfg)
-    from cortex import pacemaker_tick
+    from cortex import reconcile
     st = wake_state.load(cfg)
     snap_gen = st["gen"]
     # A newer epoch lands after the snapshot (e.g. a user reset).
     wake_state.bump_gen(cfg)
     conn = db.connect(cfg)
     try:
-        msg = pacemaker_tick._handle_awake(conn, cfg, st, snap_gen=snap_gen)
+        msg = reconcile._handle_awake(conn, cfg, st, snap_gen=snap_gen)
     finally:
         conn.close()
     assert "superseded" in msg
     # Still awake — no reap happened.
     assert wake_state.load(cfg).get("awake") is True
-
-
-# ── sentinel fire-time epoch check ────────────────────────────────────────────
-
-def test_sentinel_fire_stale_gen_never_wakes(cfg, monkeypatch):
-    """Sentinel armed for gen N; gen bumped before fire; run() must not invoke
-    the tick and must not clear a record that is not its own."""
-    gen, sid = wake_state.current_epoch(cfg)
-    wake_state.set_sentinel_pid(cfg, 12345)
-    fired = []
-    monkeypatch.setattr("cortex.pacemaker_tick.main", lambda: fired.append(True) or 0)
-    wake_state.bump_gen(cfg)  # a newer epoch supersedes this alarm
-    rc = sentinel.run(cfg, 0.0, gen=gen, state_id=sid)
-    assert rc == 0
-    assert fired == []  # tick never invoked
-    # Did not clear the (foreign) sentinel record.
-    assert wake_state.get_sentinel_pid(cfg) == 12345
-
-
-def test_sentinel_fire_current_gen_wakes(cfg, monkeypatch):
-    """Happy path: gen unchanged since arm -> the sentinel fires the tick."""
-    import os
-    gen, sid = wake_state.current_epoch(cfg)
-    wake_state.set_sentinel_pid(cfg, os.getpid())
-    fired = []
-    monkeypatch.setattr("cortex.pacemaker_tick.main", lambda: fired.append(True) or 0)
-    rc = sentinel.run(cfg, 0.0, gen=gen, state_id=sid)
-    assert rc == 0
-    assert fired == [True]  # tick invoked
-
-
-def test_sentinel_fire_target_mismatch_holds(cfg, monkeypatch):
-    """A stale spawn whose target no longer matches the ledger (a newer arm under
-    the same gen path) does not fire early."""
-    gen, sid = wake_state.current_epoch(cfg)
-    wake_state.set_next_wake_at(cfg, "2030-01-01T10:00:00+11:00")
-    fired = []
-    monkeypatch.setattr("cortex.pacemaker_tick.main", lambda: fired.append(True) or 0)
-    rc = sentinel.run(cfg, 0.0, gen=gen, state_id=sid,
-                      target_iso="2030-01-01T09:00:00+11:00")
-    assert rc == 0
-    assert fired == []
 
 
 # ── legacy line tolerance (marrow-side parse mirrored here for the wire form) ──

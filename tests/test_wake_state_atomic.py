@@ -50,14 +50,6 @@ def test_mark_kick_round_noop_when_asleep(cfg):
     assert wake_state.peek_kick_round(cfg) is False
 
 
-def test_sentinel_pid_self_guarded_clear(cfg):
-    wake_state.set_sentinel_pid(cfg, 500)
-    # Clearing with a mismatched pid is a no-op (a newer arm owns the record).
-    wake_state.clear_sentinel_pid(cfg, only_if_pid=999)
-    assert wake_state.get_sentinel_pid(cfg) == 500
-    # Matching pid clears it.
-    wake_state.clear_sentinel_pid(cfg, only_if_pid=500)
-    assert wake_state.get_sentinel_pid(cfg) is None
 
 
 def test_lie_down_cli_requires_next_wake_min(cfg, monkeypatch):

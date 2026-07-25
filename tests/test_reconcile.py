@@ -1,9 +1,9 @@
-"""Ledger + tick reconcile + pause gating (schedule reliability fix).
+"""Ledger + reconcile + pause gating (schedule reliability fix).
 
-Covers: next_wake_at write/clear, no night clamp (P8), the reconcile decision matrix
-(alive-never-touch / rotated-vs-resume / accidental-close / future-hold), pause
-gating, per-session _window_alive, and that the tick has no dangling catchup
-import. No iTerm/claude here — all machine-touching calls are stubbed."""
+Covers: next_wake_at write/clear, no night clamp (P8), the reconcile decision
+matrix (alive-never-touch / rotated-vs-resume / accidental-close / future-hold),
+pause gating, per-session _window_alive. No iTerm/claude here — all
+machine-touching calls are stubbed."""
 from __future__ import annotations
 
 from datetime import datetime, timedelta
@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from cortex import config, db, lie_down, pacemaker_tick, wake_state
+from cortex import config, daemon, db, lie_down, reconcile, wake_state
 
 
 @pytest.fixture
@@ -26,7 +26,6 @@ def cfg(tmp_path):
     c["paths"]["ny_db_pages"] = str(tmp_path / "ny")  # isolate symlinks.ensure_all
     c["paths"]["wake_timing_log"] = str(home / "wake_timing.log")  # not under cortex_home default
     c["paths"]["handoff_file"] = str(home / "handoff.md")
-    c["wake"]["sentinel"] = False  # no detached sentinel in tests
     return c
 
 
@@ -47,12 +46,12 @@ def test_ledger_write_and_clear(cfg):
 def test_lie_down_persists_ledger(cfg):
     wake_state.set_awake(cfg, 1, None)  # a wake in progress
     lie_down.lie_down(cfg, force_slept="auto", next_wake_min=30)
-    assert wake_state.get_next_wake_at(cfg) is not None  # ledger written by _arm_sentinel
+    assert wake_state.get_next_wake_at(cfg) is not None  # ledger written by lie_down
 
 
-def test_persist_next_wake_at_writes_ledger_without_sentinel(cfg, monkeypatch):
-    """The ledger write is a plain wake_state-level call — it survives whatever
-    the sentinel machinery does, and kicks the daemon when one is configured."""
+def test_persist_next_wake_at_writes_ledger_and_kicks(cfg, monkeypatch):
+    """The ledger write is a plain wake_state-level call — it is the alarm, and
+    it kicks the daemon when one is configured."""
     kicks = []
     monkeypatch.setattr(lie_down, "_notify_daemon", lambda c: kicks.append(c))
     now = datetime(2026, 7, 13, 9, 0, tzinfo=_tz(cfg))
@@ -138,13 +137,12 @@ def test_lie_down_no_rotate_leaves_retired_sid_untouched(cfg):
     assert wake_state.get_retired_sid(cfg) is None
 
 
-# --- rotate: spawn authority is the sentinel/pacemaker only (no direct spawn) --
+# --- rotate: spawn authority is the wake daemon only (no direct spawn) --------
 
 def test_lie_down_rotate_never_spawns_directly(cfg, monkeypatch):
-    """Spawn authority belongs exclusively to the sentinel/pacemaker chain:
-    lie_down(rotate=True) must NOT spawn a successor itself. It only sets the
-    one-shot rotated flag and arms the sentinel at the requested time — the
-    sentinel (or the 60s pacemaker tick fallback) fires the fresh successor."""
+    """Spawn authority belongs exclusively to the wake daemon: lie_down(rotate=True)
+    must NOT spawn a successor itself. It only sets the one-shot rotated flag and
+    writes the ledger at the requested time — the daemon fires the successor."""
     from cortex import wake
     fired = {"n": 0}
     monkeypatch.setattr(wake, "run_wake",
@@ -153,8 +151,8 @@ def test_lie_down_rotate_never_spawns_directly(cfg, monkeypatch):
     r = lie_down.lie_down(cfg, rotate=True, next_wake_min=30)
     assert r["rotated"] is True  # rotate flag set
     assert fired["n"] == 0  # nothing spawned from lie_down
-    assert wake_state.load(cfg).get("rotated") is True  # flag left for the sentinel
-    assert wake_state.get_next_wake_at(cfg) is not None  # sentinel/ledger armed
+    assert wake_state.load(cfg).get("rotated") is True  # flag left for the daemon
+    assert wake_state.get_next_wake_at(cfg) is not None  # ledger armed
 
 
 def test_lie_down_no_rotate_never_spawns_successor(cfg, monkeypatch):
@@ -263,17 +261,15 @@ def test_run_wake_two_concurrent_spawn_entrants_only_one_spawns(cfg, monkeypatch
 
 # --- no night clamp (P8: gate-end clamp retired) ------------------------------
 
-def test_arm_sentinel_no_night_clamp(cfg):
-    """P8: the sentinel gate-end clamp is gone — a due time that once fell 'inside
-    the old window' now arms at its REAL time (else the 120-360 roaming band would
+def test_ledger_write_has_no_night_clamp(cfg):
+    """P8: the gate-end clamp is gone — a due time that once fell 'inside the old
+    window' is now persisted at its REAL time (else the 120-360 roaming band would
     collapse to the gate end)."""
     tz = _tz(cfg)
-    cfg["wake"]["sentinel"] = False  # no detached process in tests
     mid_night = datetime(2026, 7, 13, 2, 0, tzinfo=tz)
-    effective = lie_down._arm_sentinel(cfg, mid_night)
-    assert effective == mid_night  # unchanged, no clamp
+    assert lie_down.persist_next_wake_at(cfg, mid_night) is True
     ledger = wake_state.get_next_wake_at(cfg)
-    assert ledger is not None and "02:00" in ledger
+    assert ledger is not None and "02:00" in ledger  # unchanged, no clamp
 
 
 def test_lie_down_reports_real_next_wake(cfg):
@@ -294,10 +290,10 @@ def _fire_spy(monkeypatch):
         calls["why"] = why
         return f"fired: {why}"
 
-    monkeypatch.setattr(pacemaker_tick, "_fire_dead_window", fake_fire)
+    monkeypatch.setattr(reconcile, "_fire_dead_window", fake_fire)
     # Adoption runs before any dead-window fire; with no manual window to adopt
     # (the default) it must be a no-op so the fire/hold matrix is exercised.
-    monkeypatch.setattr(pacemaker_tick, "_adopt_manual_window", lambda cfg: None)
+    monkeypatch.setattr(reconcile, "_adopt_manual_window", lambda cfg: None)
     return calls
 
 
@@ -307,7 +303,7 @@ def test_reconcile_alive_never_touched(cfg, monkeypatch):
     now = datetime.now(_tz(cfg))
     wake_state.set_next_wake_at(cfg, (now - timedelta(minutes=5)).isoformat())  # overdue
     st = {"awake": True}
-    assert pacemaker_tick._reconcile(None, cfg, st, now) is None
+    assert reconcile._reconcile(None, cfg, st, now) is None
     assert "why" not in calls  # alive window is never fired at
 
 
@@ -316,20 +312,20 @@ def test_reconcile_due_ledger_dead_window_fires(cfg, monkeypatch):
     calls = _fire_spy(monkeypatch)
     now = datetime.now(_tz(cfg))
     wake_state.set_next_wake_at(cfg, (now - timedelta(minutes=1)).isoformat())
-    msg = pacemaker_tick._reconcile(None, cfg, {}, now)
+    msg = reconcile._reconcile(None, cfg, {}, now)
     assert "ledger due" in calls["why"]
     assert msg.startswith("fired:")
 
 
 def test_reconcile_future_ledger_holds(cfg, monkeypatch):
     """A future ledger alarm is authoritative: _reconcile must return a hold
-    (not None) so main() short-circuits and no other wake path (e.g. an
-    overdue floor) can fire early, e.g. right after `ctl sleep --min 30`."""
+    (not None) so the daemon short-circuits and no other wake path can fire
+    early, e.g. right after `ctl sleep --min 30`."""
     monkeypatch.setattr("cortex.wake._window_alive", lambda c: False)
     calls = _fire_spy(monkeypatch)
     now = datetime.now(_tz(cfg))
     wake_state.set_next_wake_at(cfg, (now + timedelta(minutes=20)).isoformat())
-    msg = pacemaker_tick._reconcile(None, cfg, {}, now)
+    msg = reconcile._reconcile(None, cfg, {}, now)
     assert msg is not None and "hold" in msg.lower()
     assert "why" not in calls  # future alarm -> caught at due time, no re-arm
 
@@ -341,7 +337,7 @@ def test_reconcile_accidental_close_resumes(cfg, monkeypatch):
     wake_state.update(cfg, awake=True)  # awake, no next_wake_at
     now = datetime.now(_tz(cfg))
     st = wake_state.load(cfg)
-    msg = pacemaker_tick._reconcile(None, cfg, st, now)
+    msg = reconcile._reconcile(None, cfg, st, now)
     assert "accidental close" in calls["why"]
     assert msg.startswith("fired:")
 
@@ -364,7 +360,7 @@ def test_fire_dead_window_accidental_close_resumes(cfg, monkeypatch):
                         captured.update(resume=resume) or {"mode": "window"})
     conn = db.connect(cfg)
     try:
-        pacemaker_tick._fire_dead_window(conn, cfg, "accidental close of awake window")
+        reconcile._fire_dead_window(conn, cfg, "accidental close of awake window")
     finally:
         conn.close()
     assert captured.get("resume") is True  # same conversation resumed, not fresh
@@ -376,7 +372,7 @@ def test_reconcile_paused_holds_everything(cfg, monkeypatch):
     wake_state.set_paused(cfg, True)
     now = datetime.now(_tz(cfg))
     wake_state.set_next_wake_at(cfg, (now - timedelta(minutes=5)).isoformat())  # overdue
-    msg = pacemaker_tick._reconcile(None, cfg, {}, now)
+    msg = reconcile._reconcile(None, cfg, {}, now)
     assert "paused" in msg.lower()
     assert "why" not in calls  # nothing fires while paused
 
@@ -391,19 +387,21 @@ def test_pause_flag_roundtrip(cfg):
 
 # --- ledger authoritative-hold + consumption (codex review P1-1/P1-2/P1-3) ----
 
-def test_reconcile_future_hold_short_circuits_main(cfg, monkeypatch):
-    """P1-1: a dead window + future ledger alarm must short-circuit main() so
-    no other wake path (e.g. an overdue floor via run_tick) fires early."""
+def test_reconcile_future_hold_short_circuits_the_daemon(cfg, monkeypatch):
+    """P1-1: a dead window + future ledger alarm must short-circuit the daemon
+    pass — the awake gate is never reached and no wake fires early."""
     monkeypatch.setattr("cortex.wake._window_alive", lambda c: False)
-    monkeypatch.setattr(pacemaker_tick, "_adopt_manual_window", lambda cfg: None)
-    monkeypatch.setattr(pacemaker_tick.config, "load", lambda: cfg)
-    now = datetime.now(_tz(cfg))
-    wake_state.set_next_wake_at(cfg, (now + timedelta(minutes=20)).isoformat())
+    monkeypatch.setattr(reconcile, "_adopt_manual_window", lambda cfg: None)
 
     def _boom(*a, **k):
-        raise AssertionError("run_tick must not run while a future ledger holds")
-    monkeypatch.setattr(pacemaker_tick.integration, "run_tick", _boom)
-    assert pacemaker_tick.main() == 0
+        raise AssertionError("no wake while a future ledger holds")
+    monkeypatch.setattr(reconcile, "_handle_awake", _boom)
+    monkeypatch.setattr("cortex.wake.run_wake", _boom)
+    now = datetime.now(_tz(cfg))
+    wake_state.set_next_wake_at(cfg, (now + timedelta(minutes=20)).isoformat())
+    d = daemon.WakeDaemon(cfg, scheduler=object(), clock=lambda: 0.0)
+    assert "hold" in d.reconcile_once().lower()
+    assert d.business_once() == "business: nothing due"
 
 
 def test_fire_dead_window_dry_run_consumes_ledger(cfg):
@@ -417,7 +415,7 @@ def test_fire_dead_window_dry_run_consumes_ledger(cfg):
     wake_state.set_next_wake_at(cfg, stale_due.isoformat())
     conn = db.connect(cfg)
     try:
-        pacemaker_tick._fire_dead_window(conn, cfg, "ledger due, window dead")
+        reconcile._fire_dead_window(conn, cfg, "ledger due, window dead")
     finally:
         conn.close()
     new_due = wake_state.get_next_wake_at(cfg)
@@ -430,10 +428,11 @@ def test_fire_dead_window_daily_budget_gated_holds_ledger(cfg):
     from zoneinfo import ZoneInfo
     cfg["gates"]["night"] = {"start": "23:00", "end": "23:00", "cap": 0}  # disabled
     cfg["gates"]["daily_budget"] = {"tokens": 100}
-    # _fire_dead_window reads the REAL wall clock (integration._now) for the
-    # gate check, so the "finished window" row must land in TODAY's local
-    # window (local midnight -> now), matching test_daily_budget_gates_floor.
-    now = pacemaker_tick.integration._now(cfg)
+    # _fire_dead_window reads the REAL wall clock (occupancy._now) for the gate
+    # check, so the "finished window" row must land in TODAY's local window
+    # (local midnight -> now).
+    from cortex import occupancy
+    now = occupancy._now(cfg)
     midnight = now.replace(hour=0, minute=1, second=0, microsecond=0)
     day = midnight.astimezone(ZoneInfo("UTC"))
     stale_due = now - timedelta(minutes=1)
@@ -441,46 +440,28 @@ def test_fire_dead_window_daily_budget_gated_holds_ledger(cfg):
     conn = db.connect(cfg)
     try:
         # A FINISHED window (peak over cap, then a lower row closes it) puts
-        # Cortex Today over the cap — same pattern as
-        # test_integration.test_daily_budget_gates_floor.
+        # Cortex Today over the cap.
         conn.executemany(
             "INSERT INTO ct_wake_log (ts, wake, dry_run, tokens) VALUES (?,1,0,?)",
             [(day.isoformat(), 200), ((day + timedelta(minutes=5)).isoformat(), 3)])
         conn.commit()
-        msg = pacemaker_tick._fire_dead_window(conn, cfg, "ledger due, window dead")
+        msg = reconcile._fire_dead_window(conn, cfg, "ledger due, window dead")
     finally:
         conn.close()
     assert "gated" in msg.lower()
     assert wake_state.get_next_wake_at(cfg) == stale_due.isoformat()  # untouched
 
 
-def test_main_pause_short_circuits_before_reconcile(cfg, monkeypatch):
-    """Paused (DND) holds everything: main() returns 0 before running reconcile /
-    the tick, so no wake path fires."""
-    monkeypatch.setattr(pacemaker_tick.config, "load", lambda: cfg)
+def test_pause_short_circuits_before_reconcile(cfg, monkeypatch):
+    """Paused (DND) holds everything: the daemon pass returns before running the
+    reconcile body, so no wake path fires."""
     wake_state.set_paused(cfg, True)
 
     def _boom(*a, **k):
         raise AssertionError("_reconcile must not run while paused")
-    monkeypatch.setattr(pacemaker_tick, "_reconcile", _boom)
-    assert pacemaker_tick.main() == 0
-
-
-def test_main_normal_tick_dry_run_wake_sets_ledger(cfg, monkeypatch):
-    """Follow-up to P1-2: main()'s normal-tick dry-run wake path must also
-    write the redrawn floor into next_wake_at, not just log-only advance the
-    in-memory floor — else the ledger goes stale here too."""
-    monkeypatch.setattr("cortex.wake._window_alive", lambda c: False)
-    monkeypatch.setattr(pacemaker_tick, "_adopt_manual_window", lambda cfg: None)
-    monkeypatch.setattr(pacemaker_tick.config, "load", lambda: cfg)
-    cfg["pacemaker"]["dry_run"] = True
-    now = datetime.now(_tz(cfg))
-    decision = {"wake": True, "reasons": [], "gated_by": [], "explanation": "test"}
-    monkeypatch.setattr(pacemaker_tick.integration, "run_tick",
-                        lambda conn, c, now=None: decision)
-    assert wake_state.get_next_wake_at(cfg) is None
-    assert pacemaker_tick.main() == 0
-    assert wake_state.get_next_wake_at(cfg) is not None
+    monkeypatch.setattr(reconcile, "_reconcile", _boom)
+    d = daemon.WakeDaemon(cfg, scheduler=object(), clock=lambda: 0.0)
+    assert "paused" in d.reconcile_once().lower()
 
 
 # --- per-session _window_alive ------------------------------------------------
@@ -563,13 +544,14 @@ def test_ctl_sleep_live_window_no_rotate_omits_rotate_true(cfg, monkeypatch):
 
 
 
-# --- ImportError guard --------------------------------------------------------
+# --- deletion guard -----------------------------------------------------------
 
-def test_tick_has_no_dangling_catchup_import():
-    from pathlib import Path
-    src = (Path(__file__).resolve().parent.parent
-           / "cortex" / "pacemaker_tick.py").read_text()
-    assert "from cortex.pacemaker import catchup" not in src
-    # the module imports cleanly (would ImportError at import time otherwise)
+def test_pacemaker_package_is_gone():
+    """T11 P4: the pacemaker package + its tick entry point are deleted whole —
+    no shim, no re-export, nothing importable."""
     import importlib
-    importlib.reload(pacemaker_tick)
+    for name in ("cortex.pacemaker", "cortex.pacemaker_tick", "cortex.sentinel"):
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module(name)
+    # the relocated reconcile logic imports cleanly on its own
+    importlib.reload(reconcile)

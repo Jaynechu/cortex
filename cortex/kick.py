@@ -2,10 +2,8 @@
 
 A bridge (tg/wx) or a cli session pokes cortex awake to peek at a channel: a
 watch reply/timeout fired, or her first morning message.
-A bare pacemaker_tick is NOT a wake primitive — a future next_wake_at is a
-ledger hold and an awake window short-circuits to the watchdog. This module
-does what the marrow user-wake reset does for cortex windows, but for the
-sleeping case: under the wake_state flock + cancellation epoch it
+This module does what the marrow user-wake reset does for cortex windows, but
+for the sleeping case: under the wake_state flock + cancellation epoch it
 
   1. appends a rendered reason flag (config [kick].reason_*, cleared by note.py
      on delivery), then
@@ -15,8 +13,8 @@ sleeping case: under the wake_state flock + cancellation epoch it
      inline.
   3. if cortex is ASLEEP -> bump gen (cancel any in-flight alarm), clear the
      floor ledger hold (next_floor_due_at=None => DUE) + the durable next-wake
-     ledger (next_wake_at), kill the recorded sentinel, then kick the daemon so
-     the freed floor fires a real wake now.
+     ledger (next_wake_at), then kick the daemon so the freed floor fires a real
+     wake now.
 
 Reason templates live in cortex config ([kick].reason_*), never hardcoded. The
 reply reason carries her message text (--text) so cortex sees WHAT she said.
@@ -25,10 +23,8 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
-import signal
-import subprocess
 import sys
+
 from cortex import config, wake_state
 
 
@@ -76,19 +72,6 @@ def _clear_floor_deadline(cfg: dict) -> None:
         conn.close()
 
 
-def _sigterm(pid) -> None:
-    try:
-        p = int(pid)
-    except (TypeError, ValueError):
-        return
-    if p <= 0 or p == os.getpid():
-        return
-    try:
-        os.kill(p, signal.SIGTERM)
-    except (ProcessLookupError, PermissionError):
-        pass
-
-
 def _notify_daemon(cfg: dict) -> bool:
     """Kick the wake daemon's socket so it re-reads state now (freed floor +
     cleared ledger, or the just-marked carrier round). Returns False when the
@@ -105,24 +88,18 @@ def _notify_daemon(cfg: dict) -> bool:
         return False
 
 
-def _spawn_tick(cfg: dict) -> None:
-    """Kick the daemon; until P4 swaps launchd it may not be running, so fall
-    back to ONE detached pacemaker_tick (P4: delete the fallback). Never a bare
-    in-process tick — the tick reads the freed floor + cleared ledger and runs
-    the normal wake path."""
+def _kick_daemon(cfg: dict, kind: str) -> bool:
+    """Socket kick is the ONLY delivery path. The state writes above already
+    landed, so an unreachable daemon means this kick is stranded until the next
+    reconcile cadence — surface it (wake audit + stderr) instead of dropping it
+    silently. Returns whether the daemon took the kick."""
     if _notify_daemon(cfg):
-        return
-    log = wake_state.watchdog_pidfile_path(cfg).with_suffix(".kick.log")
-    try:
-        log.parent.mkdir(parents=True, exist_ok=True)
-        f = open(log, "a")
-        subprocess.Popen(
-            [sys.executable, "-m", "cortex.pacemaker_tick"],
-            stdout=f, stderr=f, stdin=subprocess.DEVNULL,
-            start_new_session=True, env={**os.environ},
-        )
-    except OSError:
-        pass
+        return True
+    wake_state.wake_audit(cfg, "kick_daemon_unreachable", kind,
+                          "socket kick failed; wake deferred to reconcile")
+    sys.stderr.write("[cortex] kick: wake daemon unreachable "
+                     "(socket kick failed) — wake deferred to reconcile\n")
+    return False
 
 
 def kick(cfg: dict, kind: str, **fields) -> dict:
@@ -135,10 +112,10 @@ def kick(cfg: dict, kind: str, **fields) -> dict:
     asleep). The note body itself is claimed + rendered by note.py on the
     visible round; this kick only opens that round.
 
-    Asleep -> reason flag + wake machinery (tick).
+    Asleep -> reason flag + wake machinery (daemon kick).
     Awake (ANY kind) -> queue the reason AND mark the silence cycle's timer as
       immediately elapsed (wake_state.mark_kick_round) in the SAME lock, then
-      spawn one tick so the watchdog/tick's silence_action fires the carrier
+      kick the daemon so silence_action fires the carrier
       free-round now and renders/consumes the reason inline — no ear-ride
       distinction needed (interrupt vs plain), every awake kick opens a round
       the same way. A kick landing while an earlier carrier is still pending is
@@ -148,12 +125,11 @@ def kick(cfg: dict, kind: str, **fields) -> dict:
     Best-effort throughout: a lock/state failure drops the kick silently."""
     detail = " ".join(f"{k}={v}" for k, v in fields.items() if v is not None)
     reason = _reason_text(cfg, kind, **fields)
-    sentinel_pid = None
     was_awake = False
     round_marked = False
     try:
         def _mutate(d):
-            nonlocal sentinel_pid, was_awake, round_marked
+            nonlocal was_awake, round_marked
             was_awake = bool(d.get("awake"))
             _append_reason(cfg, d, reason)
             if was_awake:
@@ -164,11 +140,10 @@ def kick(cfg: dict, kind: str, **fields) -> dict:
                     d["kick_round"] = True
                     round_marked = True
                 return
-            # Asleep: cancel any in-flight alarm epoch, drop the durable ledger,
-            # release the recorded sentinel. Floor hold is cleared out-of-lock.
+            # Asleep: cancel any in-flight alarm epoch, drop the durable
+            # ledger. Floor hold is cleared out-of-lock.
             d["gen"] = int(d.get("gen") or 0) + 1
             d.pop("next_wake_at", None)
-            sentinel_pid = d.pop("sentinel_pid", None)
 
         wake_state.conditional_mutate(cfg, None, _mutate)
     except wake_state.StateValidationError:
@@ -176,15 +151,14 @@ def kick(cfg: dict, kind: str, **fields) -> dict:
 
     wake_state.wake_audit(cfg, "kick", kind, detail)
     if was_awake:
-        if round_marked:
-            _spawn_tick(cfg)  # tick -> silence_action carrier free-round
+        delivered = _kick_daemon(cfg, kind) if round_marked else False
         return {"ok": True, "kind": kind, "awake": True, "ticked": False,
-                "round_opened": round_marked}
+                "round_opened": round_marked, "delivered": delivered}
 
-    _sigterm(sentinel_pid)
     _clear_floor_deadline(cfg)
-    _spawn_tick(cfg)
-    return {"ok": True, "kind": kind, "awake": False, "ticked": True}
+    delivered = _kick_daemon(cfg, kind)
+    return {"ok": True, "kind": kind, "awake": False, "ticked": True,
+            "delivered": delivered}
 
 
 def main(argv: list[str] | None = None) -> int:

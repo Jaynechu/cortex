@@ -1,9 +1,9 @@
 """cortex.kick (reasons v2 + T1 kick_round carrier): under flock + epoch, asleep
-= gen bump + floor clear + sentinel kill + one detached tick; awake = reason
+= gen bump + floor clear + one daemon kick; awake = reason
 queued + kick_round marked (idempotent) + one detached tick so the watchdog/
 tick silence_action fires the carrier free-round now. Every kick appends a
 rendered reason line (config [kick].reason_*) to wake_state for the next
-delivered note; the kind also lands in the wake-audit log. All tick/sentinel
+delivered note; the kind also lands in the wake-audit log. All daemon/socket
 spawns are stubbed — never kick the live cortex."""
 from __future__ import annotations
 
@@ -41,9 +41,10 @@ def cfg(tmp_path):
 
 @pytest.fixture
 def _stub_spawn(monkeypatch):
-    """Capture tick spawns instead of launching a real pacemaker_tick."""
+    """Capture daemon kicks instead of opening a real socket."""
     calls = []
-    monkeypatch.setattr(kick, "_spawn_tick", lambda cfg: calls.append(cfg))
+    monkeypatch.setattr(kick, "_kick_daemon",
+                        lambda cfg, kind: calls.append(cfg) or True)
     return calls
 
 
@@ -63,15 +64,14 @@ def _signal(cfg) -> str:
 
 
 def test_kick_asleep_ticks_and_writes_reason(cfg, _stub_spawn):
-    wake_state.update(cfg, awake=False, next_wake_at="2026-07-17T09:00:00",
-                      sentinel_pid=999999)
+    wake_state.update(cfg, awake=False, next_wake_at="2026-07-17T09:00:00")
     r = kick.kick(cfg, "reply", id=7, text="miss you")
     assert r["ok"] and r["ticked"] and not r["awake"]
-    assert len(_stub_spawn) == 1  # exactly one tick spawned
+    assert r["delivered"] is True
+    assert len(_stub_spawn) == 1  # exactly one daemon kick
     d = _ws(cfg)
     assert d["kick_reasons"] == ['Msg #7 replied: "miss you"']  # config template
     assert "next_wake_at" not in d          # ledger cleared
-    assert "sentinel_pid" not in d          # sentinel released
 
 
 def test_kick_bumps_gen_when_asleep(cfg, _stub_spawn):
@@ -184,12 +184,10 @@ def test_note_kind_awake_opens_carrier(cfg, _stub_spawn):
     _assert_carrier(cfg, r, _stub_spawn, "New note #9")
 
 
-# --- T11 P3: daemon socket kick (pacemaker_tick spawn = P4 fallback) ---------
+# --- T11 P4: the daemon socket is the ONLY kick path -------------------------
 
-def test_spawn_tick_prefers_daemon_socket(cfg, monkeypatch):
-    """A reachable daemon takes the kick over the socket — no tick spawned."""
-    import subprocess
-
+def test_kick_daemon_uses_the_socket(cfg, monkeypatch):
+    """A reachable daemon takes the kick over the socket."""
     sent = {}
     # Short socket path: the tmp_path cortex_home blows the 104-byte AF_UNIX cap.
     cfg["daemon"] = {"socket_path": "/tmp/ct-kick-test.sock"}
@@ -198,24 +196,26 @@ def test_spawn_tick_prefers_daemon_socket(cfg, monkeypatch):
         sent["path"], sent["shell"] = str(path), shell
 
     monkeypatch.setattr("synapse_core.scheduler.send_kick", _fake_send_kick)
-    monkeypatch.setattr(subprocess, "Popen",
-                        lambda *a, **k: pytest.fail("tick spawned despite live daemon"))
-    kick._spawn_tick(cfg)
+    assert kick._kick_daemon(cfg, "reply") is True
     assert sent["path"] == "/tmp/ct-kick-test.sock"
     assert sent["shell"] == "cli"
 
 
-def test_spawn_tick_falls_back_to_pacemaker_tick_when_daemon_down(cfg, monkeypatch):
-    """Transition safety (until P4 swaps launchd): an unreachable socket falls
-    back to the detached pacemaker_tick spawn."""
-    import subprocess
-
+def test_kick_daemon_down_is_surfaced_not_swallowed(cfg, monkeypatch, capsys):
+    """No fallback spawn exists any more: an unreachable daemon must leave a
+    trail (wake audit + stderr) instead of dropping the kick silently."""
     async def _refused(path, shell):
         raise FileNotFoundError(path)
 
-    spawned = []
     monkeypatch.setattr("synapse_core.scheduler.send_kick", _refused)
-    monkeypatch.setattr(subprocess, "Popen",
-                        lambda cmd, **k: spawned.append(cmd) or type("P", (), {"pid": 1})())
-    kick._spawn_tick(cfg)
-    assert spawned and "cortex.pacemaker_tick" in spawned[0]
+    assert kick._kick_daemon(cfg, "reply") is False
+    assert "kick_daemon_unreachable" in _audit(cfg)
+    assert "unreachable" in capsys.readouterr().err
+
+
+def test_kick_reports_undelivered_when_daemon_down(cfg, monkeypatch):
+    """The kick result carries delivered=False so the caller (bridge) can see it."""
+    monkeypatch.setattr(kick, "_notify_daemon", lambda cfg: False)
+    wake_state.update(cfg, awake=False)
+    r = kick.kick(cfg, "morning")
+    assert r["ok"] is True and r["delivered"] is False

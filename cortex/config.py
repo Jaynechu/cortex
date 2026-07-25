@@ -85,9 +85,6 @@ _DEFAULTS: dict[str, Any] = {
         # lie_down(next_wake_min=N) clamp (minutes): [0, next_wake_max], every
         # hour (0 = immediate re-wake).
         "next_wake_max": 240,
-        # Exact-time wake: arm cortex.sentinel (one-shot detached sleep-then-tick)
-        # at every lie_down. false = tick-only (launchd 5-min fallback).
-        "sentinel": True,
         # Line written to wake_signal.log at every free-round injection (silence
         # cycle or kick carrier): the free-round note above it, this line last as
         # the final cue. MUST contain the tuck_in_marker family string

@@ -5,7 +5,7 @@ wrong), unless night-sleep or explicit pause/mute. These tests simulate the
 three incident shapes with state-file fixtures and assert self-heal:
   - double-wake (2 residents): watchdog.spawn is idempotent (a live recorded
     pid = no second spawn); ctl.cmd_wake on an alive+awake window is a no-op.
-  - watchdog-death-during-wait: the tick awake gate respawns a dead watchdog.
+  - watchdog-death-during-wait: the awake gate respawns a dead watchdog.
   - stale epoch: a superseded snapshot (gen moved) holds, no respawn/reap.
 """
 from __future__ import annotations
@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from cortex import config, db, pacemaker_tick, wake_state, watchdog
+from cortex import config, db, reconcile, wake_state, watchdog
 
 
 @pytest.fixture
@@ -27,7 +27,6 @@ def cfg(tmp_path):
     c["paths"]["self_schedule_file"] = str(home / "self_schedule.json")
     c["paths"]["transcript_dir"] = str(tmp_path / "transcript")
     c["paths"]["ny_db_pages"] = str(tmp_path / "ny")
-    c["wake"]["sentinel"] = False
     return c
 
 
@@ -157,7 +156,7 @@ def _awake_window(cfg, conn):
 
 
 def test_awake_gate_respawns_dead_watchdog(cfg, monkeypatch):
-    """Watchdog died mid-wake: the 5-min tick awake gate must respawn one so the
+    """Watchdog died mid-wake: the reconcile awake gate must respawn one so the
     resident regains 60s polling + exact-time fuse."""
     conn = db.connect(cfg)
     try:
@@ -170,7 +169,7 @@ def test_awake_gate_respawns_dead_watchdog(cfg, monkeypatch):
         respawned = {"n": 0}
         monkeypatch.setattr(watchdog, "spawn",
                             lambda c: respawned.__setitem__("n", respawned["n"] + 1))
-        pacemaker_tick._handle_awake(conn, cfg, st, snap_gen=snap_gen)
+        reconcile._handle_awake(conn, cfg, st, snap_gen=snap_gen)
         assert respawned["n"] == 1  # dead watchdog respawned
     finally:
         conn.close()
@@ -189,14 +188,14 @@ def test_awake_gate_no_respawn_when_watchdog_alive(cfg, monkeypatch):
         respawned = {"n": 0}
         monkeypatch.setattr(watchdog, "spawn",
                             lambda c: respawned.__setitem__("n", respawned["n"] + 1))
-        pacemaker_tick._handle_awake(conn, cfg, st, snap_gen=snap_gen)
+        reconcile._handle_awake(conn, cfg, st, snap_gen=snap_gen)
         assert respawned["n"] == 0  # live watchdog -> no second spawn
     finally:
         conn.close()
 
 
 def test_awake_gate_stale_epoch_holds_no_respawn(cfg, monkeypatch):
-    """Stale snapshot (gen moved since the tick opened = a user reset / lie_down):
+    """Stale snapshot (gen moved since the pass opened = a user reset / lie_down):
     the awake gate must hold and NOT respawn a watchdog against a dead epoch."""
     conn = db.connect(cfg)
     try:
@@ -207,7 +206,7 @@ def test_awake_gate_stale_epoch_holds_no_respawn(cfg, monkeypatch):
         respawned = {"n": 0}
         monkeypatch.setattr(watchdog, "spawn",
                             lambda c: respawned.__setitem__("n", respawned["n"] + 1))
-        msg = pacemaker_tick._handle_awake(conn, cfg, st, snap_gen=stale_gen)
+        msg = reconcile._handle_awake(conn, cfg, st, snap_gen=stale_gen)
         assert "superseded" in msg
         assert respawned["n"] == 0  # never respawn against a stale epoch
     finally:

@@ -1,6 +1,6 @@
 """Auto-adopt: a cortex window the user opened `claude` in herself (in
-cortex_home) but never registered must be recorded as the resident by the tick
-reconcile instead of firing/spawning a duplicate. No iTerm/ps here — the
+cortex_home) but never registered must be recorded as the resident by the
+reconcile pass instead of firing/spawning a duplicate. No iTerm/ps here — the
 AppleScript/ps layer is stubbed at window.find_adoptable_window /
 window._list_sessions / window._claude_start_on_tty."""
 from __future__ import annotations
@@ -10,7 +10,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from cortex import config, pacemaker_tick, wake_state, window
+from cortex import config, reconcile, wake_state, window
 
 
 @pytest.fixture
@@ -21,7 +21,6 @@ def cfg(tmp_path):
     c["paths"]["cortex_home"] = str(home)
     c["paths"]["marrow_db"] = str(tmp_path / "marrow.db")
     c["paths"]["transcript_dir"] = str(tmp_path / "transcript")
-    c["wake"]["sentinel"] = False
     return c
 
 
@@ -93,7 +92,7 @@ def test_adopt_happy_path_records_resident(cfg, monkeypatch):
     monkeypatch.setattr(wake, "_window_alive", lambda c: False)
     monkeypatch.setattr(window, "find_adoptable_window", lambda c: "SID-MANUAL")
     monkeypatch.setattr(window, "claude_session_id", lambda c: "conv-uuid")
-    msg = pacemaker_tick._adopt_manual_window(cfg)
+    msg = reconcile._adopt_manual_window(cfg)
     assert msg is not None and "SID-MANUAL" in msg
     st = wake_state.load(cfg)
     assert st.get("session_id") == "SID-MANUAL"
@@ -106,7 +105,7 @@ def test_adopt_no_candidate_returns_none(cfg, monkeypatch):
     _stub_lock(monkeypatch)
     monkeypatch.setattr(wake, "_window_alive", lambda c: False)
     monkeypatch.setattr(window, "find_adoptable_window", lambda c: None)
-    assert pacemaker_tick._adopt_manual_window(cfg) is None
+    assert reconcile._adopt_manual_window(cfg) is None
     assert wake_state.load(cfg).get("session_id") is None
 
 
@@ -118,7 +117,7 @@ def test_adopt_alive_under_lock_skips(cfg, monkeypatch):
     called = {"n": 0}
     monkeypatch.setattr(window, "find_adoptable_window",
                         lambda c: called.__setitem__("n", called["n"] + 1) or "X")
-    assert pacemaker_tick._adopt_manual_window(cfg) is None
+    assert reconcile._adopt_manual_window(cfg) is None
     assert called["n"] == 0
 
 
@@ -129,7 +128,7 @@ def test_adopt_disabled_by_config(cfg, monkeypatch):
     probed = {"n": 0}
     monkeypatch.setattr(window, "find_adoptable_window",
                         lambda c: probed.__setitem__("n", probed["n"] + 1) or "X")
-    assert pacemaker_tick._adopt_manual_window(cfg) is None
+    assert reconcile._adopt_manual_window(cfg) is None
     assert probed["n"] == 0  # gated before any scan
 
 
@@ -143,7 +142,7 @@ def test_adopt_cas_loss_records_nothing(cfg, monkeypatch):
     monkeypatch.setattr(window, "claude_session_id", lambda c: None)
     monkeypatch.setattr(wake_state, "set_awake",
                         lambda *a, **k: None)  # CAS lost
-    assert pacemaker_tick._adopt_manual_window(cfg) is None
+    assert reconcile._adopt_manual_window(cfg) is None
     assert wake_state.load(cfg).get("session_id") is None
 
 
@@ -155,12 +154,12 @@ def test_reconcile_adopts_before_firing(cfg, monkeypatch):
     from datetime import timedelta
     monkeypatch.setattr(wake, "_window_alive", lambda c: False)
     fired = {"n": 0}
-    monkeypatch.setattr(pacemaker_tick, "_fire_dead_window",
+    monkeypatch.setattr(reconcile, "_fire_dead_window",
                         lambda conn, c, why: fired.__setitem__("n", fired["n"] + 1))
-    monkeypatch.setattr(pacemaker_tick, "_adopt_manual_window",
+    monkeypatch.setattr(reconcile, "_adopt_manual_window",
                         lambda c: "adopted manual window SID-M")
     now = datetime.now(_tz(cfg))
     wake_state.set_next_wake_at(cfg, (now - timedelta(minutes=5)).isoformat())
-    msg = pacemaker_tick._reconcile(None, cfg, {}, now)
+    msg = reconcile._reconcile(None, cfg, {}, now)
     assert msg == "adopted manual window SID-M"
     assert fired["n"] == 0  # adopted -> never fired

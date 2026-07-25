@@ -5,8 +5,8 @@ this wake's token spend into ct_wake_log, kills the watchdog, flags a rotate
 awake marker. Rotate is an explicit session decision, no auto token judgement.
 
 The interactive window returns control the moment a note is injected, so the
-wake is NOT over when pacemaker_tick exits — this command (or a proxy) is what
-actually ends a wake. force_slept marks a proxy lie-down (timeout/fuse/stale).
+wake is NOT over when the wake runner returns — this command (or a proxy) is
+what actually ends a wake. force_slept marks a proxy lie-down (timeout/fuse/stale).
 """
 from __future__ import annotations
 
@@ -130,7 +130,7 @@ def lie_down(cfg: dict, force_slept: str | None = None, rotate: bool = False,
         # A newer epoch (user reset / newer claim) already superseded this claim
         # -> the wake it was ending is now someone else's live wake. Abort every
         # remaining alarm side effect (floor redraw, watchdog kill, rotate,
-        # ledger, sentinel) so we never re-arm against a stale generation.
+        # ledger) so we never re-arm against a stale generation.
         if not _token_ok(cfg, token):
             return {"tokens": tokens, "cleared_due": cleared,
                     "force_slept": force_slept, "rotated": False,
@@ -146,11 +146,11 @@ def lie_down(cfg: dict, force_slept: str | None = None, rotate: bool = False,
         if _token_ok(cfg, token):
             _kill_watchdog(cfg)
         # Rotate is now an explicit session decision (the --rotate flag), not an
-        # auto token judgement — set it and the NEXT pacemaker wake respawns a
-        # fresh window (SIGTERM claude + fresh spawn) that reads the handoff. The
-        # rotate/retire writes are conditional CHILDREN of the claim gen (they do
-        # NOT bump — bumping would self-invalidate this claim's own sentinel), so
-        # a superseding user reset suppresses them.
+        # auto token judgement — set it and the NEXT wake respawns a fresh window
+        # (SIGTERM claude + fresh spawn) that reads the handoff. The rotate/retire
+        # writes are conditional CHILDREN of the claim gen (they do NOT bump —
+        # bumping would self-invalidate this claim's own alarm), so a superseding
+        # user reset suppresses them.
         rotated = False
         if rotate:
             try:
@@ -158,9 +158,9 @@ def lie_down(cfg: dict, force_slept: str | None = None, rotate: bool = False,
                     cfg, token, _mark_rotated(state.get("transcript"))))
             except wake_state.StateValidationError:
                 pass  # superseded -> the newer epoch owns the window, no rotate
-        # awake marker already cleared atomically by claim_lie_down at entry. The
-        # sentinel arms at the real due time now.
-        next_floor = _arm_sentinel(cfg, next_floor, token)
+        # awake marker already cleared atomically by claim_lie_down at entry.
+        # The durable ledger carries the alarm; the daemon kick makes it instant.
+        persist_next_wake_at(cfg, next_floor, token)
         next_wake = _local_hm(next_floor, cfg)
         return {"tokens": tokens, "cleared_due": cleared,
                 "force_slept": force_slept, "rotated": rotated,
@@ -195,9 +195,8 @@ def _mark_rotated(transcript_path):
 
 def persist_next_wake_at(cfg: dict, next_floor: datetime | None, token=None) -> bool:
     """Persist the durable next-wake ledger for `next_floor` as a CONDITIONAL
-    child of the claim `token`, then notify the wake daemon. This is the alarm
-    write that must survive independently of any sentinel machinery: the ledger
-    is what a restarted daemon/tick reconciles against. Returns False when a
+    child of the claim `token`, then notify the wake daemon. The ledger is the
+    alarm: it is what a restarted daemon reconciles against. Returns False when a
     newer epoch (user reset / newer claim) already superseded this claim — the
     caller must then drop every remaining alarm side effect."""
     iso = _local_iso(next_floor, cfg) if next_floor is not None else None
@@ -225,49 +224,6 @@ def _notify_daemon(cfg: dict) -> None:
         pass
 
 
-def _arm_sentinel(cfg: dict, next_floor: datetime, token=None) -> datetime | None:
-    """Persist the durable next-wake ledger and arm the one-shot exact-time wake
-    sentinel for `next_floor`, all as CONDITIONAL children of the claim `token`.
-    Ledger first (survives a compact/kill that loses the sentinel args). Kills the
-    recorded predecessor sentinel (never orphaned), then spawns a fresh one
-    carrying (gen, state_id, target) as CLI args and conditionally registers its
-    pid.
-
-    BUG A: if a user reset / newer claim bumps gen mid-body, the ledger write and
-    the pid registration are both dropped under the strict lock; a sentinel that
-    was already spawned before losing the race is SIGTERMed and NOT registered.
-    Gated by [wake].sentinel; false = tick-only. Returns `next_floor` so the
-    caller's reported next_wake always agrees with the ledger and sentinel."""
-    _kill_sentinel(cfg)
-    # Conditional ledger write: a bump since the claim -> this alarm is stale,
-    # write nothing (fail closed). No bump: a plain (non-gen) ledger write.
-    if not persist_next_wake_at(cfg, next_floor, token):
-        return next_floor
-    iso = _local_iso(next_floor, cfg) if next_floor is not None else None
-    if not cfg["wake"].get("sentinel", True):
-        return next_floor
-    if next_floor is None:
-        return next_floor
-    seconds = (next_floor - _now_utc()).total_seconds()
-    if seconds < 0:
-        seconds = 0.0
-    try:
-        from cortex import sentinel
-        gen_sid = token if token is not None else (None, None)
-        pid = sentinel.spawn(cfg, seconds, gen=gen_sid[0], state_id=gen_sid[1],
-                             target_iso=iso)
-    except Exception:  # spawning the sentinel must never wedge the lie_down
-        return next_floor
-    # Register the pid ONLY if the claim still owns the epoch. If a newer gen
-    # slipped in between spawn and here, the just-spawned sentinel is an orphan
-    # for a dead epoch: SIGTERM it and register nothing.
-    try:
-        wake_state.conditional_mutate(cfg, token, _set_sentinel_pid(pid))
-    except wake_state.StateValidationError:
-        _sigterm(pid)
-    return next_floor
-
-
 def _set_ledger(iso):
     def _m(d: dict):
         if iso is None:
@@ -276,33 +232,6 @@ def _set_ledger(iso):
             d["next_wake_at"] = iso
         return True
     return _m
-
-
-def _set_sentinel_pid(pid):
-    def _m(d: dict):
-        d["sentinel_pid"] = pid
-        return True
-    return _m
-
-
-def _sigterm(pid) -> None:
-    try:
-        if pid and int(pid) != os.getpid():
-            os.kill(int(pid), signal.SIGTERM)
-    except (ProcessLookupError, PermissionError, TypeError, ValueError):
-        pass
-
-
-def _kill_sentinel(cfg: dict) -> None:
-    """SIGTERM the recorded sentinel predecessor and clear its record. A newer
-    lie_down / user-wake reset calls this before arming a fresh one."""
-    pid = wake_state.get_sentinel_pid(cfg)
-    if pid is not None and pid != os.getpid():
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
-            pass
-    wake_state.clear_sentinel_pid(cfg)
 
 
 def _local_hm(dt: datetime | None, cfg: dict) -> str | None:
