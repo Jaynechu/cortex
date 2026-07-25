@@ -10,13 +10,13 @@ sleeping case: under the wake_state flock + cancellation epoch it
   1. appends a rendered reason flag (config [kick].reason_*, cleared by note.py
      on delivery), then
   2. if cortex is ALREADY AWAKE -> marks the silence cycle's timer as
-     immediately elapsed (wake_state.mark_kick_round) and spawns one detached
-     tick so the watchdog/tick's silence_action fires the carrier free-round
-     now, delivering the reason inline.
+     immediately elapsed (wake_state.mark_kick_round) and kicks the wake daemon
+     so silence_action fires the carrier free-round now, delivering the reason
+     inline.
   3. if cortex is ASLEEP -> bump gen (cancel any in-flight alarm), clear the
      floor ledger hold (next_floor_due_at=None => DUE) + the durable next-wake
-     ledger (next_wake_at), kill the recorded sentinel, then spawn ONE detached
-     pacemaker_tick so the freed floor fires a real wake now.
+     ledger (next_wake_at), kill the recorded sentinel, then kick the daemon so
+     the freed floor fires a real wake now.
 
 Reason templates live in cortex config ([kick].reason_*), never hardcoded. The
 reply reason carries her message text (--text) so cortex sees WHAT she said.
@@ -57,33 +57,19 @@ def _append_reason(cfg: dict, d: dict, reason: str) -> None:
 
 
 def _clear_floor_deadline(cfg: dict) -> None:
-    """Set next_floor_due_at=None on the ct_pacemaker_state JSON so the floor
-    trigger reads DUE (mirror of marrow cortex_bridge._clear_floor_deadline).
-    Best-effort: any db hiccup leaves the hold — the tick still self-heals."""
+    """Release the floor hold so the floor trigger reads DUE (occupancy owns the
+    ct_pacemaker_state access). Best-effort: any db hiccup leaves the hold — the
+    reconcile still self-heals."""
     import sqlite3
 
-    from cortex import db
+    from cortex import db, occupancy
 
     try:
         conn = db.connect(cfg)
     except Exception:
         return
     try:
-        row = conn.execute(
-            "SELECT state FROM ct_pacemaker_state WHERE id = 1").fetchone()
-        if not row:
-            return
-        try:
-            obj = json.loads(row["state"])
-        except (ValueError, TypeError):
-            return
-        if obj.get("next_floor_due_at") is None:
-            return
-        obj["next_floor_due_at"] = None
-        conn.execute(
-            "UPDATE ct_pacemaker_state SET state = ? WHERE id = 1",
-            (json.dumps(obj),))
-        conn.commit()
+        occupancy.clear_floor_deadline(conn)
     except sqlite3.Error:
         pass
     finally:
@@ -103,9 +89,29 @@ def _sigterm(pid) -> None:
         pass
 
 
+def _notify_daemon(cfg: dict) -> bool:
+    """Kick the wake daemon's socket so it re-reads state now (freed floor +
+    cleared ledger, or the just-marked carrier round). Returns False when the
+    daemon is not reachable."""
+    import asyncio
+
+    from synapse_core.scheduler import send_kick
+
+    shell = str((cfg.get("daemon") or {}).get("shell") or "cli")
+    try:
+        asyncio.run(send_kick(config.daemon_socket_path(cfg), shell))
+        return True
+    except (OSError, ValueError, RuntimeError):
+        return False
+
+
 def _spawn_tick(cfg: dict) -> None:
-    """Fire ONE detached pacemaker_tick. Never a bare in-process tick — the tick
-    reads the freed floor + cleared ledger and runs the normal wake path."""
+    """Kick the daemon; until P4 swaps launchd it may not be running, so fall
+    back to ONE detached pacemaker_tick (P4: delete the fallback). Never a bare
+    in-process tick — the tick reads the freed floor + cleared ledger and runs
+    the normal wake path."""
+    if _notify_daemon(cfg):
+        return
     log = wake_state.watchdog_pidfile_path(cfg).with_suffix(".kick.log")
     try:
         log.parent.mkdir(parents=True, exist_ok=True)

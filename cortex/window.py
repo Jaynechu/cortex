@@ -2,15 +2,15 @@
 control via iTerm2 AppleScript (works while the screen is locked — no keyboard
 simulation). Primitives: ensure_window, respawn (fresh window with the emoji +
 bell-marker wake prompt baked in as its first prompt, see fresh_initial_prompt),
-append_wake_signal (the ear bell for an already-running resident window),
-type_wake_signal (typed rearm on ear death), send_esc, say,
-hard_interrupt (process-level SIGINT fallback when esc
-alone may not land, e.g. no focus). A fresh window wakes silently — the baked-in
-prompt is the only trace, no notification, but carries the same bell marker as
-the ear so the marrow UserPromptSubmit hook detects it and injects the full
-wakeup note. An alive resident window is woken by the signal-file ear (a Monitor
-tailing wake_signal.log) instead. The window body is one `claude` running in
-cortex_home with MARROW_CORTEX=cli set explicitly (shell id + identity marker).
+type_wake_signal (the typed bell for an already-running resident window),
+deliver_covert_marker, send_esc, say, hard_interrupt (process-level SIGINT
+fallback when esc alone may not land, e.g. no focus). A fresh window wakes
+silently — the baked-in prompt is the only trace, no notification, but carries
+the same bell as a typed wake so the marrow UserPromptSubmit hook detects it
+(via the wake_state receipt) and injects the full wakeup note. An alive resident
+window is woken by typing that same bell line into it. The window body is one
+`claude` running in cortex_home with MARROW_CORTEX=cli set explicitly (shell id
++ identity marker).
 """
 from __future__ import annotations
 
@@ -43,7 +43,11 @@ def _osa(script: str) -> str:
 
 
 def _esc(text: str) -> str:
-    return text.replace("\\", "\\\\").replace('"', '\\"')
+    # Newlines become AppleScript \n escapes: a raw LF inside a string literal
+    # breaks the script, and a multi-line typed body (free-round note) must reach
+    # the window as one bracketed paste, not as several submitted prompts.
+    return (text.replace("\\", "\\\\").replace('"', '\\"')
+                .replace("\r", "\\r").replace("\n", "\\n"))
 
 
 def is_running() -> bool:
@@ -220,29 +224,6 @@ def _shq(text: str) -> str:
     return "'" + text.replace("'", "'\\''") + "'"
 
 
-def _append_signal_line(cfg: dict, line: str) -> None:
-    p = config.wake_signal_log_path(cfg)
-    try:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        with p.open("a", encoding="utf-8") as f:
-            f.write(line + "\n")
-    except OSError:
-        pass
-
-
-def append_wake_signal(cfg: dict, now, token=None) -> None:
-    """Append one VISIBLE bell line (human text, e.g. '☀️ HH:MM') the armed
-    Monitor ear picks up, and write its machine receipt (write_wake_receipt) so
-    the marrow UserPromptSubmit hook recognizes the on-screen line and injects
-    the full wakeup note — a BELL ONLY, no note body, no read errand. The receipt
-    carries the epoch token so the consumer can suppress a wake a newer epoch
-    superseded. Receipt written BEFORE the line lands, so the ear never surfaces
-    a bell whose receipt is not yet on disk. Best-effort: never crashes the
-    pacemaker."""
-    write_wake_receipt(cfg, now, token=token)
-    _append_signal_line(cfg, wake_signal_line(cfg, now, token=token))
-
-
 _launch_command = launch_command  # back-compat alias
 
 
@@ -260,8 +241,8 @@ def _spawn(cfg: dict, initial_prompt: str | None = None,
             "iTerm window + claude (burns credits, spams the desktop). Your test "
             "reached window._spawn unmocked. Fix: stub the spawn boundary, e.g. "
             "monkeypatch.setattr(window, 'respawn', lambda cfg, initial_prompt="
-            "None, resume_sid=None: 'test-sid'); if the wake takes the ear path "
-            "also stub window.append_wake_signal + wake._signal_landed. The "
+            "None, resume_sid=None: 'test-sid'); if the wake takes the typed "
+            "path also stub window.type_wake_signal + wake._signal_landed. The "
             "conftest autouse fixture _block_real_processes already blocks "
             "osascript/claude subprocess calls; this barrier catches the window-"
             "creation path that fixture cannot reach.")
@@ -471,9 +452,8 @@ def _submit_prompt(sid: str, text: str) -> None:
 
 
 def write_note(cfg: dict, text: str):
-    """Persist the wakeup note to its file and return the path. The ear-based
-    wake references this path in the signal line (no typing); the marrow hook
-    reads it to inject the full note when it sees the bell marker."""
+    """Persist the wakeup note to its file and return the path. The marrow hook
+    reads it to inject the full note when it sees the bell line."""
     note_path = wake_state.wakeup_note_path(cfg)
     note_path.parent.mkdir(parents=True, exist_ok=True)
     note_path.write_text(text)
@@ -498,44 +478,22 @@ def inject_prompt(cfg: dict, text: str) -> bool:
 
 
 def type_wake_signal(cfg: dict, now, token=None) -> bool:
-    """Ear-died rearm (ladder 2a) / resumed-window fallback (Fix 3): type the
-    VISIBLE bell line (human text) into the resident window and write its receipt
-    with rearm=True. It flows through the marrow hook like any wake (receipt
-    matched -> note injected -> session rearms). `token` (gen, state_id), when
-    given, is carried in the receipt so a superseded wake is suppressed by the
-    marrow epoch check (the resume fallback passes it; the ear-death rearm does
-    not need it). Returns False if there is no resident session. Focus-guarded
+    """The wake bell for a live resident window: type the VISIBLE bell line
+    (human text) into it and write its receipt first. It flows through the marrow
+    hook (receipt matched -> note injected). `token` (gen, state_id), when given,
+    is carried in the receipt so a superseded wake is suppressed by the marrow
+    epoch check. Returns False if there is no resident session. Focus-guarded
     like every typing path."""
     write_wake_receipt(cfg, now, token=token, rearm=True)
     return inject_prompt(cfg, wake_signal_line(cfg, now, rearm=True))
 
 
 def deliver_covert_marker(cfg: dict, marker_line: str) -> str:
-    """Deliver a machine-marker line to the resident window the SAME covert way a
-    wake bell reaches it: append it to wake_signal.log so the armed Monitor ear
-    surfaces ONLY the marker (the full instruction body is injected invisibly by
-    the marrow UserPromptSubmit hook keyed on the marker). The visible round is
-    just the short marker line — never the prompt body.
-
-    Reuses the wake ladder rung order: BELL first (log append); typed fallback
-    (inject_prompt) ONLY when the ear did not pick the bell up within
-    ear_timeout_sec — the accepted physical last resort. Returns the rung used:
-    'bell' | 'typed' | 'none' (no resident window to type into)."""
-    from cortex import transcript
-
-    before = transcript.mtime(cfg)
-    _append_signal_line(cfg, marker_line)
-    timeout = float(cfg["wake"].get("ear_timeout_sec", 90))
-    step = 3.0
-    waited = 0.0
-    while waited < timeout:
-        time.sleep(min(step, timeout - waited))
-        waited += step
-        after = transcript.mtime(cfg)
-        if after is not None and (before is None or after > before):
-            return "bell"
-    # Ear missed the bell -> typed fallback (last resort). The typed marker line
-    # still flows through the marrow hook (marker detected -> body injected).
+    """Deliver a machine-marker line to the resident window the SAME way a wake
+    bell reaches it: type ONLY the marker (the full instruction body is injected
+    invisibly by the marrow UserPromptSubmit hook keyed on the marker). The
+    visible round is just the short marker line — never the prompt body. Returns
+    the rung used: 'typed' | 'none' (no resident window to type into)."""
     return "typed" if inject_prompt(cfg, marker_line) else "none"
 
 

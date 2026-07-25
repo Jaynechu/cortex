@@ -182,3 +182,40 @@ def test_note_kind_awake_opens_carrier(cfg, _stub_spawn):
     wake_state.update(cfg, awake=True)
     r = kick.kick(cfg, "note", id=9)
     _assert_carrier(cfg, r, _stub_spawn, "New note #9")
+
+
+# --- T11 P3: daemon socket kick (pacemaker_tick spawn = P4 fallback) ---------
+
+def test_spawn_tick_prefers_daemon_socket(cfg, monkeypatch):
+    """A reachable daemon takes the kick over the socket — no tick spawned."""
+    import subprocess
+
+    sent = {}
+    # Short socket path: the tmp_path cortex_home blows the 104-byte AF_UNIX cap.
+    cfg["daemon"] = {"socket_path": "/tmp/ct-kick-test.sock"}
+
+    async def _fake_send_kick(path, shell):
+        sent["path"], sent["shell"] = str(path), shell
+
+    monkeypatch.setattr("synapse_core.scheduler.send_kick", _fake_send_kick)
+    monkeypatch.setattr(subprocess, "Popen",
+                        lambda *a, **k: pytest.fail("tick spawned despite live daemon"))
+    kick._spawn_tick(cfg)
+    assert sent["path"] == "/tmp/ct-kick-test.sock"
+    assert sent["shell"] == "cli"
+
+
+def test_spawn_tick_falls_back_to_pacemaker_tick_when_daemon_down(cfg, monkeypatch):
+    """Transition safety (until P4 swaps launchd): an unreachable socket falls
+    back to the detached pacemaker_tick spawn."""
+    import subprocess
+
+    async def _refused(path, shell):
+        raise FileNotFoundError(path)
+
+    spawned = []
+    monkeypatch.setattr("synapse_core.scheduler.send_kick", _refused)
+    monkeypatch.setattr(subprocess, "Popen",
+                        lambda cmd, **k: spawned.append(cmd) or type("P", (), {"pid": 1})())
+    kick._spawn_tick(cfg)
+    assert spawned and "cortex.pacemaker_tick" in spawned[0]

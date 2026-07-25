@@ -46,9 +46,22 @@ def awake_no_sentinel(cfg, monkeypatch):
     return cfg
 
 
+_TYPED: list[str] = []
+
+
+@pytest.fixture(autouse=True)
+def _capture_typed(monkeypatch):
+    """Free-round delivery is typed into the window now — capture the keystrokes
+    at the window boundary instead of reading the retired signal file."""
+    from cortex import window
+    _TYPED.clear()
+    monkeypatch.setattr(window, "inject_prompt",
+                        lambda cfg, text: _TYPED.append(text) or True)
+    return _TYPED
+
+
 def _signal_lines(cfg):
-    p = config.wake_signal_log_path(cfg)
-    return p.read_text().splitlines() if p.exists() else []
+    return "\n".join(_TYPED).splitlines()
 
 
 # --- no-user wake (same idle bar, timed from awake_since) ---------------------
@@ -397,7 +410,7 @@ def test_ear_delivery_and_baseline_advance_are_atomic_under_shared_lock(
 
     lock_file = str(wake_state.lock_path(cfg))
     probe = {"lock_held_during_ear_write": None}
-    real_write = watchdog._write_tuck_in_line
+    real_write = watchdog._type_tuck_in_line
 
     def _instrumented_write(cfg_, line):
         # Emulate the replay hook racing in the moment the ear line lands: try to
@@ -415,7 +428,7 @@ def test_ear_delivery_and_baseline_advance_are_atomic_under_shared_lock(
             os.close(fd)
         return real_write(cfg_, line)
 
-    monkeypatch.setattr(watchdog, "_write_tuck_in_line", _instrumented_write)
+    monkeypatch.setattr(watchdog, "_type_tuck_in_line", _instrumented_write)
 
     wake_state.mark_kick_round(cfg)
     assert watchdog.silence_action(cfg, silent_min=0.0) == \
@@ -701,3 +714,45 @@ def test_lie_down_double_fire_single_effect(awake_no_sentinel, monkeypatch):
     finally:
         conn.close()
     assert row["force_slept"] == "auto"
+
+
+def test_failed_typing_does_not_advance_baseline(awake_no_sentinel, monkeypatch):
+    """T11 P3: delivery is typed now, so 'written' no longer means 'delivered'.
+    A typing failure (no resident window) must keep the round's events
+    replayable — last_note_ts stays where it was."""
+    cfg = awake_no_sentinel
+    wake_state.update(cfg, user_replied_this_wake=True)
+    conn = db.connect(cfg)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "session_id TEXT, timestamp TEXT, role TEXT, content TEXT, channel TEXT)")
+    conn.execute(
+        "INSERT INTO events (session_id, timestamp, role, content, channel) "
+        "VALUES ('s', '2026-07-08T03:00:00+00:00', 'user', 'unseen event', 'wx')")
+    conn.commit()
+    conn.close()
+    before = wake_state.get_last_note_ts(cfg)
+
+    from cortex import window
+    monkeypatch.setattr(window, "inject_prompt", lambda cfg_, text: False)
+
+    assert watchdog.silence_action(cfg, silent_min=999.0) == "free-round appended"
+    assert wake_state.get_last_note_ts(cfg) == before  # nothing landed -> no advance
+
+
+def test_typing_raising_window_error_does_not_advance_baseline(
+        awake_no_sentinel, monkeypatch):
+    """A WindowError from the typing boundary is swallowed as a failed delivery
+    (not an exception out of the watchdog), and the baseline still holds."""
+    cfg = awake_no_sentinel
+    wake_state.update(cfg, user_replied_this_wake=True)
+    before = wake_state.get_last_note_ts(cfg)
+
+    from cortex import window
+
+    def _boom(cfg_, text):
+        raise window.WindowError("no session")
+    monkeypatch.setattr(window, "inject_prompt", _boom)
+
+    assert watchdog.silence_action(cfg, silent_min=999.0) == "free-round appended"
+    assert wake_state.get_last_note_ts(cfg) == before

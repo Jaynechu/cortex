@@ -84,25 +84,16 @@ skip_permissions = true        # add --dangerously-skip-permissions so a fresh d
                                # trust dialog never blocks the injected note
 ready_marker = "accept edits"  # TUI footer text signalling claude is ready for input
 ready_timeout_sec = 30         # max wait for readiness after a fresh spawn
-# The signal-file ear (alive-resident wake only). An already-running resident
-# window has a persistent Monitor (command: "tail -n 0 -f <signal_log>", persistent: true); the pacemaker
-# appends a WAKE line to wake it (no keyboard typing). ear_timeout_sec = how
-# long a wake is given to land (transcript grows) before the resident is
-# replaced by a FRESH window that gets the note as its first prompt.
+# An already-running resident window is woken by TYPING the bell line into it.
+# ear_timeout_sec = how long that wake is given to land (transcript grows) before
+# the resident is replaced by a FRESH window that gets the note as its first
+# prompt.
 signal_log = ""                # Default: <cortex_home>/state/wake_signal.log
 ear_timeout_sec = 90           # recovery deadline for an alive-window wake to land before respawn
-# Bounded wait after a RESUMED window comes up for the resumed model to take a
-# turn on its own (the CC harness's background-shell notice usually drives it).
-# A resume replays a long conversation first and the harness-triggered first turn
-# alone can churn 85s+, so this is minutes-scale, NOT the 90s ear timeout. If no
-# NEW assistant-role line appears in the resumed transcript within this window
-# (the prior session had no armed Monitor for the harness to report), cortex types
-# ONE ordinary bell line so the resumed window still gets its wake note.
-resume_turn_timeout_sec = 180
-# A fresh window (rotate / dead resident / ear miss) is spawned with this as
+# A fresh window (rotate / dead resident / bell miss) is spawned with this as
 # claude's FIRST prompt — JUST an emoji, so nothing readable shows in the user's
 # face; the window wakes silently. The full wake instructions (read the note,
-# arm the ear, choose next wake) are injected by marrow's UserPromptSubmit hook
+# choose next wake) are injected by marrow's UserPromptSubmit hook
 # when this exact emoji is submitted in a cortex window.
 wake_prompt = "☀️"
 # Visible bell = HUMAN TEXT ONLY (no machine marker, no epoch token). The
@@ -120,7 +111,7 @@ rearm_suffix = " (ear died — rearm)"
 say_sound = "Glass"
 next_wake_max = 240         # lie_down(next_wake_min=N) clamp upper bound (minutes); floor is 0 (immediate re-wake) at every hour
 sentinel = true             # arm cortex.sentinel (one-shot exact-time wake) at every lie_down; false = tick-only fallback
-# Free-round line written to wake_signal.log at every silence-cycle injection
+# Free-round line typed into the window at every silence-cycle injection
 # (last line of the block, after the freshly rendered note). MUST contain the
 # "[NEW ROUND]" machine-line marker — without it the line resets the silence
 # timer it just armed (perpetual loop). {mins}/{user} optional.
@@ -130,14 +121,11 @@ tuck_in_text = "⏳ [NEW ROUND]"
 # automatically. Substring match: "[CMD" catches every ⚙️ [CMD ct-*] slash-command body.
 machine_line_markers = ["[NEW ROUND]", "[FUSE]", "[CTL]", "[CMD"]
 free_round_note = true       # every free-round injection appends a freshly rendered wakeup note above the marker line (diff mode: only events since the last rendered note this wake)
-# Covert-delivery markers written to wake_signal.log (bell via ear Monitor; typed only if the
-# ear is dead). Only the marker reaches the window; the body is injected invisibly by the marrow
-# hook (fuse -> [cortex].fuse_prompt_text; ctl -> [cortex].ctl_sleep_text from the mins/rotate args).
+# Covert-delivery markers typed into the window. Only the marker reaches the screen; the body is
+# injected invisibly by the marrow hook (fuse -> [cortex].fuse_prompt_text; ctl ->
+# [cortex].ctl_sleep_text from the mins/rotate args).
 fuse_marker = "⚙️ [FUSE]"
 ctl_sleep_marker = "⚙️ [CTL]"
-# lie_down(rotate=True) refuses while this window's own wake-signal ear tail is still alive
-# (its live monitor task replays on resume). Stop the monitor first, then rotate. Plain lie_down never refuses.
-rotate_refuse_text = "Rotate refused: your wake-signal monitor is still running. TaskStop it first, then call lie_down(rotate=true) again."
 
 # Per-wake watchdog thresholds (spawned at injection, killed at lie_down).
 [wake.watchdog]

@@ -15,7 +15,6 @@ import json
 import os
 import signal
 import socket
-import subprocess
 import sys
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
@@ -108,18 +107,6 @@ def lie_down(cfg: dict, force_slept: str | None = None, rotate: bool = False,
     retired, N required at the MCP/CLI layer). `rotate` respawns a fresh window
     next wake. `human_override` (explicit ctl minutes) passes next_wake_min
     unclamped."""
-    # Rotate precondition (P17): refuse a rotate while THIS window's own
-    # wake-signal ear tail is still alive — a live monitor task replays its
-    # completion notification when the rotated window resumes. Refuse BEFORE
-    # claim_lie_down so a refused call consumes no claim and leaves the wake
-    # fully intact; the session TaskStops the monitor and calls again. Only the
-    # single registered window may arm the ear (marrow fail-closed gate), so any
-    # live tail on the resolved signal path is this window's own. Plain
-    # (non-rotate) sleep never refuses — its ear must stay alive.
-    if rotate and _own_ear_tail_alive(cfg):
-        return {"skipped": "rotate_refused", "force_slept": force_slept,
-                "rotated": False, "next_wake": None,
-                "refused": _rotate_refuse_text(cfg)}
     if next_wake_min is not None:
         next_wake_min = clamp_next_wake_minutes(
             next_wake_min, cfg, human_override=human_override)
@@ -171,15 +158,6 @@ def lie_down(cfg: dict, force_slept: str | None = None, rotate: bool = False,
                     cfg, token, _mark_rotated(state.get("transcript"))))
             except wake_state.StateValidationError:
                 pass  # superseded -> the newer epoch owns the window, no rotate
-            if rotated:
-                # Registration dropped (P16): physically kill the retiring
-                # window's wake_signal ear tail so the ear disappears at rotate
-                # time and cannot reappear until the successor legally claims
-                # (marrow's fail-closed arm gate blocks any re-arm meanwhile).
-                # Only the retiring window's own / stale zombie tails exist now;
-                # the successor spawns later. Alarm sentinel/ledger/watchdog and
-                # every other wake_state key are untouched.
-                _kill_ear_tails(cfg)
         # awake marker already cleared atomically by claim_lie_down at entry. The
         # sentinel arms at the real due time now.
         next_floor = _arm_sentinel(cfg, next_floor, token)
@@ -313,111 +291,6 @@ def _sigterm(pid) -> None:
             os.kill(int(pid), signal.SIGTERM)
     except (ProcessLookupError, PermissionError, TypeError, ValueError):
         pass
-
-
-def _own_ear_tail_alive(cfg: dict) -> bool:
-    """True if a live wake_signal ear tail whose process ancestry chains back to
-    THIS resident's claude process is still alive (the rotate precondition).
-    Every tail on the box shares the same signal-log path (_ear_tail_pids has no
-    per-window identity of its own), so ownership is established separately via
-    ps ppid-walk to the registered resident's claude pid (window.find_claude_pid)
-    — an orphan predecessor tail (parent died, reparented to launchd/init) or a
-    foreign window's tail must NEVER block rotate; only the residue sweep
-    (_kill_ear_tails) touches those."""
-    pids = _ear_tail_pids(cfg)
-    if not pids:
-        return False
-    from cortex import window
-    resident_pid = window.find_claude_pid(cfg)
-    if resident_pid is None:
-        return False  # no verified resident pid -> never block on an unowned tail
-    return any(_chains_to_ancestor(pid, resident_pid) for pid in pids)
-
-
-_PPID_WALK_MAX_DEPTH = 20  # bounded: never loop forever on a corrupt ps chain
-
-
-def _ppid_of(pid: int) -> int | None:
-    try:
-        proc = subprocess.run(
-            ["ps", "-o", "ppid=", "-p", str(pid)],
-            capture_output=True, text=True, timeout=5,
-        )
-    except (subprocess.SubprocessError, OSError):
-        return None
-    if proc.returncode != 0:
-        return None
-    out = (proc.stdout or "").strip()
-    try:
-        return int(out)
-    except ValueError:
-        return None
-
-
-def _chains_to_ancestor(pid: int, ancestor_pid: int) -> bool:
-    """True if `ancestor_pid` appears in `pid`'s parent chain (ps -o ppid= walk).
-    Stops at pid 1/0 (launchd/init) or a broken/missing link -> not owned.
-    Bounded depth so a corrupt chain can never spin forever."""
-    current = pid
-    for _ in range(_PPID_WALK_MAX_DEPTH):
-        if current == ancestor_pid:
-            return True
-        parent = _ppid_of(current)
-        if parent is None or parent <= 1:
-            return False
-        current = parent
-    return False
-
-
-def _rotate_refuse_text(cfg: dict) -> str:
-    return str(cfg.get("wake", {}).get("rotate_refuse_text") or "").strip()
-
-
-def _ear_tail_pids(cfg: dict) -> list[int]:
-    """PIDs of live wake_signal ear tails (`tail … -f <signal_log>`). Match is
-    narrowed to the exact resolved signal-log path (pgrep -f) so unrelated tails
-    are never touched; our own pid is skipped. [] on any failure."""
-    try:
-        signal_log = str(config.wake_signal_log_path(cfg))
-    except Exception:
-        return []
-    if not signal_log:
-        return []
-    try:
-        proc = subprocess.run(
-            ["pgrep", "-f", f"-f {signal_log}"],
-            capture_output=True, text=True, timeout=5,
-        )
-    except (subprocess.SubprocessError, OSError):
-        return []
-    if proc.returncode not in (0, 1):
-        return []
-    me = os.getpid()
-    pids = []
-    for raw in (proc.stdout or "").split():
-        try:
-            pid = int(raw)
-        except ValueError:
-            continue
-        if pid <= 0 or pid == me:
-            continue
-        pids.append(pid)
-    return pids
-
-
-def _kill_ear_tails(cfg: dict) -> int:
-    """Best-effort residue sweep at rotate time (P17): SIGTERM any live
-    wake_signal ear tail. The rotate precondition (own-tail-alive refusal) is the
-    real guarantee; this only mops up orphan / stale zombie tails. Returns the
-    count SIGTERMed, 0 on any failure."""
-    killed = 0
-    for pid in _ear_tail_pids(cfg):
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
-            pass
-        killed += 1
-    return killed
 
 
 def _kill_sentinel(cfg: dict) -> None:

@@ -137,10 +137,10 @@ def test_clear_due_self_schedule_bare_dict(cfg):
 
 # --- lie_down: token recording into ct_wake_log ------------------------------
 
-def test_window_wake_alive_uses_ear(cfg, monkeypatch):
-    """Alive resident window: _window_wake writes the note file, appends ONE
-    bell signal line (no respawn, no note-as-prompt), captures the wake row id,
-    sets the awake marker, and lights the watchdog — verified without osascript."""
+def test_window_wake_alive_types_bell(cfg, monkeypatch):
+    """Alive resident window: _window_wake writes the note file, TYPES ONE bell
+    line (no respawn, no note-as-prompt), captures the wake row id, sets the
+    awake marker, and lights the watchdog — verified without osascript."""
     from cortex import wake, watchdog, window
 
     conn = db.connect(cfg)
@@ -155,7 +155,7 @@ def test_window_wake_alive_uses_ear(cfg, monkeypatch):
     monkeypatch.setattr(window, "respawn",
                         lambda c, initial_prompt=None, resume_sid=None: calls.setdefault("respawn", True))
     monkeypatch.setattr(
-        window, "append_wake_signal",
+        window, "type_wake_signal",
         lambda c, now, token=None: calls.setdefault("signal", True))
     monkeypatch.setattr(wake, "_signal_landed", lambda c, before, t: True)
     monkeypatch.setattr(watchdog, "spawn", lambda c: calls.setdefault("watchdog", True))
@@ -165,7 +165,7 @@ def test_window_wake_alive_uses_ear(cfg, monkeypatch):
     conn.close()
     assert res == {"mode": "window", "session_id": None, "text": None}
     assert "respawn" not in calls               # live window is not respawned
-    assert calls["signal"] is True              # bell appended once
+    assert calls["signal"] is True              # bell typed once
     assert calls["watchdog"] is True
     # note file written with the note body
     assert wake_state.wakeup_note_path(cfg).read_text() == "NOTE-BODY"
@@ -192,7 +192,7 @@ def test_window_wake_respawn_delivers_note_as_prompt(cfg, monkeypatch):
     monkeypatch.setattr(window, "respawn",
                         lambda c, initial_prompt=None, resume_sid=None: calls.setdefault("prompt", initial_prompt))
     assert not hasattr(window, "spawn_greeting")  # greeting mechanism removed
-    monkeypatch.setattr(window, "append_wake_signal",
+    monkeypatch.setattr(window, "type_wake_signal",
                         lambda c, now, token=None: calls.setdefault("signal", True))
     # New session jsonl appears promptly (skip the real 8s poll).
     monkeypatch.setattr(transcript, "newest",
@@ -219,7 +219,7 @@ def test_window_wake_respawn_delivers_note_as_prompt(cfg, monkeypatch):
     assert isinstance(r["gen"], int)
     assert r["state_id"] == wake_state.load(cfg)["state_id"]
     assert wake_state.load(cfg)["gen"] == r["gen"]  # not bumped past the receipt
-    assert "signal" not in calls                # fresh path never appends a signal
+    assert "signal" not in calls                # fresh path never types a bell
     assert calls["watchdog"] is True
     d = wake_state.load(cfg)
     assert d["awake"] is True and d["wake_log_id"] == wid
@@ -237,7 +237,7 @@ def test_window_wake_ear_epoch_reject_writes_no_phantom_row(cfg, monkeypatch):
     conn = db.connect(cfg)
     monkeypatch.setattr(wake, "_window_alive", lambda c: True)
     monkeypatch.setattr(
-        window, "append_wake_signal", lambda c, now, token=None: None)
+        window, "type_wake_signal", lambda c, now, token=None: True)
     monkeypatch.setattr(wake, "_signal_landed", lambda c, before, t: True)
     monkeypatch.setattr(watchdog, "spawn", lambda c: None)
 
@@ -441,15 +441,14 @@ def test_window_wake_ear_miss_alive_types_rearm_not_respawn(cfg, monkeypatch):
     conn.commit()
     wid = conn.execute("SELECT MAX(id) AS id FROM ct_wake_log").fetchone()["id"]
 
-    calls = {"respawn": 0, "signal": 0, "rearm": 0}
+    calls = {"respawn": 0}
+    typed = []
     monkeypatch.setattr(wake, "_window_alive", lambda c: True)
     monkeypatch.setattr(
         window, "respawn",
         lambda c, initial_prompt=None, resume_sid=None: calls.__setitem__("respawn", calls["respawn"] + 1))
-    monkeypatch.setattr(window, "append_wake_signal",
-                        lambda c, now, token=None: calls.__setitem__("signal", calls["signal"] + 1))
     monkeypatch.setattr(window, "type_wake_signal",
-                        lambda c, now: calls.__setitem__("rearm", calls["rearm"] + 1) or True)
+                        lambda c, now, token=None: typed.append(token) or True)
     # first poll (original signal) misses, second poll (after rearm) lands
     landings = iter([False, True])
     monkeypatch.setattr(wake, "_signal_landed", lambda c, before, t: next(landings))
@@ -460,8 +459,8 @@ def test_window_wake_ear_miss_alive_types_rearm_not_respawn(cfg, monkeypatch):
     conn.close()
     assert res["mode"] == "window"
     assert calls["respawn"] == 0   # alive window is NOT respawned
-    assert calls["signal"] == 1    # original ear bell once
-    assert calls["rearm"] == 1     # rearm typed once
+    assert len(typed) == 2         # first bell (with epoch token), then the retype
+    assert typed[0] is not None and typed[1] is None
     assert wake_state.load(cfg)["awake"] is True and wake_state.load(cfg)["wake_log_id"] == wid
 
 
@@ -475,7 +474,7 @@ def test_window_wake_ear_miss_dead_respawns(cfg, monkeypatch):
         (db.utcnow_iso(), "dead"))
     conn.commit()
 
-    calls = {"respawn": 0, "rearm": 0}
+    calls = {"respawn": 0, "typed": 0}
     # alive on the initial gate, dead when the ladder re-checks
     alive = iter([True, False])
     monkeypatch.setattr(wake, "_window_alive", lambda c: next(alive))
@@ -483,9 +482,8 @@ def test_window_wake_ear_miss_dead_respawns(cfg, monkeypatch):
         window, "respawn",
         lambda c, initial_prompt=None, resume_sid=None: calls.__setitem__("respawn", calls["respawn"] + 1))
     monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, preexisting: "/t/new.jsonl")
-    monkeypatch.setattr(window, "append_wake_signal", lambda c, now, token=None: None)
     monkeypatch.setattr(window, "type_wake_signal",
-                        lambda c, now: calls.__setitem__("rearm", calls["rearm"] + 1))
+                        lambda c, now, token=None: calls.__setitem__("typed", calls["typed"] + 1) or True)
     monkeypatch.setattr(wake, "_signal_landed", lambda c, before, t: False)  # never lands
     monkeypatch.setattr(watchdog, "spawn", lambda c: None)
 
@@ -494,7 +492,7 @@ def test_window_wake_ear_miss_dead_respawns(cfg, monkeypatch):
     conn.close()
     assert res["mode"] == "window"
     assert calls["respawn"] == 1   # dead window respawned exactly once
-    assert calls["rearm"] == 0     # dead window is not re-typed
+    assert calls["typed"] == 1     # first bell only; a dead window is not re-typed
 
 
 def test_window_wake_falls_back_on_window_error(cfg, monkeypatch):
@@ -558,36 +556,25 @@ def test_store_window_tokens_reaches_budget_line(cfg):
 
 # --- signal-file ear ----------------------------------------------------------
 
-def test_append_wake_signal_line_format(cfg):
-    """append_wake_signal writes exactly one VISIBLE bell line = human text only
-    ('☀️ HH:MM'), no machine marker on screen. The machine data goes to the
-    wake_state receipt instead."""
+def test_type_wake_signal_line_format(cfg, monkeypatch):
+    """type_wake_signal types exactly one VISIBLE bell line = human text only
+    ('☀️ HH:MM'), no machine marker on screen, and writes NOTHING to disk beyond
+    the wake_state receipt (which carries the machine data)."""
     from datetime import datetime as _dt
 
     from cortex import wake_state, window
 
+    typed = []
+    monkeypatch.setattr(window, "inject_prompt",
+                        lambda c, text: typed.append(text) or True)
     now = _dt(2026, 7, 11, 9, 5, tzinfo=timezone.utc)
-    window.append_wake_signal(cfg, now, token=(3, "cafe"))
-    text = config.wake_signal_log_path(cfg).read_text().strip()
-    assert text == "☀️ 09:05"
+    window.type_wake_signal(cfg, now, token=(3, "cafe"))
+    assert typed == ["☀️ 09:05"]
+    assert not config.wake_signal_log_path(cfg).exists()  # ear file retired
     r = wake_state.load(cfg)["wake_receipt"]
     assert r["text"] == "☀️ 09:05"
     assert r["gen"] == 3 and r["state_id"] == "cafe"
-    assert r["rearm"] is False
     assert r["template_prefix"] == "☀️ "
-
-
-def test_append_wake_signal_appends_not_overwrites(cfg):
-    """Multiple signals accumulate (the ear tails the file)."""
-    from datetime import datetime as _dt
-
-    from cortex import window
-
-    now = _dt(2026, 7, 11, 9, 5, tzinfo=timezone.utc)
-    window.append_wake_signal(cfg, now)
-    window.append_wake_signal(cfg, now)
-    lines = config.wake_signal_log_path(cfg).read_text().strip().splitlines()
-    assert len(lines) == 2
 
 
 def test_wake_signal_line_is_human_text_only(cfg):
@@ -602,6 +589,35 @@ def test_wake_signal_line_is_human_text_only(cfg):
     # rearm/token no longer change the RENDERED text — receipt carries them.
     assert window.wake_signal_line(cfg, now, rearm=True) == "☀️ 09:05"
     assert window.wake_signal_line(cfg, now, token=(2, "beef")) == "☀️ 09:05"
+
+
+def test_deliver_covert_marker_types_directly(cfg, monkeypatch):
+    """T11 P3: the covert marker is typed straight into the window — no ear file
+    write, no wait. Only the marker line reaches the screen."""
+    from cortex import window
+
+    typed = []
+    monkeypatch.setattr(window, "inject_prompt",
+                        lambda c, text: typed.append(text) or True)
+    assert window.deliver_covert_marker(cfg, "⚙️ [FUSE]") == "typed"
+    assert typed == ["⚙️ [FUSE]"]
+    assert not config.wake_signal_log_path(cfg).exists()
+
+
+def test_deliver_covert_marker_reports_none_without_window(cfg, monkeypatch):
+    from cortex import window
+
+    monkeypatch.setattr(window, "inject_prompt", lambda c, text: False)
+    assert window.deliver_covert_marker(cfg, "⚙️ [CTL] mins=30") == "none"
+
+
+def test_esc_escapes_newlines_for_one_paste(cfg):
+    """A multi-line free-round body must reach iTerm as ONE AppleScript string
+    (\n escapes), not as raw linefeeds that would submit line by line."""
+    from cortex import window
+
+    assert window._esc("note line\nmore\r\n⏳ [NEW ROUND]") == \
+        "note line\\nmore\\r\\n⏳ [NEW ROUND]"
 
 
 def test_type_wake_signal_writes_rearm_receipt(cfg, monkeypatch):
@@ -1316,8 +1332,8 @@ def test_window_wake_dead_resumes_when_sid_present(cfg, monkeypatch):
     monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, preexisting: "/t/new.jsonl")
     # The Fix-3 fallback bell is exercised by its own tests; here we only assert
     # the resume LAUNCH stays clean, so stub it out (it would otherwise poll for a
-    # model turn for resume_turn_timeout_sec).
-    monkeypatch.setattr(wake, "_resume_fallback_bell", lambda *a, **k: None)
+    # the resumed window a bell).
+    monkeypatch.setattr(wake, "_resume_bell", lambda *a, **k: None)
     monkeypatch.setattr(watchdog, "spawn", lambda c: None)
 
     from datetime import datetime as _dt
@@ -1359,7 +1375,7 @@ def test_window_wake_dead_resumes_from_newest_jsonl_when_hint_none(cfg, monkeypa
                          calls.__setitem__("launch_command",
                                            window.launch_command(c, initial_prompt, resume_sid))))
     monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, preexisting: "/t/new.jsonl")
-    monkeypatch.setattr(wake, "_resume_fallback_bell", lambda *a, **k: None)
+    monkeypatch.setattr(wake, "_resume_bell", lambda *a, **k: None)
     monkeypatch.setattr(watchdog, "spawn", lambda c: None)
 
     from datetime import datetime as _dt
@@ -1397,7 +1413,7 @@ def test_window_wake_dead_resumes_newest_over_stale_recorded_hint(cfg, monkeypat
                          calls.__setitem__("launch_command",
                                            window.launch_command(c, initial_prompt, resume_sid))))
     monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, preexisting: "/t/new.jsonl")
-    monkeypatch.setattr(wake, "_resume_fallback_bell", lambda *a, **k: None)
+    monkeypatch.setattr(wake, "_resume_bell", lambda *a, **k: None)
     monkeypatch.setattr(watchdog, "spawn", lambda c: None)
 
     from datetime import datetime as _dt
@@ -1436,7 +1452,7 @@ def test_window_wake_dead_skips_newer_digest_resumes_older_window_session(cfg, m
                          calls.__setitem__("launch_command",
                                            window.launch_command(c, initial_prompt, resume_sid))))
     monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, preexisting: "/t/new.jsonl")
-    monkeypatch.setattr(wake, "_resume_fallback_bell", lambda *a, **k: None)
+    monkeypatch.setattr(wake, "_resume_bell", lambda *a, **k: None)
     monkeypatch.setattr(watchdog, "spawn", lambda c: None)
 
     from datetime import datetime as _dt

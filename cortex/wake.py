@@ -487,15 +487,11 @@ def _spawn_wake(conn, cfg, now, resume: bool = False,
     prompt is the emoji + bell-marker wake prompt (marrow hook detects the
     marker via the wake_state receipt and injects the note). RESUME (resume=True
     + a recorded claude session UUID): relaunch `claude --resume <sid>` with NO
-    baked prompt and NO receipt — the conversation IS the identity and the CC
-    harness's own background-shell notice (the resumed session's armed ear
-    Monitor tail has no completion record) drives the model to take a turn on its
-    own. A minimal safety net (Fix 3): if that self-driven turn never appears
-    within the bounded readiness window (the prior session died with no armed
-    Monitor, so the harness had nothing to report), type ONE ordinary bell line
-    (ear-style, machine-tagged, epoch-token in its receipt) so the resumed window
-    still gets its note. Resume with no recorded UUID -> fall back to a fresh
-    spawn. Sets the awake marker + lights the watchdog. Returns a result dict, or
+    baked prompt — the conversation IS the identity — then, once the window is
+    ready and the awake flip committed, type ONE ordinary bell line (machine-
+    tagged, epoch-token in its receipt) so the resumed window gets its note
+    without waiting on anything. Resume with no recorded UUID -> fall back to a
+    fresh spawn. Sets the awake marker + lights the watchdog. Returns a dict, or
     None on window failure (caller -> _resume_or_fresh_dead retries as fresh
     on a resume failure, _window_wake -> headless on a fresh failure).
 
@@ -509,13 +505,9 @@ def _spawn_wake(conn, cfg, now, resume: bool = False,
     returns the new sid -- it no longer persists it. The sid is committed here,
     IN THE SAME atomic section as the awake flip (set_awake's session_id= param).
 
-    Resume fallback-bell ordering (Fix 3): the assistant-line baseline is
-    captured BEFORE `claude --resume` is launched (a harness-driven turn written
-    during launch/readiness must count as growth, not get absorbed into the
-    baseline), the awake flip commits immediately once the window is verified
-    ready (so a harness turn landing during the fallback-bell poll sees the
-    session already marked awake, not asleep), and only THEN does the bell poll
-    run, comparing against that pre-launch baseline.
+    Resume bell ordering: the awake flip commits as soon as the window is
+    verified ready, and only THEN is the bell typed — a lie_down triggered by
+    that bell can never race ahead of the registration.
 
     The recorded transcript hint must be the NEW session's jsonl — captured only
     after it actually appears (bounded poll) — never the pre-spawn newest, which
@@ -538,16 +530,10 @@ def _spawn_wake(conn, cfg, now, resume: bool = False,
     except wake_state.StateValidationError:
         token = None
     if resume_sid:
-        # Resume: clean launch. The conversation is the identity; no bell typed,
-        # no receipt written -- the harness's own background-shell notice wakes
-        # the model. The Fix-3 fallback bell (below) is the only thing that ever
-        # types into a resumed window, and only when no self-driven turn appears.
+        # Resume: clean launch, no baked prompt. The bell is typed after the
+        # window is up (_resume_bell), which is the only thing that ever types
+        # into a resumed window.
         initial_prompt = None
-        # Fix 3: baseline BEFORE launch, so a harness-driven turn written during
-        # the resume/readiness window (which can legitimately take real seconds)
-        # counts as growth against this baseline, never gets silently absorbed by
-        # capturing the baseline only after the window already came up.
-        resume_baseline = _assistant_line_count(cfg, resume_sid)
         # Pre-spawn (mtime, size) of the resume file: --resume APPENDS to it (no
         # new file appears), so growth past this is the settle evidence. None =
         # absent now (any later stat counts as growth).
@@ -562,7 +548,6 @@ def _spawn_wake(conn, cfg, now, resume: bool = False,
         # new window's first line AND suppresses it if a newer epoch superseded.
         window.write_wake_receipt(cfg, now, token=token)
         initial_prompt = window.fresh_initial_prompt(cfg, now)
-        resume_baseline = None
     try:
         new_sid = window.respawn(cfg, initial_prompt=initial_prompt, resume_sid=resume_sid)
     except window.WindowError as e:
@@ -589,72 +574,20 @@ def _spawn_wake(conn, cfg, now, resume: bool = False,
         bump=False, session_id=new_sid, cortex_claude_sid=claude_sid)
     watchdog.spawn(cfg)
     if resume_sid:
-        # Fix 3: the awake flip is already committed; the fallback-bell poll now
-        # only decides whether a nudge is needed, comparing against the PRE-LAUNCH
-        # baseline captured above (never re-captured after launch).
-        _resume_fallback_bell(cfg, now, token, resume_sid, resume_baseline)
+        # The awake flip is already committed; the resumed window is ready, so
+        # type ONE bell straight away (no harness notice to wait for since the
+        # Monitor ear was retired). Receipt carries the epoch token, so a
+        # superseded wake is still suppressed by the marrow hook.
+        _resume_bell(cfg, now, token)
     return {"mode": "window", "session_id": None, "text": None}
 
 
-_RESUME_TURN_POLL_STEP_S = 3.0
-
-
-def _assistant_line_count(cfg, resume_sid: str) -> int:
-    """Count assistant-role entries in the resumed conversation's transcript
-    jsonl (<transcript_dir>/<resume_sid>.jsonl). Top-level `type == "assistant"`
-    is the model-turn marker (same shape window_tokens reads). A missing/
-    unreadable file -> 0. Used to detect a NEW model turn after a resume WITHOUT
-    relying on mtime (hook writes touch mtime -> false positive, observed live)."""
-    from cortex import transcript
-
-    p = transcript.transcript_dir(cfg) / f"{resume_sid}.jsonl"
-    try:
-        n = 0
-        with p.open("r", encoding="utf-8") as f:
-            for line in f:
-                try:
-                    o = json.loads(line)
-                except ValueError:
-                    continue
-                if isinstance(o, dict) and o.get("type") == "assistant":
-                    n += 1
-        return n
-    except OSError:
-        return 0
-
-
-def _resume_fallback_bell(cfg, now, token, resume_sid: str, baseline: int) -> None:
-    """Fix 3 safety net: a resumed window normally wakes itself via the CC
-    harness's own background-shell notice (its armed ear Monitor had no
-    completion record) -- that alone drives a full model turn. But if the prior
-    session died with NO armed Monitor, the harness has nothing to report and the
-    resumed model sits idle. Poll the resumed conversation's transcript for a NEW
-    assistant-role line (NOT mtime -- hook writes touch mtime, a false positive
-    observed live) for up to resume_turn_timeout_sec (default 180s: a resume
-    replays a long conversation first and the harness-triggered turn alone can
-    churn 85s+). If a new assistant line appears, do nothing (no bell, no
-    receipt). On timeout with no new model turn, type ONE ordinary bell line
-    (ear-style, machine-tagged, via type_wake_signal) so the resumed window still
-    gets its note. The bell carries the epoch token in its receipt (Fix 4) like
-    the ear path, so a superseded wake is suppressed by the marrow hook.
-
-    `baseline` MUST be the assistant-line count captured BEFORE `claude --resume`
-    was launched (codex adversarial-review Fix 3): capturing it here, after launch
-    +readiness, let a harness-driven turn written during that (real, multi-second)
-    window land inside the baseline itself, so growth was never observed and the
-    bell fired at the full timeout regardless -- duplicating the wake every time.
-    The caller (_spawn_wake) also commits the awake flip BEFORE calling this, so a
-    harness turn landing during this poll sees the session already marked awake
-    (a lie_down() call mid-poll is not wrongly rejected as "not awake")."""
+def _resume_bell(cfg, now, token) -> None:
+    """Type ONE bell into a freshly resumed window so it gets its note. Same
+    receipt+bell shape as any typed wake; best-effort (a typing failure must not
+    unwind the committed awake flip)."""
     from cortex import window
 
-    timeout = float(cfg["wake"].get("resume_turn_timeout_sec", 180))
-    waited = 0.0
-    while waited < timeout:
-        time.sleep(min(_RESUME_TURN_POLL_STEP_S, timeout - waited))
-        waited += _RESUME_TURN_POLL_STEP_S
-        if _assistant_line_count(cfg, resume_sid) > baseline:
-            return  # the harness's own notice already drove a model turn
     try:
         window.type_wake_signal(cfg, now, token=token)
     except window.WindowError:
@@ -668,15 +601,14 @@ def _window_wake(conn, cfg, note_text, now, respawn: bool = False,
     with a DEAD resident -> RESUME the same conversation (`claude --resume`) —
     context is intact; a resume attempt that fails to land falls back to fresh
     (_resume_or_fresh_dead), so a dead window always ends in a live awake
-    cortex, never nothing. An alive resident window
-    is woken via the signal-file ear: write the note file (marrow hook reads it
-    to inject), append a bell line its armed Monitor tails, then verify the wake
-    landed (transcript mtime grows within ear_timeout_sec).
+    cortex, never nothing. An alive resident window is woken by TYPING the bell
+    line into it: write the note file (marrow hook reads it to inject), type the
+    bell (receipt written first), then verify the wake landed (transcript mtime
+    grows within ear_timeout_sec).
 
-    Ear-miss ladder (no fresh-respawn-on-miss for an alive window):
-      a. alive claude -> TYPE the bell line + rearm suffix into the window; that
-         typed prompt flows through the marrow hook (note injected, session
-         rearms). Poll again; land -> done.
+    Miss ladder (no fresh-respawn-on-miss for an alive window):
+      a. alive claude -> retype the bell line; that typed prompt flows through
+         the marrow hook (note injected). Poll again; land -> done.
       b. only a DEAD claude/session -> resume (or fresh on failure).
       c. respawn failure is the sole alert point (handled by the caller).
 
@@ -713,7 +645,7 @@ def _window_wake(conn, cfg, note_text, now, respawn: bool = False,
     token = (sleep_gen, sleep_sid)
     try:
         before = transcript.mtime(cfg)
-        window.append_wake_signal(cfg, now, token=token)
+        window.type_wake_signal(cfg, now, token=token)
         if not _signal_landed(cfg, before, timeout):
             landed = _ear_miss_ladder(conn, cfg, now, timeout,
                                       wake_reasons=wake_reasons)
@@ -741,8 +673,8 @@ def _window_wake(conn, cfg, note_text, now, respawn: bool = False,
 
 def _ear_miss_ladder(conn, cfg, now, timeout: float,
                      wake_reasons: str | None = None) -> dict | None:
-    """Ear miss on a resident window. Ladder:
-      a. claude ALIVE -> type the rearm bell line, poll again; land -> ear wake.
+    """Bell missed on a resident window. Ladder:
+      a. claude ALIVE -> retype the bell line, poll again; land -> wake done.
       b. claude DEAD  -> resume the same conversation (`claude --resume`). Only
          when no resumable session UUID exists, or the resume spawn itself
          fails, do we fall back to a fresh spawn.

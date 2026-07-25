@@ -107,7 +107,7 @@ def spawn(cfg: dict) -> int | None:
     that outlives the pacemaker tick. Singleton guard (permanent-residency
     invariant): if the recorded pidfile still names a LIVE watchdog, do NOT spawn
     a second — return its pid. Only an absent/dead record spawns a fresh one. This
-    is the single choke point behind every set_awake caller (fresh / ear / rearm)
+    is the single choke point behind every set_awake caller (fresh / typed bell)
     and marrow's _spawn_watchdog_if_absent, so a re-wake of an already-resident
     window never leaks a duplicate watchdog. Returns the live/new pid.
 
@@ -172,7 +172,7 @@ def _fuse(cfg: dict, grace: float) -> None:
     Hard deadline on the whole grace phase — the fuse must never hang.
 
     Covert delivery: only the "⚙️ [FUSE]" marker reaches the window (bell via the
-    ear Monitor; typed only if the ear is dead). The full FUSE instruction body is
+    typed into the window). The full FUSE instruction body is
     injected invisibly by the marrow hook keyed on the marker ([cortex].fuse_prompt_text)."""
     from cortex import lie_down as lie_down_mod
 
@@ -245,14 +245,14 @@ def _free_round_note(cfg: dict) -> tuple[str, str | None]:
             # advance_baseline=False: render must NOT persist the baseline. The
             # caller advances it only after the injection is committed.
             # claim_ct_notes=False (F9): a ct note must NOT be claimed at render
-            # time — the render can run on a tick whose ear write is later dropped
+            # time — the render can run on a tick whose delivery is later dropped
             # (stale epoch) and would silently swallow the note. The caller claims
-            # ct notes separately AFTER the ear write commits.
+            # ct notes separately AFTER the delivery commits.
             # settle=True: this free-round render clears kick reasons / stamps
             # receipts (restoring the prior clear-at-render behavior — the line is
-            # about to be written to the ear). ct notes stay deferred
-            # (claim_ct_notes=False) and settle in _deliver_ct_notes_to_ear AFTER
-            # the ear write commits, so a dropped write never swallows a ct note.
+            # about to be typed into the window). ct notes stay deferred
+            # (claim_ct_notes=False) and settle in _deliver_ct_notes AFTER the
+            # delivery commits, so a dropped delivery never swallows a ct note.
             data = note.gather(conn, cfg, now, window_sid=sid,
                                advance_baseline=False, consume_kick=True,
                                claim_ct_notes=False, settle=True)
@@ -300,30 +300,26 @@ def _build_tuck_in_line(cfg: dict, mins: float) -> tuple[str, str | None]:
     return line, pending
 
 
-def _write_tuck_in_line(cfg: dict, line: str) -> bool:
-    """Append a prebuilt tuck-in line to wake_signal.log (the ear Monitor
-    delivers it as a session turn). Byte-identical output to the old path.
-    Returns True when the line was written (or was empty), False on OSError so
-    the atomic deliver+advance path can skip the baseline advance on a failed
-    ear write (no lost events)."""
+def _type_tuck_in_line(cfg: dict, line: str) -> bool:
+    """Type a prebuilt tuck-in line into the resident window (one submitted
+    turn). Same text as before, delivered by keystrokes instead of the retired
+    ear. Returns True when the line landed (or was empty), False when there is no
+    resident window / typing failed, so the atomic deliver+advance path skips the
+    baseline advance on a failed delivery (no lost events)."""
     if not line:
         return True
     try:
-        p = config.wake_signal_log_path(cfg)
-        p.parent.mkdir(parents=True, exist_ok=True)
-        with open(p, "a") as f:
-            f.write(line + "\n")
-        return True
-    except OSError:
+        return bool(window.inject_prompt(cfg, line))
+    except window.WindowError:
         return False
 
 
-def _deliver_ct_notes_to_ear(cfg: dict) -> None:
-    """F9: after a free-round line has committed + been written to the ear, claim
-    any pending ct notes and append them to the ear too — a real visible round is
-    now guaranteed to surface them. Stamps claimed_by='cortex.free_round'. Done
-    OUTSIDE the render (which passed claim_ct_notes=False) so an off-screen tick
-    whose ear write was dropped never claims a note. Best-effort: never raises."""
+def _deliver_ct_notes(cfg: dict) -> None:
+    """F9: after a free-round line has committed + landed, claim any pending ct
+    notes and type them too — a real visible round is now guaranteed to surface
+    them. Stamps claimed_by='cortex.free_round'. Done OUTSIDE the render (which
+    passed claim_ct_notes=False) so an off-screen tick whose delivery was dropped
+    never claims a note. Best-effort: never raises."""
     try:
         from cortex import db, note
         conn = db.connect(cfg)
@@ -332,7 +328,7 @@ def _deliver_ct_notes_to_ear(cfg: dict) -> None:
         finally:
             conn.close()
         if text:
-            _write_tuck_in_line(cfg, text)
+            _type_tuck_in_line(cfg, text)
     except Exception:
         pass
 
@@ -390,8 +386,8 @@ def silence_action(cfg: dict, silent_min: float, *, allow_tuck: bool = True) -> 
         wake_state.take_kick_round(cfg)  # consume: exactly one carrier fire
         if allow_tuck:
             wake_state.deliver_then_advance(
-                cfg, lambda: _write_tuck_in_line(cfg, line), pending_ts)
-            _deliver_ct_notes_to_ear(cfg)  # F9: claim ct notes now the round surfaces
+                cfg, lambda: _type_tuck_in_line(cfg, line), pending_ts)
+            _deliver_ct_notes(cfg)  # F9: claim ct notes now the round surfaces
         return "kick free-round appended"
 
     if not wake_state.user_replied_this_wake(cfg):
@@ -437,8 +433,8 @@ def silence_action(cfg: dict, silent_min: float, *, allow_tuck: bool = True) -> 
         return None  # awake cleared under us -> no injection
     if allow_tuck:
         wake_state.deliver_then_advance(
-            cfg, lambda: _write_tuck_in_line(cfg, line), pending_ts)
-        _deliver_ct_notes_to_ear(cfg)  # F9: claim ct notes now the round surfaces
+            cfg, lambda: _type_tuck_in_line(cfg, line), pending_ts)
+        _deliver_ct_notes(cfg)  # F9: claim ct notes now the round surfaces
     return "free-round appended"
 
 
@@ -482,7 +478,7 @@ def run(cfg: dict) -> int:
             continue  # DND: no reaps / tuck-ins / fuse while paused
 
         # Silence source = minutes since the last REAL user message (assistant
-        # turns / system writes / ear injections do NOT reset it). None (no user
+        # turns / system writes / machine injections do NOT reset it). None (no user
         # message found in tail) -> 0.0 = hold, same as an unreadable transcript.
         silent_min = transcript.user_silent_min(cfg) or 0.0
         tokens = transcript.window_tokens(cfg)

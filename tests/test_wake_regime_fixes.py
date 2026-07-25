@@ -4,8 +4,8 @@
           preserved on every failure path; claim+spawn serialized.
   Fix 2 - resume readiness returns a verified result or raises WindowError; a
           readiness timeout no longer looks like success.
-  Fix 3 - a resumed wake types ONE machine-tagged bell only when no new model
-          turn (assistant line) appears within resume_turn_timeout_sec.
+  Fix 3 - a resumed wake types ONE machine-tagged bell as soon as the window is
+          ready (T11 P3: the Monitor-notice wait is gone).
   Fix 4 - REMOVED (2026-07-20): the spawn-path set_awake CAS is gone; the
           physically-up window is the resident, unconditionally.
   Fix 5 - the wake note opens with a config-driven machine-origin tag.
@@ -287,7 +287,7 @@ def test_spawn_wake_resume_readiness_failure_surfaces_none(cfg, monkeypatch):
     assert calls == ["live-uuid", None]  # resume tried, then fresh fallback fired
 
 
-# ── Fix 3: resumed wake -> conditional machine-tagged bell ────────────────────
+# ── Fix 3: resumed wake -> ONE machine-tagged bell once the window is ready ───
 
 def _write_assistant_lines(cfg, resume_sid: str, n: int) -> None:
     from cortex import transcript
@@ -298,82 +298,66 @@ def _write_assistant_lines(cfg, resume_sid: str, n: int) -> None:
     (tdir / f"{resume_sid}.jsonl").write_text("\n".join(json.dumps(r) for r in rows))
 
 
-def test_resume_fallback_types_bell_when_no_model_turn(cfg, monkeypatch):
-    """Fix 3: the resumed conversation produces NO new assistant line within the
-    timeout (the prior session had no armed Monitor for the harness to report),
-    so cortex types ONE machine-tagged bell (via type_wake_signal) carrying the
-    epoch token in its receipt. baseline is the PRE-LAUNCH count (passed in
-    explicitly, never re-captured inside the function -- codex adversarial-review
-    Fix 3)."""
-    from cortex import wake, window
+def test_resume_types_one_bell_with_epoch_token(cfg, monkeypatch):
+    """T11 P3: a resumed window gets ONE typed bell immediately after the awake
+    flip — no Monitor-notice wait, no transcript polling. The bell carries the
+    epoch token in its receipt so a superseded wake is still suppressed."""
+    from cortex import wake, watchdog, window
 
-    cfg["wake"]["resume_turn_timeout_sec"] = 0.02
-    _write_assistant_lines(cfg, "resume-uuid", 1)  # never grows past baseline
+    _seed_wake_row(cfg, "resume-bell")
+    wake_state.update(cfg, transcript="/x/projects/cwd/resume-uuid.jsonl")
+    monkeypatch.setattr(watchdog, "spawn", lambda c: None)
+    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, preexisting: "/t/new.jsonl")
+    monkeypatch.setattr(window, "claude_session_id", lambda c: "resume-uuid")
+    monkeypatch.setattr(window, "respawn",
+                        lambda c, initial_prompt=None, resume_sid=None: "resumed-sid")
 
-    typed = {}
+    typed = []
     monkeypatch.setattr(window, "type_wake_signal",
-                        lambda c, now, token=None: typed.setdefault("token", token) or True)
-    monkeypatch.setattr(wake.time, "sleep", lambda s: None)
+                        lambda c, now, token=None: typed.append(token) or True)
 
-    token = (5, "cafe")
-    wake._resume_fallback_bell(cfg, datetime.now(timezone.utc),
-                               token, "resume-uuid", baseline=1)
-    assert typed["token"] == token  # bell typed with the epoch token
+    conn = db.connect(cfg)
+    try:
+        res = wake._spawn_wake(conn, cfg, datetime.now(timezone.utc), resume=True)
+    finally:
+        conn.close()
 
-
-def test_resume_fallback_stays_silent_when_model_turn_appears(cfg, monkeypatch):
-    """Fix 3: a NEW assistant line appears (the harness's own background-shell
-    notice drove a model turn) -> no bell, no receipt. Detection is on a NEW
-    assistant-role LINE, not mtime (a hook write touches mtime -> false positive
-    observed live)."""
-    from cortex import wake, window
-
-    cfg["wake"]["resume_turn_timeout_sec"] = 1.0
-    _write_assistant_lines(cfg, "resume-uuid", 1)  # baseline = 1
-
-    typed = {"called": False}
-    monkeypatch.setattr(window, "type_wake_signal",
-                        lambda c, now, token=None: typed.__setitem__("called", True))
-
-    # After the first poll sleep, a new assistant line appears (count -> 2).
-    real_sleep = wake.time.sleep
-    state = {"grown": False}
-
-    def _sleep(s):
-        if not state["grown"]:
-            state["grown"] = True
-            _write_assistant_lines(cfg, "resume-uuid", 2)  # model turn landed
-
-    monkeypatch.setattr(wake.time, "sleep", _sleep)
-
-    wake._resume_fallback_bell(cfg, datetime.now(timezone.utc),
-                               (5, "cafe"), "resume-uuid", baseline=1)
-    assert typed["called"] is False  # model turn seen -> silent, no bell
+    assert res is not None and res["mode"] == "window"
+    assert len(typed) == 1                        # exactly one bell
+    assert typed[0] == wake_state.current_epoch(cfg)  # epoch token carried
+    assert wake_state.load(cfg)["awake"] is True  # awake flip committed first
 
 
-def test_assistant_line_count_ignores_non_assistant(cfg):
-    """The counter only counts top-level type=='assistant' entries (user turns,
-    tool results, blank lines are ignored)."""
-    from cortex import wake
+def test_resume_bell_typing_failure_does_not_unwind_wake(cfg, monkeypatch):
+    """A WindowError while typing the resume bell is swallowed — the committed
+    awake flip stands (the window IS up; only the nudge failed)."""
+    from cortex import wake, watchdog, window
 
-    from cortex import transcript
-    tdir = transcript.transcript_dir(cfg)
-    tdir.mkdir(parents=True, exist_ok=True)
-    rows = [
-        {"type": "user", "message": {"role": "user"}},
-        {"type": "assistant", "message": {"role": "assistant"}},
-        {"type": "user", "message": {"role": "user"}},
-        {"type": "assistant", "message": {"role": "assistant"}},
-    ]
-    (tdir / "sid.jsonl").write_text("\n".join(json.dumps(r) for r in rows) + "\nnot-json\n")
-    assert wake._assistant_line_count(cfg, "sid") == 2
-    assert wake._assistant_line_count(cfg, "missing") == 0
+    _seed_wake_row(cfg, "resume-bell-fail")
+    wake_state.update(cfg, transcript="/x/projects/cwd/resume-uuid.jsonl")
+    monkeypatch.setattr(watchdog, "spawn", lambda c: None)
+    monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, preexisting: "/t/new.jsonl")
+    monkeypatch.setattr(window, "claude_session_id", lambda c: "resume-uuid")
+    monkeypatch.setattr(window, "respawn",
+                        lambda c, initial_prompt=None, resume_sid=None: "resumed-sid")
+
+    def _boom(c, now, token=None):
+        raise window.WindowError("no session")
+    monkeypatch.setattr(window, "type_wake_signal", _boom)
+
+    conn = db.connect(cfg)
+    try:
+        res = wake._spawn_wake(conn, cfg, datetime.now(timezone.utc), resume=True)
+    finally:
+        conn.close()
+    assert res is not None and res["mode"] == "window"
+    assert wake_state.load(cfg)["awake"] is True
 
 
 def test_resume_launch_is_clean_no_receipt(cfg, monkeypatch):
-    """Fix 3: the resume LAUNCH itself types no bell and writes no receipt -- only
-    the fallback (when it fires) does. Here the fallback is stubbed out; assert
-    the launch was clean (initial_prompt None, no receipt written at launch)."""
+    """The resume LAUNCH itself bakes no prompt and writes no receipt -- only the
+    post-readiness bell does. Here the bell is stubbed out; assert the launch was
+    clean (initial_prompt None, no receipt written at launch)."""
     from cortex import wake, watchdog, window
 
     _seed_wake_row(cfg, "resume-clean")
@@ -385,7 +369,7 @@ def test_resume_launch_is_clean_no_receipt(cfg, monkeypatch):
                         lambda c, initial_prompt=None, resume_sid=None:
                         launch.update(prompt=initial_prompt, resume_sid=resume_sid))
     monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, preexisting: "/t/new.jsonl")
-    monkeypatch.setattr(wake, "_resume_fallback_bell", lambda *a, **k: None)
+    monkeypatch.setattr(wake, "_resume_bell", lambda *a, **k: None)
     monkeypatch.setattr(watchdog, "spawn", lambda c: None)
 
     conn = db.connect(cfg)
@@ -456,7 +440,7 @@ def test_resume_settle_on_old_file_growth(cfg, monkeypatch):
     rp = _seed_resume_transcript(cfg, "resume-uuid", 1)
     monkeypatch.setattr(window, "claude_session_id", lambda c: "resume-uuid")
     monkeypatch.setattr(watchdog, "spawn", lambda c: None)
-    monkeypatch.setattr(wake, "_resume_fallback_bell", lambda *a, **k: None)
+    monkeypatch.setattr(wake, "_resume_bell", lambda *a, **k: None)
 
     def _respawn(c, initial_prompt=None, resume_sid=None):
         # --resume appends a turn to the SAME file (mtime + size grow).
@@ -489,7 +473,7 @@ def test_resume_settle_on_new_file_when_degraded(cfg, monkeypatch):
     tdir = transcript.transcript_dir(cfg)
     monkeypatch.setattr(window, "claude_session_id", lambda c: "resume-uuid")
     monkeypatch.setattr(watchdog, "spawn", lambda c: None)
-    monkeypatch.setattr(wake, "_resume_fallback_bell", lambda *a, **k: None)
+    monkeypatch.setattr(wake, "_resume_bell", lambda *a, **k: None)
 
     def _respawn(c, initial_prompt=None, resume_sid=None):
         # Degraded: a brand-new session file appears instead of the resume file.
@@ -519,7 +503,7 @@ def test_resume_settle_timeout_records_none(cfg, monkeypatch):
     _seed_resume_transcript(cfg, "resume-uuid", 1)  # never grows
     monkeypatch.setattr(window, "claude_session_id", lambda c: "resume-uuid")
     monkeypatch.setattr(watchdog, "spawn", lambda c: None)
-    monkeypatch.setattr(wake, "_resume_fallback_bell", lambda *a, **k: None)
+    monkeypatch.setattr(wake, "_resume_bell", lambda *a, **k: None)
     monkeypatch.setattr(window, "respawn",
                         lambda c, initial_prompt=None, resume_sid=None: "resumed-iterm-sid")
     # Collapse the bounded poll so the timeout branch is reached instantly.
@@ -701,12 +685,10 @@ def test_interleave_stale_sid_never_overwrites_live_resident(cfg, monkeypatch):
     assert d["transcript"] == "/concurrent/winner.jsonl"
 
 
-def test_interleave_pre_readiness_assistant_turn_counts_as_growth(cfg, monkeypatch):
-    """Finding 3 interleave: a harness-driven assistant turn is written DURING
-    the `claude --resume` launch/readiness window (a real, multi-second window),
-    i.e. strictly BETWEEN the pre-launch baseline capture and respawn() returning
-    -- not after. The baseline must already be captured before this turn lands,
-    so the fallback-bell poll sees it as growth immediately and never fires."""
+def test_interleave_pre_readiness_assistant_turn_still_gets_one_bell(cfg, monkeypatch):
+    """A harness-driven assistant turn written DURING the `claude --resume`
+    launch/readiness window no longer changes anything: the bell is typed once,
+    unconditionally, after the awake flip."""
     from cortex import wake, watchdog, window
 
     _seed_wake_row(cfg, "interleave-preready")
@@ -715,14 +697,11 @@ def test_interleave_pre_readiness_assistant_turn_counts_as_growth(cfg, monkeypat
     monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, preexisting: "/t/new.jsonl")
     monkeypatch.setattr(window, "claude_session_id", lambda c: "resume-uuid")
 
-    typed = {"called": False}
+    typed = []
     monkeypatch.setattr(window, "type_wake_signal",
-                        lambda c, now, token=None: typed.__setitem__("called", True))
+                        lambda c, now, token=None: typed.append(token) or True)
 
     def _respawn_writes_turn_during_readiness(c, initial_prompt=None, resume_sid=None):
-        # The interleave: a harness-driven assistant turn lands WHILE the window
-        # is still coming up -- i.e. after _spawn_wake captured resume_baseline
-        # but before respawn() (which wraps _wait_ready) returns.
         _write_assistant_lines(cfg, "resume-uuid", 1)
         return "resumed-iterm-sid"
     monkeypatch.setattr(window, "respawn", _respawn_writes_turn_during_readiness)
@@ -734,7 +713,7 @@ def test_interleave_pre_readiness_assistant_turn_counts_as_growth(cfg, monkeypat
         conn.close()
 
     assert res is not None and res["mode"] == "window"
-    assert typed["called"] is False  # growth already present -> no bell fired
+    assert len(typed) == 1                       # exactly one bell, no dup
     assert wake_state.load(cfg)["awake"] is True  # awake flip still committed
 
 

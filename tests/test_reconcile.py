@@ -226,15 +226,15 @@ def test_run_wake_two_concurrent_spawn_entrants_only_one_spawns(cfg, monkeypatch
     monkeypatch.setattr(window, "is_running", lambda: True)
     monkeypatch.setattr(window, "_session_alive", lambda sid: True)
     monkeypatch.setattr(window, "find_claude_pid", lambda c: 4242)
-    # If the loser classifies "ear" (alive resident), _window_wake runs the real
-    # ear path: append_wake_signal (osascript, blocked by conftest) then
-    # _signal_landed, which polls with real time.sleep up to ear_timeout_sec
-    # (default 90s). t.join(timeout=10) returns but the thread keeps sleeping,
-    # so the pytest process cannot exit -> intermittent 90s hang (race-dependent).
-    # Stub the ear I/O + landing probe so no thread ever blocks on it; the test
-    # only asserts how many spawns fired, not ear timing.
-    monkeypatch.setattr(window, "append_wake_signal",
-                        lambda cfg, now, token=None: None)
+    # If the loser classifies alive-resident, _window_wake runs the real typed
+    # path: type_wake_signal (osascript, blocked by conftest) then _signal_landed,
+    # which polls with real time.sleep up to ear_timeout_sec (default 90s).
+    # t.join(timeout=10) returns but the thread keeps sleeping, so the pytest
+    # process cannot exit -> intermittent 90s hang (race-dependent). Stub the
+    # typing + landing probe so no thread ever blocks on it; the test only
+    # asserts how many spawns fired, not delivery timing.
+    monkeypatch.setattr(window, "type_wake_signal",
+                        lambda cfg, now, token=None: True)
     monkeypatch.setattr(wake, "_signal_landed",
                         lambda cfg, before, timeout: True)
 
@@ -543,7 +543,7 @@ def test_ctl_sleep_live_window_rotate_delivers_marker_with_args(cfg, monkeypatch
     wake_state.set_awake(cfg, 1, None)
     captured = {}
     monkeypatch.setattr(window, "deliver_covert_marker",
-                        lambda c, line: captured.setdefault("line", line) or "bell")
+                        lambda c, line: captured.setdefault("line", line) or "typed")
     ctl.cmd_sleep(cfg, until=None, minutes=30, rotate=True)
     assert "[CTL]" in captured["line"]
     assert "mins=30" in captured["line"]
@@ -556,7 +556,7 @@ def test_ctl_sleep_live_window_no_rotate_omits_rotate_true(cfg, monkeypatch):
     wake_state.set_awake(cfg, 1, None)
     captured = {}
     monkeypatch.setattr(window, "deliver_covert_marker",
-                        lambda c, line: captured.setdefault("line", line) or "bell")
+                        lambda c, line: captured.setdefault("line", line) or "typed")
     ctl.cmd_sleep(cfg, until=None, minutes=30, rotate=False)
     assert "rotate=false" in captured["line"]
     assert "rotate=true" not in captured["line"]

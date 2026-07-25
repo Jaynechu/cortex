@@ -145,6 +145,22 @@ def window_tokens_hint(conn: sqlite3.Connection) -> int:
         return 0
 
 
+def clear_floor_deadline(conn: sqlite3.Connection) -> bool:
+    """Drop the floor hold (next_floor_due_at = None) so the floor trigger reads
+    DUE on the next reconcile. Merged into the raw JSON so no other key is
+    touched. False when there is no row / nothing to clear."""
+    obj = _raw_state(conn)
+    if not obj or obj.get("next_floor_due_at") is None:
+        return False
+    obj["next_floor_due_at"] = None
+    conn.execute(
+        "UPDATE ct_pacemaker_state SET state = ?, updated_at = ? WHERE id = 1",
+        (json.dumps(obj), db.utcnow_iso()),
+    )
+    conn.commit()
+    return True
+
+
 def save_state(conn: sqlite3.Connection, state: PacemakerState) -> None:
     base = _raw_state(conn)  # keep side-channel keys (window_tokens)
     conn.execute(

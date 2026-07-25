@@ -69,13 +69,6 @@ _DEFAULTS: dict[str, Any] = {
         "auto_adopt": True,
         "signal_log": "",
         "ear_timeout_sec": 90,
-        # Bounded wait after a RESUMED window comes up for the resumed model to
-        # take a turn on its own (the CC harness's background-shell notice usually
-        # drives it). Minutes-scale (a resume replays a long conversation first),
-        # NOT the 90s ear timeout. If no NEW assistant-role line appears in the
-        # resumed transcript within this window, cortex types one ordinary bell
-        # line so the resumed window still gets its wake note (Fix 3).
-        "resume_turn_timeout_sec": 180,
         "wake_prompt": "☀️",
         # Visible bell line = human text ONLY (no machine marker, no epoch token).
         # The machine data (marker/gen/state_id/rearm) is written to the
@@ -122,13 +115,6 @@ _DEFAULTS: dict[str, Any] = {
         # ctl marker line carries).
         "fuse_marker": "⚙️ [FUSE]",
         "ctl_sleep_marker": "⚙️ [CTL]",
-        # Refusal returned by lie_down(rotate=True) while THIS window's own
-        # wake-signal ear tail is still alive: a live monitor task replays its
-        # completion notification when the rotated window resumes. Stop it first,
-        # then rotate. Plain (non-rotate) lie_down never refuses.
-        "rotate_refuse_text":
-            "Rotate refused: your wake-signal monitor is still running. "
-            "TaskStop it first, then call lie_down(rotate=true) again.",
     },
     # marrow repo invocation for the wake call (separate venv/deps, C3).
     "marrow": {

@@ -183,9 +183,19 @@ def test_bug_a_reset_between_spawn_and_register_sigterms(cfg, monkeypatch):
     assert 55555 in sigtermed               # the orphan spawn was SIGTERMed
 
 
+@pytest.fixture
+def typed(monkeypatch):
+    """Capture free-round keystrokes at the window boundary (delivery is typed)."""
+    from cortex import window
+    lines: list[str] = []
+    monkeypatch.setattr(window, "inject_prompt",
+                        lambda cfg, text: lines.append(text) or True)
+    return lines
+
+
 # ── BUG B: silence_action must not tuck-in after the session lay down ──────────
 
-def test_bug_b_tuck_in_suppressed_after_claim(cfg, monkeypatch):
+def test_bug_b_tuck_in_suppressed_after_claim(cfg, monkeypatch, typed):
     """silence_action blocked after capturing gen (seam at text build); a
     lie_down claims on the main thread; on release no tuck-in line, no
     tuck_pending."""
@@ -223,14 +233,12 @@ def test_bug_b_tuck_in_suppressed_after_claim(cfg, monkeypatch):
     st = wake_state.load(cfg)
     # No tuck_pending stamped (the claim bumped gen -> stamp mutation dropped).
     assert st.get("tuck_pending") is None
-    # No tuck-in line appended to the signal log.
-    sig = config.wake_signal_log_path(cfg)
-    body = sig.read_text() if sig.exists() else ""
-    assert "[NEW ROUND]" not in body
+    # Nothing typed into the window.
+    assert "[NEW ROUND]" not in "\n".join(typed)
 
 
-def test_silence_action_tuck_in_happy_path(cfg):
-    """No interleaving: past silent_max stamps tuck_pending and appends exactly
+def test_silence_action_tuck_in_happy_path(cfg, typed):
+    """No interleaving: past silent_max stamps tuck_pending and types exactly
     one free-round line (regression that the fix keeps the normal path)."""
     _seed_awake(cfg)
     wake_state.update(cfg, user_replied_this_wake=True)
@@ -238,8 +246,7 @@ def test_silence_action_tuck_in_happy_path(cfg):
     assert action == "free-round appended"
     st = wake_state.load(cfg)
     assert st.get("tuck_pending") is not None
-    sig = config.wake_signal_log_path(cfg)
-    assert sig.read_text().count("[NEW ROUND]") == 1
+    assert "\n".join(typed).count("[NEW ROUND]") == 1
 
 
 # ── tick: stale-snapshot side effects suppressed ──────────────────────────────
