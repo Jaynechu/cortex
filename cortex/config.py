@@ -81,7 +81,7 @@ _DEFAULTS: dict[str, Any] = {
         "say_sound": "Glass",
         # lie_down(next_wake_min=N) clamp (minutes): [0, next_wake_max], every
         # hour (0 = immediate re-wake).
-        "next_wake_max": 240,
+        "next_wake_max": 360,
         # Typed into the window at every free-round injection (silence
         # cycle or kick carrier): the free-round note above it, this line last as
         # the final cue. MUST contain the tuck_in_marker family string
@@ -259,7 +259,7 @@ def wake_clamps(cfg: dict) -> dict[str, int]:
     wd = w.get("watchdog", {})
     return {
         "next_wake_min": 0,
-        "next_wake_max": int(w.get("next_wake_max", 240)),
+        "next_wake_max": int(w.get("next_wake_max", 360)),
         "silent_max_min": int(wd.get("silent_max_min", 20)),
     }
 

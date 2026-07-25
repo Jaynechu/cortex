@@ -372,7 +372,7 @@ def test_render_turn_end_line_appears_with_custom_template(cfg):
         "NOTE: lie_down(next_wake_min=N) [{next_wake_min}-{next_wake_max}].")
     text = note.render(cfg, NOW, {})
     assert text.rstrip().endswith(
-        "NOTE: lie_down(next_wake_min=N) [0-240].")
+        "NOTE: lie_down(next_wake_min=N) [0-360].")
 
 
 def test_render_title_prepended_with_blank_line(cfg):

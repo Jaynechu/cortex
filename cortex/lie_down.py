@@ -93,7 +93,7 @@ def clamp_next_wake_minutes(minutes: float, config: dict,
     if human_override:
         return minutes
     wcfg = config.get("wake", {})
-    hi = wcfg.get("next_wake_max", 240)
+    hi = wcfg.get("next_wake_max", 360)
     return max(0, min(hi, minutes))
 
 

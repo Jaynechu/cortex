@@ -107,7 +107,7 @@ receipt_ttl_min = 15
 # say() = the ONLY place cortex takes focus: it fronts the resident window and
 # plays a system sound (name of a /System/Library/Sounds/*.aiff; "" = silent).
 say_sound = "Glass"
-next_wake_max = 240         # lie_down(next_wake_min=N) clamp upper bound (minutes); floor is 0 (immediate re-wake) at every hour
+next_wake_max = 360         # lie_down(next_wake_min=N) clamp upper bound (minutes); floor is 0 (immediate re-wake) at every hour
 # Free-round line typed into the window at every silence-cycle injection
 # (last line of the block, after the freshly rendered note). MUST contain the
 # "[NEW ROUND]" machine-line marker — without it the line resets the silence
