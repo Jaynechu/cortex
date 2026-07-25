@@ -425,12 +425,9 @@ def user_replied_this_wake(cfg: dict) -> bool:
     return bool(load(cfg).get("user_replied_this_wake"))
 
 
-def awake_since_min(cfg: dict) -> float | None:
-    """Minutes elapsed since this wake began (awake_since), or None when not
-    awake / unparseable. When the user never spoke this wake, silence_action
-    times the same idle bar from HERE instead of a user-message ts that may
-    never exist."""
-    raw = load(cfg).get("awake_since")
+def _age_min_or_none(raw) -> float | None:
+    """Minutes since an ISO timestamp held in the state, or None when the field
+    is absent/unparseable. Naive timestamps read as UTC (the writers' format)."""
     if not raw:
         return None
     try:
@@ -440,6 +437,62 @@ def awake_since_min(cfg: dict) -> float | None:
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
     return (datetime.now(timezone.utc) - dt).total_seconds() / 60.0
+
+
+def awake_since_min(cfg: dict) -> float | None:
+    """Minutes elapsed since this wake began (awake_since), or None when not
+    awake / unparseable. When the user never spoke this wake, silence_action
+    times the same idle bar from HERE instead of a user-message ts that may
+    never exist."""
+    return _age_min_or_none(load(cfg).get("awake_since"))
+
+
+def last_user_msg_min(cfg: dict) -> float | None:
+    """Minutes since the last real user message, as stamped into the state by
+    the marrow UserPromptSubmit hook (last_user_msg_ts). Written synchronously
+    with the prompt, unlike the transcript read which only sees the message once
+    claude has flushed it to the jsonl."""
+    return _age_min_or_none(load(cfg).get("last_user_msg_ts"))
+
+
+def silence_basis_min(cfg: dict, transcript_min: float | None) -> float:
+    """The ONE silence basis for the free-round cycle, shared by the watchdog
+    poll and the daemon business deadline.
+
+    `transcript_min` is the transcript-derived value (transcript.user_silent_min)
+    and it LAGS: the marrow UserPromptSubmit hook stamps last_user_msg_ts and
+    drops tuck_pending (the cycle's only other gate) in one write, before the
+    message reaches the jsonl. A transcript-only basis therefore still reports
+    the PREVIOUS message's age for seconds after a user arrival, with the gate
+    already gone -> a free round fires immediately on top of the user's message.
+    Take the newest (smallest) of the two sources.
+
+    No user message this wake -> awake_since, so the same bar still elapses.
+    Nothing known -> 0.0 (hold), the pre-existing unreadable-transcript
+    behaviour: the window is a MINIMUM, never fire on an unknown basis."""
+    d = load(cfg)
+    if not d.get("user_replied_this_wake"):
+        elapsed = _age_min_or_none(d.get("awake_since"))
+        if elapsed is not None:
+            return elapsed
+    known = [v for v in (transcript_min, _age_min_or_none(d.get("last_user_msg_ts")))
+             if v is not None]
+    return min(known) if known else 0.0
+
+
+def stamp_silence_basis(cfg: dict) -> bool:
+    """Re-arm the free-round cycle from NOW without delivering anything (stamp
+    the tuck_pending last-injection marker). Used when a deadline is found
+    already overdue at daemon start: the window is a minimum interval, so an
+    expiry that elapsed while nothing was running must restart the cycle rather
+    than fire on the spot. Awake-only. Returns True on stamp."""
+    with _flock(cfg):
+        d = load(cfg)
+        if not d.get("awake"):
+            return False
+        d["tuck_pending"] = datetime.now(timezone.utc).isoformat()
+        _save(cfg, d)
+        return True
 
 
 def get_last_note_ts(cfg: dict) -> str | None:

@@ -434,18 +434,20 @@ def silence_action(cfg: dict, silent_min: float, *, allow_tuck: bool = True) -> 
             _deliver_ct_notes(cfg, line)  # F9: claim ct notes now the round surfaces
         return "kick free-round appended"
 
-    if not wake_state.user_replied_this_wake(cfg):
-        # No user message this wake -> silent_min (derived from a user-message ts)
-        # is 0.0 and would never elapse. Time from awake_since instead so the
-        # same idle bar below still applies.
-        elapsed = wake_state.awake_since_min(cfg)
-        if elapsed is not None:
-            silent_min = elapsed
+    # Single silence basis (wake_state.silence_basis_min): the newest of the
+    # transcript read and the hook-stamped last_user_msg_ts, falling back to
+    # awake_since when the user never spoke this wake. The transcript alone lags
+    # the hook, which has already dropped tuck_pending -> instant re-fire on the
+    # user's own message.
+    st = wake_state.load(cfg)
+    if st.get("next_wake_at"):
+        return None  # mutual exclusion: an armed alarm owns the deadline, the
+        #              idle cycle does not tick underneath it
+    silent_min = wake_state.silence_basis_min(cfg, silent_min)
 
     silent_max = float(wcfg.get("silent_max_min", 20))
     if silent_min < silent_max:
         return None
-    st = wake_state.load(cfg)
     last_at = st.get("tuck_pending")
     if last_at is not None:
         # Already injected once this wake -> only re-fire once ANOTHER full

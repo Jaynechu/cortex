@@ -8,7 +8,10 @@ deadline per key, and firing consumes it):
       (cortex.reconcile): DND hold, manual adopt, dead+due fire,
       accidental-close resume, watchdog heal, silence backup, stale-suspect
       debounce.
-  <shell>            — business: min(next_wake_at, silence-round due). ALWAYS
+  <shell>            — business: the armed alarm (next_wake_at) when there is
+      one, else the silence-round due. NEVER min()'d: the idle cycle does not
+      tick while an alarm stands, and the idle window is a MINIMUM interval
+      (never fire early, never re-fire on an interrupted delivery). ALWAYS
       armed (safety horizon when nothing is pending) because Scheduler.kick()
       no-ops on a key with no entry, and the lie_down socket kick sends this
       key. A kick just fires the callback early; it recomputes from state.
@@ -51,20 +54,20 @@ def _age_min(ts_iso) -> float:
 
 def silence_due_in(cfg: dict, st: dict) -> float | None:
     """Seconds until the awake free-round backup is due (0.0 = now), or None when
-    the shell is not awake. Mirrors watchdog.silence_action's own gate: the cycle
-    elapses silent_max_min after the last real user message (awake_since when the
-    user never spoke this wake) AND at least silent_max_min after the last
-    injection. A pending kick round is due immediately."""
+    the shell is not awake (or an alarm owns the deadline). Mirrors
+    watchdog.silence_action's own gate: the cycle elapses silent_max_min after the
+    last real user message (awake_since when the user never spoke this wake) AND
+    at least silent_max_min after the last injection. A pending kick round —
+    an explicit external request, not idle — is due immediately."""
     if not st.get("awake"):
         return None
     if st.get("kick_round"):
         return 0.0
+    if st.get("next_wake_at"):
+        return None  # mutual exclusion: an armed alarm owns the deadline, idle
+        #              does not tick underneath it
     silent_max = float(cfg["wake"].get("watchdog", {}).get("silent_max_min", 20))
-    silent_min = transcript.user_silent_min(cfg) or 0.0
-    if not wake_state.user_replied_this_wake(cfg):
-        elapsed = wake_state.awake_since_min(cfg)
-        if elapsed is not None:
-            silent_min = elapsed
+    silent_min = wake_state.silence_basis_min(cfg, transcript.user_silent_min(cfg))
     wait = silent_max - silent_min
     last = st.get("tuck_pending")
     if last:
@@ -111,11 +114,27 @@ class WakeDaemon:
     # --- arming ---------------------------------------------------------
 
     def arm(self) -> None:
+        self._reset_overdue_silence()
         now = self._clock()
         self.scheduler.schedule(self.reconcile_shell,
                                 now + self.reconcile_interval, self._on_reconcile)
         self.scheduler.schedule(self.shell, self._next_business_at(now),
                                 self._on_business)
+
+    def _reset_overdue_silence(self) -> None:
+        """Starting up must never itself deliver a free round. The idle window is
+        a MINIMUM interval, so a cycle that expired while the daemon was down owes
+        nothing — re-arm it from now and fire only after a full fresh window. A
+        pending kick round is an explicit external request and is left alone."""
+        try:
+            st = wake_state.load(self.cfg)
+            if not st.get("awake") or st.get("kick_round"):
+                return
+            due_in = silence_due_in(self.cfg, st)
+            if due_in is not None and due_in <= 0:
+                wake_state.stamp_silence_basis(self.cfg)
+        except Exception:  # noqa: BLE001 — a state read must never block startup
+            return
 
     def _arm_reconcile(self) -> None:
         self.scheduler.schedule(self.reconcile_shell,
@@ -126,18 +145,22 @@ class WakeDaemon:
         self.scheduler.schedule(self.shell, at, self._on_business)
 
     def _next_business_at(self, now: float) -> float:
-        """Earliest pending business deadline; safety horizon when idle. A target
-        already in the past means the fire was held (paused / gated / failed) —
-        retry on the retry interval rather than spinning."""
+        """The pending business deadline; safety horizon when idle. An armed alarm
+        IS the deadline — never min()'d with the idle cycle, which does not tick
+        while an alarm stands. A target already in the past means the fire was
+        held (paused / gated / failed) — retry on the retry interval rather than
+        spinning."""
         try:
             st = wake_state.load(self.cfg)
-            if st.get("awake"):
+            due = reconcile._parse_local(
+                wake_state.get_next_wake_at(self.cfg), self.cfg)
+            if due is not None:
+                target = due.timestamp()
+            elif st.get("awake"):
                 due_in = silence_due_in(self.cfg, st)
                 target = now + due_in if due_in is not None else now + self.horizon
             else:
-                due = reconcile._parse_local(
-                    wake_state.get_next_wake_at(self.cfg), self.cfg)
-                target = due.timestamp() if due is not None else now + self.horizon
+                target = now + self.horizon
         except Exception:  # noqa: BLE001 — state read must never unarm the daemon
             target = now + self.horizon
         return target if target > now else now + self.retry
@@ -206,9 +229,17 @@ class WakeDaemon:
 
     def _fire_wake(self, cfg: dict, reason: str, now: datetime) -> str:
         """Synthesized decision -> the standard wake pipeline (ctl precedent).
-        set_awake consumes the ledger on a window wake; the headless path
-        finishes here, so redraw the floor + ledger as the tick did."""
+        The headless path finishes here, so redraw the floor + ledger as the tick
+        did.
+
+        Ledger-before-delivery: the alarm is consumed the moment this fire is
+        decided, not after set_awake has verified the bell landed. Delivery can be
+        interrupted (esc) or missed, and an un-consumed alarm is still due — the
+        next deadline would re-fire it seconds later. One alarm = one fire; the
+        next one is armed by the lie_down/floor redraw below."""
         from cortex.wake import run_wake
+        if reason == "next_wake_at":
+            wake_state.clear_next_wake_at(cfg)
         decision = {"wake": True, "reasons": [], "gated_by": [],
                     "wake_reasons": reason,
                     "explanation": f"{now.strftime('%H:%M')} daemon wake: {reason}"}
