@@ -216,15 +216,6 @@ _DEFAULTS: dict[str, Any] = {
         "shell_labels": {"cli": "Cortex-Cli", "tg": "Cortex-Tg"},
         # Pending self-schedule entries surface only when due within this window.
         "pending_window_min": 15,
-        # Prior window force-slept without a handoff -> backfill hint line.
-        "force_slept_catchup_text":
-            "Prior window was force-slept — catchup by recall all events from DB "
-            "(do not read raw jsonl) and append to handoff.md",
-        # Prior window DIED (crash/manual close) mid-wake without writing its
-        # handoff -> the fresh respawn recovers context from its transcript.
-        "died_no_handoff_catchup_text":
-            "Previous window died without a handoff — recover context from its "
-            "transcript, then write the handoff.",
         # Reply-receipt line (C11): one per sent note she has replied to since the
         # last note. {id}/{channel}/{sent_hm}/{replied_hm}/{text} render from the
         # marrow outbox row at note time. "" omits receipts entirely.

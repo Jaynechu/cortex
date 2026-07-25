@@ -381,22 +381,19 @@ def test_render_title_empty_omits_it(cfg):
     assert "小道消息" not in text
 
 
-def test_render_force_slept_marker_and_catchup(cfg):
+def test_render_force_slept_marker(cfg):
     data = {"last_wake": {"minutes_ago": 40, "force_slept": "timeout"}}
     text = note.render(cfg, NOW, data)
     assert "Last active: 40min ago (force-slept mid-task)" in text
-    # catch-up backfill hint appears only on a force-slept prior window
-    assert "recall all events from DB" in text
 
 
 def test_render_auto_sleep_is_neutral(cfg):
-    """force_slept='auto' = routine silence sleep -> NO force-incident tag, NO
-    catchup hint. Rows stay queryable, but the note reads it as ordinary."""
+    """force_slept='auto' = routine silence sleep -> NO force-incident tag.
+    Rows stay queryable, but the note reads it as ordinary."""
     data = {"last_wake": {"minutes_ago": 40, "force_slept": "auto"}}
     text = note.render(cfg, NOW, data)
     assert "Last active: 40min ago" in text
     assert "force-slept mid-task" not in text
-    assert "recall all events from DB" not in text
 
 
 def test_render_no_wake_line_ever(cfg):
@@ -576,73 +573,6 @@ def test_render_last_active_overrides_wake_minutes(cfg):
     }
     text = note.render(cfg, NOW, data)
     assert "Last active: 3min ago (force-slept mid-task)" in text
-
-
-# --------------------------------------------------------------------------- #
-# catchup suppression — handoff written after the prior wake ts
-# --------------------------------------------------------------------------- #
-
-def _handoff_cfg(cfg, tmp_path):
-    p = tmp_path / "handoff.md"
-    cfg["paths"]["handoff_file"] = str(p)
-    return p
-
-
-def test_handoff_after_written_post_wake(cfg, tmp_path):
-    prev = (NOW - timedelta(minutes=40)).astimezone(ZoneInfo("UTC")).isoformat()
-    p = _handoff_cfg(cfg, tmp_path)
-    p.write_text("handoff body")  # written now -> mtime > prev ts
-    assert note._handoff_after(cfg, prev) is True
-
-
-def test_handoff_after_older_than_wake(cfg, tmp_path):
-    import os
-    import time
-    p = _handoff_cfg(cfg, tmp_path)
-    p.write_text("stale handoff")
-    old = time.time() - 3600
-    os.utime(p, (old, old))  # handoff mtime an hour before the prior wake
-    prev = datetime.now(ZoneInfo("UTC")).isoformat()  # wake after the handoff
-    assert note._handoff_after(cfg, prev) is False
-
-
-def test_handoff_after_empty_file(cfg, tmp_path):
-    prev = (NOW - timedelta(minutes=40)).astimezone(ZoneInfo("UTC")).isoformat()
-    p = _handoff_cfg(cfg, tmp_path)
-    p.write_text("   \n")  # non-empty mtime but blank content
-    assert note._handoff_after(cfg, prev) is False
-
-
-def test_handoff_after_missing_file(cfg, tmp_path):
-    prev = (NOW - timedelta(minutes=40)).astimezone(ZoneInfo("UTC")).isoformat()
-    _handoff_cfg(cfg, tmp_path)  # path set, file never created
-    assert note._handoff_after(cfg, prev) is False
-
-
-def test_handoff_after_none_ts(cfg):
-    assert note._handoff_after(cfg, None) is False
-
-
-def test_render_catchup_suppressed_when_handoff_written(cfg):
-    """Prior window force-slept but its handoff was written after -> the catchup
-    line is skipped (nothing to backfill)."""
-    data = {
-        "last_wake": {"minutes_ago": 40, "force_slept": "stale"},
-        "catchup_handoff_written": True,
-    }
-    text = note.render(cfg, NOW, data)
-    assert "Last active: 40min ago (force-slept mid-task)" in text  # tag still shown
-    assert "recall all events from DB" not in text  # catchup suppressed
-
-
-def test_render_catchup_fires_when_no_handoff(cfg):
-    """Prior window force-slept and no handoff written -> catchup fires."""
-    data = {
-        "last_wake": {"minutes_ago": 40, "force_slept": "stale"},
-        "catchup_handoff_written": False,
-    }
-    text = note.render(cfg, NOW, data)
-    assert "recall all events from DB" in text
 
 
 def test_today_tokens_melbourne_local_boundary(marrow_conn):

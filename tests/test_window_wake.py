@@ -465,9 +465,8 @@ def test_window_wake_ear_miss_alive_types_rearm_not_respawn(cfg, monkeypatch):
     assert wake_state.load(cfg)["awake"] is True and wake_state.load(cfg)["wake_log_id"] == wid
 
 
-def test_window_wake_ear_miss_dead_respawns_with_catchup(cfg, monkeypatch):
-    """Ladder 2b: ear miss AND claude dead -> respawn fresh. The dead window left
-    no handoff -> the rebuilt note carries the died_no_handoff catchup line."""
+def test_window_wake_ear_miss_dead_respawns(cfg, monkeypatch):
+    """Ladder 2b: ear miss AND claude dead -> respawn fresh."""
     from cortex import wake, watchdog, window
 
     conn = db.connect(cfg)
@@ -497,8 +496,6 @@ def test_window_wake_ear_miss_dead_respawns_with_catchup(cfg, monkeypatch):
     assert res["mode"] == "window"
     assert calls["respawn"] == 1   # dead window respawned exactly once
     assert calls["rearm"] == 0     # dead window is not re-typed
-    note_text = wake_state.wakeup_note_path(cfg).read_text()
-    assert "died without a handoff" in note_text  # catchup line baked into the note
 
 
 def test_window_wake_falls_back_on_window_error(cfg, monkeypatch):
@@ -1299,9 +1296,9 @@ def test_launch_command_resume_variant(cfg):
 def test_window_wake_dead_resumes_when_sid_present(cfg, monkeypatch):
     """Item 6: a simply-dead resident (no rotate flag) with a recorded session
     UUID and NO transcript file on disk (newest() unavailable) -> resume via
-    the recorded-hint fallback (respawn resume_sid set), no catchup line in
-    the note. The relaunch prompt is the SAME composed emoji+marker prompt as
-    a fresh spawn so the resumed window also gets its wake identity + note."""
+    the recorded-hint fallback (respawn resume_sid set). The relaunch prompt
+    is the SAME composed emoji+marker prompt as a fresh spawn so the resumed
+    window also gets its wake identity + note."""
     from cortex import wake, watchdog, window
 
     conn = db.connect(cfg)
@@ -1335,8 +1332,6 @@ def test_window_wake_dead_resumes_when_sid_present(cfg, monkeypatch):
     # harness's own background-shell notice drives the first turn).
     assert calls["prompt"] is None
     assert "wake_receipt" not in wake_state.load(cfg)
-    note_text = wake_state.wakeup_note_path(cfg).read_text()
-    assert "died without a handoff" not in note_text  # resume -> no catchup
 
 
 def test_window_wake_dead_resumes_from_newest_jsonl_when_hint_none(cfg, monkeypatch):
@@ -1453,9 +1448,9 @@ def test_window_wake_dead_skips_newer_digest_resumes_older_window_session(cfg, m
     assert "--resume 'real-window-session'" in calls["launch_command"]
 
 
-def test_window_wake_dead_no_sid_fresh_with_catchup(cfg, monkeypatch):
+def test_window_wake_dead_no_sid_fresh(cfg, monkeypatch):
     """Item 6 fallback: a dead resident with NO recorded UUID -> fresh spawn
-    (resume_sid None) AND the died-no-handoff catchup line in the note."""
+    (resume_sid None)."""
     from cortex import wake, watchdog, window
 
     conn = db.connect(cfg)
@@ -1478,8 +1473,6 @@ def test_window_wake_dead_no_sid_fresh_with_catchup(cfg, monkeypatch):
     conn.close()
     assert res["mode"] == "window"
     assert calls["resume_sid"] is None          # no UUID -> fresh spawn
-    note_text = wake_state.wakeup_note_path(cfg).read_text()
-    assert "died without a handoff" in note_text  # fresh fallback -> catchup
 
 
 def test_window_wake_plan_rotate_flag_is_fresh(cfg, monkeypatch):
@@ -1504,11 +1497,11 @@ def test_window_wake_plan_dead_no_flag_is_resume(cfg, monkeypatch):
     assert wake._window_wake_plan(cfg) == "resume"
 
 
-def test_window_wake_resume_spawn_failure_falls_back_to_fresh_catchup(cfg, monkeypatch):
+def test_window_wake_resume_spawn_failure_falls_back_to_fresh(cfg, monkeypatch):
     """Coordinator addition: a resume ATTEMPT whose spawn fails to land (window
     doesn't come up) must never leave the caller with nothing — _window_wake
-    retries once as a fresh spawn with the died-no-handoff catchup line, so a
-    live awake cortex exists after the wake regardless."""
+    retries once as a fresh spawn, so a live awake cortex exists after the
+    wake regardless."""
     from cortex import wake, watchdog, window
 
     conn = db.connect(cfg)
@@ -1535,5 +1528,3 @@ def test_window_wake_resume_spawn_failure_falls_back_to_fresh_catchup(cfg, monke
     conn.close()
     assert res is not None and res["mode"] == "window"
     assert calls == ["live-uuid", None]  # resume tried first, fresh retried on failure
-    note_text = wake_state.wakeup_note_path(cfg).read_text()
-    assert "died without a handoff" in note_text  # fresh fallback -> catchup

@@ -259,8 +259,8 @@ def test_respawn_readiness_timeout_does_not_persist_sid(cfg, monkeypatch):
 
 def test_spawn_wake_resume_readiness_failure_surfaces_none(cfg, monkeypatch):
     """Fix 2 end-to-end: a resume whose respawn raises (readiness timeout) makes
-    _spawn_wake return None, which _resume_or_fresh_dead turns into a fresh-with-
-    catchup retry -- the documented fresh fallback finally fires."""
+    _spawn_wake return None, which _resume_or_fresh_dead turns into a fresh
+    retry -- the documented fresh fallback finally fires."""
     from cortex import wake, watchdog, window
 
     _seed_wake_row(cfg, "resume-timeout")
@@ -285,8 +285,6 @@ def test_spawn_wake_resume_readiness_failure_surfaces_none(cfg, monkeypatch):
         conn.close()
     assert res is not None and res["mode"] == "window"
     assert calls == ["live-uuid", None]  # resume tried, then fresh fallback fired
-    note_text = wake_state.wakeup_note_path(cfg).read_text()
-    assert "died without a handoff" in note_text  # fresh fallback -> catchup
 
 
 # ── Fix 3: resumed wake -> conditional machine-tagged bell ────────────────────
