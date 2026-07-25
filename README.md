@@ -6,9 +6,10 @@ Assumes [marrow](../marrow) + synapse already installed and a Claude Code max pl
 
 ## Setup
 
-1. Clone into `~/CC-Lab/cortex` and create a venv (stdlib only, no deps):
+1. Clone into `~/CC-Lab/cortex` and create a venv (stdlib only, no third-party deps), then link the synapse repo (scheduler engine) as an editable install:
    ```
-   python3.11 -m venv .venv
+   python3.12 -m venv .venv
+   .venv/bin/pip install -e ../synapse
    ```
 2. Copy the config template and edit identity/paths:
    ```
