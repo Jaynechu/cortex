@@ -615,7 +615,6 @@ def gather(
     *,
     fresh: bool = False,
     wake_kind: str | None = None,
-    died_no_handoff: bool = False,
     window_sid: str | None = None,
     advance_baseline: bool = False,
     full_replay: bool = False,
@@ -625,8 +624,7 @@ def gather(
 ) -> dict:
     """Assemble the wakeup note data dict. conn must use sqlite3.Row factory.
     `fresh`/`wake_kind` are accepted for caller compatibility; the handoff
-    now injects at SessionStart, not here. `died_no_handoff` = the prior window
-    crashed without a handoff.
+    now injects at SessionStart, not here.
 
     `window_sid` (caller-supplied) overrides the wake_state transcript for the
     Window line — the caller's own transcript stem is correct even after a
@@ -773,7 +771,6 @@ def gather(
         "budget": budget,
         "active_app": _safe(_frontmost_app),
         "pending": _safe(_pending, cfg, now, default=[]),
-        "died_no_handoff": died_no_handoff,
         "replay": replay,
         "replay_stale": replay_stale,
         "window_sid": window_sid,

@@ -487,7 +487,6 @@ def test_window_wake_ear_miss_dead_respawns(cfg, monkeypatch):
     monkeypatch.setattr(window, "type_wake_signal",
                         lambda c, now: calls.__setitem__("rearm", calls["rearm"] + 1))
     monkeypatch.setattr(wake, "_signal_landed", lambda c, before, t: False)  # never lands
-    monkeypatch.setattr(wake, "_handoff_written_this_window", lambda c: False)
     monkeypatch.setattr(watchdog, "spawn", lambda c: None)
 
     from datetime import datetime as _dt
@@ -1461,7 +1460,6 @@ def test_window_wake_dead_no_sid_fresh(cfg, monkeypatch):
 
     calls = {}
     monkeypatch.setattr(wake, "_window_alive", lambda c: False)  # dead, no transcript
-    monkeypatch.setattr(wake, "_handoff_written_this_window", lambda c: False)
     monkeypatch.setattr(window, "respawn",
                         lambda c, initial_prompt=None, resume_sid=None:
                         calls.__setitem__("resume_sid", resume_sid))

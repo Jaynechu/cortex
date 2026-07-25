@@ -54,13 +54,6 @@ class WakeError(Exception):
     pass
 
 
-# Sentinel: the dead-path did NOT replace the note (so the caller keeps the
-# first note's captured cutoff for seeding). Distinct from None, which is a
-# valid delivered-note cutoff (the replacement catch-up note had zero eligible
-# replay events).
-_OMITTED_CUTOFF = object()
-
-
 def _now(cfg: dict) -> datetime:
     return datetime.now(ZoneInfo(cfg["core"]["timezone"]))
 
@@ -68,19 +61,16 @@ def _now(cfg: dict) -> datetime:
 def assemble_note(conn: sqlite3.Connection, cfg: dict, now: datetime,
                   decision: dict | None = None, fresh: bool = False,
                   wake_kind: str | None = None,
-                  died_no_handoff: bool = False,
                   return_cutoff: bool = False):
     """Thin wrapper: gather() + render(). `fresh`/`wake_kind` gate the handoff
-    section — only a fresh window (rotate) receives it. `died_no_handoff` adds
-    the respawn-catchup line (dead window left no handoff).
+    section — only a fresh window (rotate) receives it.
 
     `return_cutoff` (default False): return (text, replay_cutoff_ts) instead of
     just text. The cutoff is the replay ts this note was built on, captured at
     assembly so the D6 wake-open seed anchors to exactly what was rendered — not
     a later re-query that could race in an event this note never showed."""
     data = note.gather(conn, cfg, now, decision=decision,
-                       fresh=fresh, wake_kind=wake_kind,
-                       died_no_handoff=died_no_handoff, consume_kick=True)
+                       fresh=fresh, wake_kind=wake_kind, consume_kick=True)
     text = note.render(cfg, now, data)
     if return_cutoff:
         return text, data.get("replay_cutoff_ts")
@@ -333,14 +323,13 @@ def _classify_wake(cfg) -> tuple[str, bool]:
                  (explicit rotate / rebirth / token-cap fresh;
                  rotate_driven=True) OR the transcript rolled to a different
                  session since the last wake (a /clear; rotate_driven=False).
-                 A brand-new session; the handoff (or died_no_handoff catchup)
-                 carries context forward.
+                 A brand-new session; the handoff carries context forward.
       plan="resume" — the window/claude simply DIED (crash / manual close) with NO
                  rotate flag: relaunch `claude --resume <sid>` so the SAME
-                 conversation comes back with full context (no handoff catchup).
-                 A resume attempt that fails to land falls back to "fresh" with
-                 the died_no_handoff catchup — see _window_wake — so a dead
-                 window always ends in a live awake cortex, never nothing.
+                 conversation comes back with full context.
+                 A resume attempt that fails to land falls back to "fresh" —
+                 see _window_wake — so a dead window always ends in a live
+                 awake cortex, never nothing.
       plan="ear"    — the window is alive and unrotated: use the signal-file ear.
 
     rotate_driven is TRUE only when THIS SAME call observed the rotate flag set
@@ -508,9 +497,8 @@ def _spawn_wake(conn, cfg, now, resume: bool = False,
     (ear-style, machine-tagged, epoch-token in its receipt) so the resumed window
     still gets its note. Resume with no recorded UUID -> fall back to a fresh
     spawn. Sets the awake marker + lights the watchdog. Returns a result dict, or
-    None on window failure (caller -> _resume_or_fresh_dead retries as
-    fresh-with-catchup on a resume failure, _window_wake -> headless on a fresh
-    failure).
+    None on window failure (caller -> _resume_or_fresh_dead retries as fresh
+    on a resume failure, _window_wake -> headless on a fresh failure).
 
     The epoch token is captured before the spawn only to stamp the wake receipt
     (marrow's hook validates it via wake_token_current). The set_awake commit
@@ -678,10 +666,10 @@ def _window_wake(conn, cfg, note_text, now, respawn: bool = False,
                  wake_reasons: str | None = None) -> dict | None:
     """Interactive wake. `respawn=True` (rotate/rebirth) -> a deliberate FRESH
     brain via the emoji + bell-marker wake prompt (_spawn_wake). `respawn=False`
-    with a DEAD resident -> RESUME the same conversation (`claude --resume`), no
-    handoff catchup — context is intact; a resume attempt that fails to land
-    falls back to fresh-with-catchup (_resume_or_fresh_dead), so a dead window
-    always ends in a live awake cortex, never nothing. An alive resident window
+    with a DEAD resident -> RESUME the same conversation (`claude --resume`) —
+    context is intact; a resume attempt that fails to land falls back to fresh
+    (_resume_or_fresh_dead), so a dead window always ends in a live awake
+    cortex, never nothing. An alive resident window
     is woken via the signal-file ear: write the note file (marrow hook reads it
     to inject), append a bell line its armed Monitor tails, then verify the wake
     landed (transcript mtime grows within ear_timeout_sec).
@@ -690,7 +678,7 @@ def _window_wake(conn, cfg, note_text, now, respawn: bool = False,
       a. alive claude -> TYPE the bell line + rearm suffix into the window; that
          typed prompt flows through the marrow hook (note injected, session
          rearms). Poll again; land -> done.
-      b. only a DEAD claude/session -> resume (or fresh-with-catchup on failure).
+      b. only a DEAD claude/session -> resume (or fresh on failure).
       c. respawn failure is the sole alert point (handled by the caller).
 
     Sets the awake marker + lights the watchdog. Returns a result dict, or None
@@ -706,8 +694,8 @@ def _window_wake(conn, cfg, note_text, now, respawn: bool = False,
     if respawn:
         return _spawn_wake(conn, cfg, now, resume=False, wake_reasons=wake_reasons)
     # Simply-dead resident (crash/manual close, no rotate flag) -> resume the
-    # same conversation with full context (or fresh-with-catchup if unresumable
-    # or the resume spawn itself fails). Defense-in-depth: the plan classified
+    # same conversation with full context (or fresh if unresumable or the
+    # resume spawn itself fails). Defense-in-depth: the plan classified
     # this as "ear" (alive+unrotated), but the window can die in the gap between
     # that check and here — re-check before trying to signal a dead resident.
     if not _window_alive(cfg):
@@ -758,8 +746,7 @@ def _ear_miss_ladder(conn, cfg, now, timeout: float,
       a. claude ALIVE -> type the rearm bell line, poll again; land -> ear wake.
       b. claude DEAD  -> resume the same conversation (`claude --resume`). Only
          when no resumable session UUID exists, or the resume spawn itself
-         fails, do we fall back to a fresh spawn with the died-no-handoff
-         catchup line.
+         fails, do we fall back to a fresh spawn.
     Returns a result dict when a rung completes the wake; None means the alive
     window rearmed but the retyped signal still did not land (caller falls
     through to set_awake as a plain ear wake — the marker is already set)."""
@@ -783,22 +770,21 @@ def _ear_miss_ladder(conn, cfg, now, timeout: float,
 def _resume_or_fresh_dead(conn, cfg, now, why: str,
                           wake_reasons: str | None = None) -> dict | None:
     """A dead resident window with NO rotate flag. A resumable claude session
-    UUID -> resume (context back, no catchup) UNLESS that UUID was already
-    durably retired by a rotate (wake_state.retired_sid) — the one-shot
-    `rotated` flag can be consumed by an unrelated wake while a stale
-    `transcript` pointer still resolves claude_session_id() to the retired
-    session; retired_sid is the belt-and-braces guard that survives that.
+    UUID -> resume (context back) UNLESS that UUID was already durably retired
+    by a rotate (wake_state.retired_sid) — the one-shot `rotated` flag can be
+    consumed by an unrelated wake while a stale `transcript` pointer still
+    resolves claude_session_id() to the retired session; retired_sid is the
+    belt-and-braces guard that survives that.
 
     Contract: after this returns, either the caller has a live awake cortex, or
     the wake fell all the way through to run_wake's headless fallback — never
     silently nothing. A resume ATTEMPT that fails to land (the resume spawn
     itself returns None — bad/gone sid, claude errors out, window doesn't come
-    up) is NOT the end of the road: it is retried once as a fresh spawn with the
-    died-no-handoff catchup line, same as the no-UUID case, so resume is
-    preferred but fresh is always the fallback, never a dead end.
+    up) is NOT the end of the road: it is retried once as a fresh spawn, same
+    as the no-UUID case, so resume is preferred but fresh is always the
+    fallback, never a dead end.
 
-    No UUID (or a retired one) -> fresh spawn with the died-no-handoff
-    catchup line (only when the window wrote no handoff)."""
+    No UUID (or a retired one) -> fresh spawn."""
     from cortex import wake_state, window
 
     sid = window.claude_session_id(cfg)
@@ -813,58 +799,11 @@ def _resume_or_fresh_dead(conn, cfg, now, why: str,
         if result is not None:
             return result
         # Resume spawn failed to land (already alerted by _spawn_wake) -> the
-        # window must never end up with nothing. Retry once as fresh-with-
-        # catchup, same as the no-UUID case below.
+        # window must never end up with nothing. Retry once as fresh, same as
+        # the no-UUID case below.
         _audit_wake(conn, wake_id_of(now), f"{why}, resume failed -> fresh fallback")
 
-    return _fresh_dead_spawn(conn, cfg, now, wake_reasons=wake_reasons)
-
-
-def _fresh_dead_spawn(conn, cfg, now, wake_reasons: str | None = None) -> dict | None:
-    """Fresh-spawn a new brain for a dead resident (no rotate flag): the
-    died-no-handoff catchup line is added when the previous window wrote no
-    handoff (a crash/close, not a deliberate rotate) so the fresh brain
-    recovers context from the transcript."""
-    from cortex import window
-
-    delivered_cutoff = _OMITTED_CUTOFF
-    if not _handoff_written_this_window(cfg):
-        # A second note is assembled and DELIVERED here (replacing the first note
-        # written before _window_wake was entered). Seeding must anchor to THIS
-        # note's cutoff, not the first's — else an event arriving between the two
-        # assemblies is shown here yet stays > the first-note baseline and gets
-        # duplicated in the first free-round (#3). Propagate the delivered cutoff.
-        catchup_note, delivered_cutoff = assemble_note(
-            conn, cfg, now, died_no_handoff=True, return_cutoff=True)
-        window.write_note(cfg, catchup_note)
-    result = _spawn_wake(conn, cfg, now, resume=False, wake_reasons=wake_reasons)
-    if result is not None and delivered_cutoff is not _OMITTED_CUTOFF:
-        result["note_cutoff"] = delivered_cutoff
-    return result
-
-
-def _handoff_written_this_window(cfg) -> bool:
-    """True if the handoff file was touched since this (now dead) window woke —
-    i.e. it wrote a handoff before dying. Reuses the mtime-vs-awake_since idea
-    (watchdog._handoff_written pattern). No awake_since / no handoff -> False."""
-    from datetime import datetime
-    from cortex import config as _config, wake_state
-
-    since_raw = wake_state.load(cfg).get("awake_since")
-    if not since_raw:
-        return False
-    try:
-        since = datetime.fromisoformat(since_raw.replace("Z", "+00:00")).timestamp()
-    except (ValueError, AttributeError):
-        return False
-    handoff = _config.handoff_path(cfg)
-    try:
-        if not handoff.exists():
-            return False
-        return handoff.stat().st_mtime >= since and bool(
-            handoff.read_text(encoding="utf-8").strip())
-    except OSError:
-        return False
+    return _spawn_wake(conn, cfg, now, resume=False, wake_reasons=wake_reasons)
 
 
 def _window_alive(cfg) -> bool:
@@ -1030,13 +969,7 @@ def run_wake(
             # DELIVERED note was assembled (P2-A) — not a fresh query after the
             # ~90s window spawn, which would race in an event absent from the note
             # and drop it from the first free-round.
-            #
-            # The dead-window path may REPLACE the first note with a second
-            # died_no_handoff catch-up note; when it does it reports that note's
-            # cutoff via win["note_cutoff"] (may be None = empty replay). Seed from
-            # the delivered note's cutoff so an event arriving between the two
-            # assemblies is not duplicated in the first free-round (#3).
-            seed_cutoff = win["note_cutoff"] if "note_cutoff" in win else window_cutoff
+            seed_cutoff = window_cutoff
             note.seed_baseline(conn, cfg, cutoff_ts=seed_cutoff)
             timer.mark("window_injected")
             timer.mark("wake_complete")

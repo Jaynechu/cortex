@@ -43,7 +43,7 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
 - run_wake: symlinks.ensure_all → assemble_note → window path (mode='window' AND real caller) else marrow subprocess. Freshness from rotate flag, no date compare; next-morning first wake = rebirth.
 - WakeTimer latency probe always-on: wake_id + CORTEX_WAKE_ID/CORTEX_WAKE_TIMING_LOG env; marks tick_fire→gate_eval→symlinks→note→injected/complete; marrow subprocess shares origin via env (timing.py).
 - _window_wake_plan classifier: fresh (rotate flag | newest transcript ≠ recorded = deliberate /clear) | resume (sid dead/gone, no flag) | ear (alive+unrotated; None recorded hint stays ear). Consumes rotate flag once/wake.
-- _window_wake path: fresh → _spawn_wake(resume=False) emoji; dead+no-flag → _resume_or_fresh_dead (sid → --resume same convo no catchup; absent → fresh + died_no_handoff catchup if handoff unwritten).
+- _window_wake path: fresh → _spawn_wake(resume=False) emoji; dead+no-flag → _resume_or_fresh_dead (sid → --resume same convo; absent → fresh, plain).
 - Alive → append bell → _signal_landed polls mtime 3s up to ear_timeout 90s.
 - _ear_miss_ladder (alive): type_wake_signal rearm → poll → land=ear; claude dead → _resume_or_fresh_dead; rearmed-unconfirmed → set_awake anyway.
 - Respawn failure (WindowError) = SOLE alert point → _alert_respawn_failed → marrow alerts row (audit_log fallback).
@@ -81,7 +81,7 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
 - Commit is epoch-guarded (conditional_mutate): a lie_down/user reset between build and write drops the injection (BUG B).
 - watchdog._log = timestamped heartbeat to watchdog.log (start/retire/fuse/silence_action) — proves the dedicated watchdog is live vs riding only the tick backup (watchdog.py:336-345).
 - force_slept="auto" = routine silence marker (note.py neutral, no catchup line), distinct from "timeout" (retired) and real incidents (fuse/stale).
-- _fuse: esc → write `⚙️ [FUSE]` marker (body = marrow [cortex].fuse_prompt_text: update own handoff + lie_down(rotate=True)) → poll awake 300s grace; proxy-lie_down only if session didn't; catchup only when handoff unwritten (watchdog.py:166-205).
+- _fuse: esc → write `⚙️ [FUSE]` marker (body = marrow [cortex].fuse_prompt_text: update own handoff + lie_down(rotate=True)) → poll awake 300s grace; proxy-lie_down only if session didn't; force_slept set only when handoff unwritten (watchdog.py:166-205).
 - esc verify: still growing → hard_interrupt SIGINT, gated hard_interrupt_enabled (43-66).
 ### sentinel (`sentinel.py`) — exact-time wake
 - One-shot detached (start_new_session): sleeps `--seconds N` then one pacemaker_tick.main() — wakes fire on the second. launchd 5-min tick stays self-heal fallback.
@@ -95,10 +95,10 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
 - lie_down body: record occupancy `tokens` into ct_wake_log (sole writer; bare `except:pass` = known silent-drop; net_tokens column historical/unwritten) → clear due self_schedule → integration.lie_down floor redraw.
 - Then: store_window_tokens → kill watchdog (skip if self) → optional set_rotated → _arm_sentinel; result adds next_wake=HH:MM.
 - say (say.py, window.py:476-483): sound + front resident window — urgent-only ping, else silent; --note accepted but ignored (CLI symmetry).
-- Handoff: per-shell rolling log `<cortex_home>/handoff-<shell>.md` (cli default config.DEFAULT_HANDOFF, override paths.handoff_file). Read via the session's own CLAUDE.md memory import; page-turn is marrow-side (marrow/MAP.md §6.3). Cortex reads its mtime only — fuse "handoff written?" (watchdog.py:206), dead-window recovery (wake.py:846), note catchup (note.py:361).
+- Handoff: per-shell rolling log `<cortex_home>/handoff-<shell>.md` (cli default config.DEFAULT_HANDOFF, override paths.handoff_file). Read via the session's own CLAUDE.md memory import; page-turn is marrow-side (marrow/MAP.md §6.3). Cortex reads its mtime only — fuse "handoff written?" (watchdog.py:206).
 ## 6. Wakeup note (`note.py`)
 - gather (note.py:311-340): every section behind _safe(), render pure, omit cleanly when absent (386-446).
-- Sections: header Now/Plan Used/Active [+ force_slept | died_no_handoff catchup] · Pending self-schedule (note.pending_window_min 15).
+- Sections: header Now/Plan Used/Active [+ force_slept] · Pending self-schedule (note.pending_window_min 15).
 - Replay (note.replay_events 4, marker-stripped, 300ch) · turn_end_text (default "") · title prefix. "Wake:" reason line retired.
 - Replay excludes the rendering shell's OWN channel: `note_render --shell <id>` picks note.shell_replay_exclude[id] (cli→ct, tg→tg); no --shell falls back to note.replay_exclude_channels.
 - Diff mode: replay filters events newer than wake_state.last_note_ts (baseline = wake's initial note); every gather() advances it to the newest eligible event (note.py:359-374).
