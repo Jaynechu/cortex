@@ -123,14 +123,34 @@ def wake_prompt(cfg: dict) -> str:
 
 
 def _bell_template(cfg: dict) -> str:
-    return cfg["wake"].get("wake_bell_template", "☀️ {hm}")
+    """Template of the bell TYPED into an already-running resident window
+    (scheduled wake on a live window, resume bell)."""
+    return cfg["wake"].get("wake_bell_template", "⏰ {hm}")
+
+
+def _opener_template(cfg: dict) -> str:
+    """Template of the first prompt baked into a FRESHLY SPAWNED window
+    (fresh_initial_prompt). Separate from the resident bell: a brand-new brain
+    opens the shift, a live one just gets rung."""
+    return cfg["wake"].get("spawn_opener_template", "☀️ {hm}")
+
+
+def _template_prefix(tmpl: str) -> str:
+    """Static text BEFORE the {hm} placeholder (whole text for a static
+    template) — the shape a consumer falls back to with no receipt."""
+    return tmpl.split("{hm}", 1)[0]
 
 
 def bell_template_prefix(cfg: dict) -> str:
-    """Static text of the bell template BEFORE the {hm} placeholder — the shape
-    the consumer falls back to when the receipt is missing/unreadable. Persisted
-    into the receipt so the marrow side never needs cortex config."""
-    return _bell_template(cfg).split("{hm}", 1)[0]
+    """Static prefix of the resident bell template. Persisted into the receipt
+    so the marrow side never needs cortex config."""
+    return _template_prefix(_bell_template(cfg))
+
+
+def opener_template_prefix(cfg: dict) -> str:
+    """Static prefix of the fresh-spawn opener template — the window-lineage
+    marker (every freshly spawned window's first prompt leads with it)."""
+    return _template_prefix(_opener_template(cfg))
 
 
 def wake_signal_line(cfg: dict, now, rearm: bool = False, token=None) -> str:
@@ -144,17 +164,27 @@ def wake_signal_line(cfg: dict, now, rearm: bool = False, token=None) -> str:
     return _bell_template(cfg).replace("{hm}", now.strftime("%H:%M"))
 
 
-def write_wake_receipt(cfg: dict, now, token=None, rearm: bool = False) -> None:
+def spawn_opener_line(cfg: dict, now) -> str:
+    """The VISIBLE opener line of a freshly spawned window, from
+    [wake].spawn_opener_template with {hm} -> local HH:MM. Same receipt/hook
+    chain as the bell — only the wording differs."""
+    return _opener_template(cfg).replace("{hm}", now.strftime("%H:%M"))
+
+
+def write_wake_receipt(cfg: dict, now, token=None, rearm: bool = False,
+                       opener: bool = False) -> None:
     """Persist the pending bell receipt into wake_state under the shared flock,
-    at bell-send time. Records the exact visible bell text, gen, state_id, rearm
-    flag, an ISO timestamp, and the current template prefix (so the consumer can
-    shape-match without cortex config). Overwrites any prior receipt (stale
-    hygiene). Best-effort: a write failure never crashes the wake — the
-    consumer then takes the shape fallback."""
+    at bell-send time. Records the exact visible text, gen, state_id, rearm
+    flag, an ISO timestamp, and the template ACTUALLY used (so the consumer can
+    shape-match without cortex config). `opener=True` = the fresh-spawn opener
+    line (spawn_opener_template) instead of the resident bell. Overwrites any
+    prior receipt (stale hygiene). Best-effort: a write failure never crashes
+    the wake — the consumer then takes the shape fallback."""
     from datetime import timezone
 
     from cortex import wake_state
-    text = wake_signal_line(cfg, now)
+    tmpl = _opener_template(cfg) if opener else _bell_template(cfg)
+    text = spawn_opener_line(cfg, now) if opener else wake_signal_line(cfg, now)
     gen = state_id = None
     if token:
         gen, state_id = token
@@ -167,8 +197,8 @@ def write_wake_receipt(cfg: dict, now, token=None, rearm: bool = False) -> None:
         # Both persisted so the consumer shape-matches without cortex config: the
         # full template (to know whether it has an {hm} time placeholder — a fully
         # STATIC template with no placeholder is valid) and its static prefix.
-        "template": _bell_template(cfg),
-        "template_prefix": bell_template_prefix(cfg),
+        "template": tmpl,
+        "template_prefix": _template_prefix(tmpl),
     }
     try:
         wake_state.update(cfg, wake_receipt=receipt)
@@ -177,14 +207,15 @@ def write_wake_receipt(cfg: dict, now, token=None, rearm: bool = False) -> None:
 
 
 def fresh_initial_prompt(cfg: dict, now, token=None) -> str:
-    """The baked first prompt for a brand-new/resumed cortex window: JUST the
-    visible bell line (human text, e.g. '☀️ 00:55'). The machine data for this
-    bell is written to the wake_state receipt via write_wake_receipt so the
-    marrow UserPromptSubmit hook recognizes the on-screen line and injects the
-    full wakeup note — the window gets its wake identity + note in one stroke
-    instead of the emoji being read as a bare chat message. `token` (gen,
-    state_id) is carried in the receipt, not the visible line."""
-    return wake_signal_line(cfg, now, token=token)
+    """The baked first prompt for a brand-new cortex window: JUST the visible
+    opener line (human text from [wake].spawn_opener_template, e.g. '☀️ 00:55').
+    The machine data for it is written to the wake_state receipt via
+    write_wake_receipt(opener=True) so the marrow UserPromptSubmit hook
+    recognizes the on-screen line and injects the full wakeup note — the window
+    gets its wake identity + note in one stroke instead of the emoji being read
+    as a bare chat message. `token` (gen, state_id) is carried in the receipt,
+    not the visible line."""
+    return spawn_opener_line(cfg, now)
 
 
 def launch_command(cfg: dict, initial_prompt: str | None = None,
@@ -322,9 +353,9 @@ def claude_session_id(cfg: dict) -> str | None:
     from pathlib import Path
     from cortex import transcript as _transcript
 
-    # Window-lineage marker = the visible bell template prefix (e.g. '☀️'): every
-    # window's first prompt now leads with it (fresh_initial_prompt).
-    marker = bell_template_prefix(cfg).strip()
+    # Window-lineage marker = the spawn-opener template prefix (e.g. '☀️'): every
+    # window's first prompt leads with it (fresh_initial_prompt).
+    marker = opener_template_prefix(cfg).strip()
     lineage = _transcript.newest_window_lineage(cfg, marker)
     if lineage is not None:
         return lineage.stem

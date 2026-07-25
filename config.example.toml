@@ -45,6 +45,9 @@ wake_audit_log = ""
 # Interactive-window (B3v) runtime files. Empty = defaults under cortex_home/state/.
 wake_state_file = ""     # awake marker + resident iTerm session id. Default: <home>/state/wake_state.json
 wakeup_note_file = ""    # note text the window is told to Read. Default: <home>/wakeup_note.md
+# Invisible free-round payload staged for the marrow hook (the window only sees
+# the short ⏳ marker). Match marrow [cortex].free_round_note_file.
+free_round_note_file = ""  # Default: <home>/free_round_note.md
 watchdog_pidfile = ""    # per-wake watchdog pid. Default: <home>/state/watchdog.pid
 spawn_lock_file = ""     # serializes every window-spawn entrant. Default: <home>/state/spawn.lock
 # Claude Code transcript dir for the window. Empty = derived from cortex_home
@@ -95,12 +98,16 @@ ear_timeout_sec = 90           # recovery deadline for an alive-window wake to l
 # choose next wake) are injected by marrow's UserPromptSubmit hook
 # when this exact emoji is submitted in a cortex window.
 wake_prompt = "☀️"
-# Visible bell = HUMAN TEXT ONLY (no machine marker, no epoch token). The
-# machine data (gen/state_id/rearm) is written to the wake_state receipt sidecar
-# at send time; the marrow hook exact-matches the on-screen line against it.
-# {hm} = local HH:MM; a fully STATIC template with no {hm} is also valid. Must
-# match marrow [cortex].wake_bell_template.
-wake_bell_template = "[☀️ {hm}]"
+# Visible wake lines = HUMAN TEXT ONLY (no machine marker, no epoch token). The
+# machine data (template/gen/state_id/rearm) is written to the wake_state receipt
+# sidecar at send time; the marrow hook exact-matches the on-screen line against
+# it. {hm} = local HH:MM; a fully STATIC template with no {hm} is also valid.
+# Must match marrow [cortex].spawn_opener_template / [cortex].wake_bell_template.
+#   spawn_opener_template = first prompt baked into a FRESHLY SPAWNED window
+#     (also the window-lineage marker used to find resumable sessions).
+#   wake_bell_template = line TYPED into an already-running resident window.
+spawn_opener_template = "[☀️ {hm}]"
+wake_bell_template = "⏰ {hm}"
 # Pending-receipt time-to-live (minutes): the consumer ignores an older receipt
 # and the producer overwrites it on each new bell. Match marrow receipt_ttl_min.
 receipt_ttl_min = 15
@@ -114,8 +121,9 @@ next_wake_max = 360         # lie_down(next_wake_min=N) clamp upper bound (minut
 # timer it just armed (perpetual loop). {mins}/{user} optional.
 tuck_in_text = "⏳ [NEW ROUND]"
 # Markers identifying a NON-user turn (so they don't reset the silence timer and
-# downstream memory drops them). The bell prefix (wake_bell_template) is added
-# automatically. Substring match: "[CMD" catches every ⚙️ [CMD ct-*] slash-command body.
+# downstream memory drops them). Both wake-line prefixes (spawn_opener_template,
+# wake_bell_template) are added automatically. Substring match: "[CMD" catches
+# every ⚙️ [CMD ct-*] slash-command body.
 machine_line_markers = ["[NEW ROUND]", "[FUSE]", "[CTL]", "[CMD"]
 free_round_note = true       # every free-round injection appends a freshly rendered wakeup note above the marker line (diff mode: only events since the last rendered note this wake)
 # Covert-delivery markers typed into the window. Only the marker reaches the screen; the body is

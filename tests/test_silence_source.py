@@ -72,7 +72,17 @@ def test_free_round_injection_does_not_reset(cfg):
 
 
 def test_wake_bell_line_does_not_reset(cfg):
-    # Shipped default bell template prefix ('☀️ {hm}' -> '☀️').
+    # Shipped default RESIDENT bell prefix ('⏰ {hm}' -> '⏰').
+    _write(cfg, [
+        _user("q", 25),
+        _user("⏰ 14:03", 2),
+    ])
+    assert 24.0 < transcript.user_silent_min(cfg) < 26.0
+
+
+def test_spawn_opener_line_does_not_reset(cfg):
+    # The fresh-spawn opener is a SECOND machine shape ('☀️ {hm}' -> '☀️'); both
+    # prefixes feed _line_markers, so neither counts as user speech.
     _write(cfg, [
         _user("q", 25),
         _user("☀️ 14:03", 2),

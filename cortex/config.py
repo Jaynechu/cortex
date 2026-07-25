@@ -68,13 +68,19 @@ _DEFAULTS: dict[str, Any] = {
         "auto_adopt": True,
         "ear_timeout_sec": 90,
         "wake_prompt": "☀️",
-        # Visible bell line = human text ONLY (no machine marker, no epoch token).
-        # The machine data (marker/gen/state_id/rearm) is written to the
-        # wake_state receipt sidecar instead (window.write_wake_receipt); the
-        # marrow hook matches the on-screen line against that receipt. {hm} =
-        # local HH:MM. This static PREFIX (text before {hm}) is persisted into
-        # wake_state so the consumer can shape-match it without cortex config.
-        "wake_bell_template": "☀️ {hm}",
+        # Visible wake lines = human text ONLY (no machine marker, no epoch
+        # token). The machine data (template/gen/state_id/rearm) is written to
+        # the wake_state receipt sidecar instead (window.write_wake_receipt);
+        # the marrow hook matches the on-screen line against that receipt.
+        # {hm} = local HH:MM. The static PREFIX (text before {hm}) is persisted
+        # into wake_state so the consumer can shape-match without cortex config.
+        #   spawn_opener_template — baked as the FIRST prompt of a freshly
+        #     spawned window (fresh_initial_prompt); also the window-lineage
+        #     marker (transcript.lineage_marker).
+        #   wake_bell_template — TYPED into an already-running resident window
+        #     (scheduled wake on a live window, resume bell).
+        "spawn_opener_template": "☀️ {hm}",
+        "wake_bell_template": "⏰ {hm}",
         # Receipt time-to-live (minutes): the consumer ignores a pending receipt
         # older than this, and the producer overwrites it on every new bell.
         "receipt_ttl_min": 15,

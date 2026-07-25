@@ -144,10 +144,17 @@ def resident_transcript(cfg: dict) -> Path | None:
 
 
 def lineage_marker(cfg: dict) -> str:
-    """Marker leading a genuine cortex window's first prompt = the visible bell
+    """Marker leading a genuine cortex window's first prompt = the spawn-opener
     template prefix (e.g. '☀️'; window.fresh_initial_prompt)."""
     wcfg = cfg.get("wake", {})
-    return str(wcfg.get("wake_bell_template") or "☀️ {hm}").split("{hm}", 1)[0].strip()
+    return str(wcfg.get("spawn_opener_template") or "☀️ {hm}").split("{hm}", 1)[0].strip()
+
+
+def bell_marker(cfg: dict) -> str:
+    """Prefix of the bell TYPED into a live resident window
+    ([wake].wake_bell_template) — a machine line, never user speech."""
+    wcfg = cfg.get("wake", {})
+    return str(wcfg.get("wake_bell_template") or "⏰ {hm}").split("{hm}", 1)[0].strip()
 
 
 # Leading decoration tolerated before a machine marker: whitespace + at most a
@@ -187,10 +194,11 @@ def _line_markers(cfg: dict) -> list[str]:
     is_machine_line (cortex_bridge.py): wake marker + tuck-in marker family."""
     wcfg = cfg.get("wake", {})
     out = []
-    # Visible bell prefix (e.g. '☀️') leads every wake bell down the ear.
-    m = lineage_marker(cfg)
-    if m:
-        out.append(m)
+    # Visible prefixes of both machine wake lines: the fresh-spawn opener
+    # (lineage_marker) and the bell typed into a live resident (bell_marker).
+    for m in (lineage_marker(cfg), bell_marker(cfg)):
+        if m and m not in out:
+            out.append(m)
     for m in wcfg.get("machine_line_markers") or config.DEFAULT_MACHINE_LINE_MARKERS:
         m = str(m).strip()
         if m and m not in out:

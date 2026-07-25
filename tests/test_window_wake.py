@@ -211,7 +211,7 @@ def test_window_wake_respawn_delivers_note_as_prompt(cfg, monkeypatch):
     # screen. The bell text lives in the wake_state receipt written before the
     # spawn (a fresh spawn carries no epoch token -> gen None, so the marrow
     # staleness check fails open and always processes the fresh wake).
-    assert calls["prompt"] == window.wake_signal_line(cfg, now)
+    assert calls["prompt"] == window.spawn_opener_line(cfg, now)
     assert re.search(r"\{g\d+:[0-9a-fA-F]+\}", calls["prompt"]) is None
     r = wake_state.load(cfg)["wake_receipt"]
     assert r["text"] == calls["prompt"]
@@ -562,8 +562,8 @@ def test_store_window_tokens_reaches_budget_line(cfg):
 
 def test_type_wake_signal_line_format(cfg, monkeypatch):
     """type_wake_signal types exactly one VISIBLE bell line = human text only
-    ('☀️ HH:MM'), no machine marker on screen, and writes NOTHING to disk beyond
-    the wake_state receipt (which carries the machine data)."""
+    (wake_bell_template, '⏰ HH:MM'), no machine marker on screen, and writes
+    NOTHING to disk beyond the wake_state receipt (machine data)."""
     from datetime import datetime as _dt
 
     from cortex import wake_state, window
@@ -573,11 +573,12 @@ def test_type_wake_signal_line_format(cfg, monkeypatch):
                         lambda c, text: typed.append(text) or True)
     now = _dt(2026, 7, 11, 9, 5, tzinfo=timezone.utc)
     window.type_wake_signal(cfg, now, token=(3, "cafe"))
-    assert typed == ["☀️ 09:05"]
+    assert typed == ["⏰ 09:05"]
     r = wake_state.load(cfg)["wake_receipt"]
-    assert r["text"] == "☀️ 09:05"
+    assert r["text"] == "⏰ 09:05"
     assert r["gen"] == 3 and r["state_id"] == "cafe"
-    assert r["template_prefix"] == "☀️ "
+    assert r["template"] == "⏰ {hm}"
+    assert r["template_prefix"] == "⏰ "
 
 
 def test_wake_signal_line_is_human_text_only(cfg):
@@ -588,10 +589,10 @@ def test_wake_signal_line_is_human_text_only(cfg):
     from cortex import window
 
     now = _dt(2026, 7, 11, 9, 5, tzinfo=timezone.utc)
-    assert window.wake_signal_line(cfg, now) == "☀️ 09:05"
+    assert window.wake_signal_line(cfg, now) == "⏰ 09:05"
     # rearm/token no longer change the RENDERED text — receipt carries them.
-    assert window.wake_signal_line(cfg, now, rearm=True) == "☀️ 09:05"
-    assert window.wake_signal_line(cfg, now, token=(2, "beef")) == "☀️ 09:05"
+    assert window.wake_signal_line(cfg, now, rearm=True) == "⏰ 09:05"
+    assert window.wake_signal_line(cfg, now, token=(2, "beef")) == "⏰ 09:05"
 
 
 def test_deliver_covert_marker_types_directly(cfg, monkeypatch):
@@ -632,7 +633,7 @@ def test_type_wake_signal_writes_rearm_receipt(cfg, monkeypatch):
     now = _dt(2026, 7, 11, 9, 5, tzinfo=timezone.utc)
     assert window.type_wake_signal(cfg, now) is True
     r = wake_state.load(cfg)["wake_receipt"]
-    assert r["text"] == "☀️ 09:05" and r["rearm"] is True
+    assert r["text"] == "⏰ 09:05" and r["rearm"] is True
 
 
 # --- wakeup note baked into the launch command --------------------------------
@@ -669,18 +670,22 @@ def test_static_zwj_template_roundtrips_through_receipt(cfg):
         ["0x5b", "0x1f9da", "0x200d", "0x2640", "0xfe0f"]
 
 
-def test_fresh_initial_prompt_is_visible_bell_only(cfg):
-    """fresh_initial_prompt bakes JUST the visible bell line (human text) — no
-    marker on screen. The marrow hook recognizes it via the wake_state receipt."""
+def test_fresh_initial_prompt_is_spawn_opener_only(cfg):
+    """fresh_initial_prompt bakes JUST the visible SPAWN OPENER line
+    (spawn_opener_template), independent of the resident bell template. The
+    marrow hook recognizes it via the wake_state receipt."""
     from datetime import datetime, timezone
     from cortex import window
 
     now = datetime(2026, 7, 10, 0, 55, tzinfo=timezone.utc)
     prompt = window.fresh_initial_prompt(cfg, now)
     assert prompt == "☀️ 00:55"
-    assert prompt == window.wake_signal_line(cfg, now)
+    assert prompt == window.spawn_opener_line(cfg, now)
+    # The resident bell is a SEPARATE key -> changing it never moves the opener.
+    cfg["wake"]["wake_bell_template"] = "RING {hm}"
+    assert window.fresh_initial_prompt(cfg, now) == "☀️ 00:55"
 
-    cfg["wake"]["wake_bell_template"] = "GO {hm}"
+    cfg["wake"]["spawn_opener_template"] = "GO {hm}"
     assert window.fresh_initial_prompt(cfg, now) == "GO 00:55"
 
 

@@ -501,10 +501,11 @@ def _spawn_wake(conn, cfg, now, resume: bool = False,
         except OSError:
             resume_before = None
     else:
-        # Fresh: the visible bell is the first prompt; write its receipt (with the
-        # epoch token, Fix 4) BEFORE spawning so the marrow hook recognizes the
-        # new window's first line AND suppresses it if a newer epoch superseded.
-        window.write_wake_receipt(cfg, now, token=token)
+        # Fresh: the visible SPAWN OPENER is the first prompt; write its receipt
+        # (with the epoch token, Fix 4) BEFORE spawning so the marrow hook
+        # recognizes the new window's first line AND suppresses it if a newer
+        # epoch superseded.
+        window.write_wake_receipt(cfg, now, token=token, opener=True)
         initial_prompt = window.fresh_initial_prompt(cfg, now)
     try:
         new_sid = window.respawn(cfg, initial_prompt=initial_prompt, resume_sid=resume_sid)
@@ -550,6 +551,67 @@ def _resume_bell(cfg, now, token) -> None:
         window.type_wake_signal(cfg, now, token=token)
     except window.WindowError:
         pass
+
+
+def resume_asleep(cfg) -> str | None:
+    """SILENT resume of a window closed while the shell is ASLEEP (accidental
+    close between wakes). Relaunches `claude --resume <sid>` and re-records the
+    new resident session id — and NOTHING else: no bell typed, no set_awake, no
+    next_wake_at touched. The window just sits idle until the scheduled wake
+    fires normally through the usual path.
+
+    Contrast with the wake-time dead-window path (_spawn_wake resume=True),
+    which deliberately types a bell to start a turn: reopening a window during
+    sleep must never start one.
+
+    Guards (same shape as every other spawn entrant):
+      - runs inside _spawn_serialized, re-checking liveness under the lock;
+      - bails when the shell is awake (that case belongs to the wake path);
+      - epoch token captured before the spawn and re-checked at commit, so a
+        wake / user reset landing mid-spawn wins and this write is dropped;
+      - a retired sid is never resumed (rotate already replaced that brain);
+      - a failed spawn persists nothing (window.respawn verifies readiness).
+    Returns a log line when it resumed, else None."""
+    from cortex import wake_state, window
+
+    with _spawn_serialized(cfg):
+        if _window_alive(cfg):
+            return None  # a resident landed under the lock
+        st = wake_state.load(cfg)
+        if st.get("awake"):
+            return None  # awake -> the wake path owns this window
+        sid = window.claude_session_id(cfg)
+        if not sid or sid == wake_state.get_retired_sid(cfg):
+            return None  # nothing resumable -> leave it for the scheduled wake
+        try:
+            token = wake_state.current_epoch(cfg)
+        except wake_state.StateValidationError:
+            return None
+        try:
+            new_sid = window.respawn(cfg, initial_prompt=None, resume_sid=sid)
+        except window.WindowError:
+            return None  # stays closed; the scheduled wake still spawns it
+        try:
+            committed = wake_state.conditional_mutate(
+                cfg, token, _record_resumed_session(new_sid))
+        except wake_state.StateValidationError:
+            return f"silent resume {sid[:8]} -> epoch moved, session id not recorded"
+        if not committed:
+            return f"silent resume {sid[:8]} -> awake under us, session id not recorded"
+        wake_state.wake_audit(cfg, "silent_resume_asleep", new_sid,
+                              f"claude_sid={sid}")
+        return f"silent resume of closed window (claude_sid={sid[:8]}), still asleep"
+
+
+def _record_resumed_session(new_sid: str):
+    """Mutator (under conditional_mutate): point the resident session id at the
+    reopened window, ONLY while the shell is still asleep."""
+    def _m(d: dict) -> bool:
+        if d.get("awake"):
+            return False
+        d["session_id"] = new_sid
+        return True
+    return _m
 
 
 def _window_wake(conn, cfg, note_text, now, respawn: bool = False,
