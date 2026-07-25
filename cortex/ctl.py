@@ -1,12 +1,12 @@
 """cortex.ctl — manual control CLI. Thin wrappers over the same wake/lie_down/
-ledger paths the pacemaker uses, so a human can drive the resident window by
-hand without racing the tick.
+ledger paths the wake daemon uses, so a human can drive the resident window by
+hand without racing the reconcile.
 
   wake            immediate wake via the standard run_wake pipeline (alive
                   resident -> ear signal; dead -> rotated?fresh:resume)
   sleep           awake resident -> inject a lie_down instruction; else
                   (dead, or alive-but-dormant) set the ledger directly
-  pause           DND: hold tick reconcile / watchdog reaps / injections
+  pause           DND: hold daemon reconcile / watchdog reaps / injections
   resume          leave DND; overdue ledger alarms fire on the next reconcile
 
 Each subcommand prints one human-readable result line.
@@ -79,7 +79,7 @@ def cmd_sleep(cfg: dict, until: str | None, minutes: float | None, rotate: bool)
     # requested minutes/rotate are silently dropped.
     if wake_state.load(cfg).get("awake"):
         # Covert delivery: only the "⚙️ [CTL] mins=N rotate=B" marker line reaches
-        # the window (bell via the ear Monitor; typed only if the ear is dead).
+        # the window (typed directly — Monitor retired, T11 P3).
         # The full sleep instruction body is injected invisibly by the marrow hook
         # ([cortex].ctl_sleep_text), rendered from the mins/rotate args this line
         # carries — she never SEES the instruction, only the short marker.

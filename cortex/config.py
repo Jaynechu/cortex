@@ -53,8 +53,7 @@ _DEFAULTS: dict[str, Any] = {
     },
     # Per-wake safety valve: cap tokens spent in one wake; breach or the marrow
     # wall-clock timeout (marrow.call_timeout_s) forces a fresh session next wake.
-    # signal_log = the ear's tail-followed wake signal file (alive-resident wake);
-    # ear_timeout_sec = how long the pacemaker waits for an alive-window wake to
+    # ear_timeout_sec = how long a typed wake (alive-resident bell) is given to
     # land before respawning fresh; wake_prompt = the first prompt baked into a
     # freshly spawned window — JUST an emoji so nothing readable shows in the
     # user's face; the full wake instructions are injected by marrow's
@@ -64,10 +63,9 @@ _DEFAULTS: dict[str, Any] = {
     "wake": {
         "token_cap": 150_000,
         # Auto-adopt a cortex window the user opened `claude` in herself (in
-        # cortex_home) but never registered: the tick reconcile records it as the
-        # resident (under the spawn lock) instead of firing a duplicate window.
+        # cortex_home) but never registered: the daemon reconcile records it as
+        # the resident (under the spawn lock) instead of firing a duplicate window.
         "auto_adopt": True,
-        "signal_log": "",
         "ear_timeout_sec": 90,
         "wake_prompt": "☀️",
         # Visible bell line = human text ONLY (no machine marker, no epoch token).
@@ -80,12 +78,11 @@ _DEFAULTS: dict[str, Any] = {
         # Receipt time-to-live (minutes): the consumer ignores a pending receipt
         # older than this, and the producer overwrites it on every new bell.
         "receipt_ttl_min": 15,
-        "rearm_suffix": " (ear died — rearm)",
         "say_sound": "Glass",
         # lie_down(next_wake_min=N) clamp (minutes): [0, next_wake_max], every
         # hour (0 = immediate re-wake).
         "next_wake_max": 240,
-        # Line written to wake_signal.log at every free-round injection (silence
+        # Typed into the window at every free-round injection (silence
         # cycle or kick carrier): the free-round note above it, this line last as
         # the final cue. MUST contain the tuck_in_marker family string
         # ("[NEW ROUND]") — that machine-line detection is what keeps the line
@@ -104,9 +101,9 @@ _DEFAULTS: dict[str, Any] = {
         # freshly rendered wakeup note above the marker line (note content only,
         # no behavioural nudge).
         "free_round_note": True,
-        # Covert-delivery markers written to wake_signal.log (bell via the ear
-        # Monitor; typed only if the ear is dead). Only the marker line reaches
-        # the window; the full instruction body is injected invisibly by the
+        # Covert-delivery markers typed directly into the window (Monitor
+        # retired, T11 P3). Only the marker line reaches the window; the full
+        # instruction body is injected invisibly by the
         # marrow hook keyed on the marker (fuse -> [cortex].fuse_prompt_text;
         # ctl -> [cortex].ctl_sleep_text, rendered from the mins/rotate args the
         # ctl marker line carries).
@@ -128,16 +125,13 @@ _DEFAULTS: dict[str, Any] = {
     # launchd tick cadence (seconds). Baked into plists at install time.
     "tick": {
         "collect_interval_sec": 1800,
-        "pacemaker_interval_sec": 60,
         # OAuth usage % snapshot (marrow subprocess) each collect tick.
         "usage_snapshot": True,
     },
-    # Pacemaker integration knobs (numbers the integration layer computes with).
+    # Reconcile knob: gates whether a fired ledger wake actually spawns
+    # (reconcile.py _fire_dead_window) or just redraws the floor, log-only.
     "pacemaker": {
         "dry_run": True,
-        "active_window_min": 5,
-        "at_home_default": True,
-        "cal_busy_default": False,
     },
     "gates": {
         # Daily wake-token budget: once Cortex Today (sum of today's finished-
@@ -426,14 +420,6 @@ def wake_timing_log_path(cfg: dict) -> Path:
     Default: ~/.config/marrow/logs/wake_timing.log."""
     raw = cfg["paths"].get("wake_timing_log") or ""
     return Path(raw).expanduser() if raw else DEFAULT_WAKE_TIMING_LOG
-
-
-def wake_signal_log_path(cfg: dict) -> Path:
-    """The ear's wake-signal file: the persistent Monitor `tail -f`s it, the
-    pacemaker appends WAKE/NUDGE lines to it (alive-resident wake only).
-    Default: <cortex_home>/state/wake_signal.log."""
-    raw = cfg["wake"].get("signal_log") or ""
-    return Path(raw).expanduser() if raw else state_dir(cfg) / "wake_signal.log"
 
 
 def wake_audit_log_path(cfg: dict) -> Path:

@@ -570,7 +570,6 @@ def test_type_wake_signal_line_format(cfg, monkeypatch):
     now = _dt(2026, 7, 11, 9, 5, tzinfo=timezone.utc)
     window.type_wake_signal(cfg, now, token=(3, "cafe"))
     assert typed == ["☀️ 09:05"]
-    assert not config.wake_signal_log_path(cfg).exists()  # ear file retired
     r = wake_state.load(cfg)["wake_receipt"]
     assert r["text"] == "☀️ 09:05"
     assert r["gen"] == 3 and r["state_id"] == "cafe"
@@ -601,7 +600,6 @@ def test_deliver_covert_marker_types_directly(cfg, monkeypatch):
                         lambda c, text: typed.append(text) or True)
     assert window.deliver_covert_marker(cfg, "⚙️ [FUSE]") == "typed"
     assert typed == ["⚙️ [FUSE]"]
-    assert not config.wake_signal_log_path(cfg).exists()
 
 
 def test_deliver_covert_marker_reports_none_without_window(cfg, monkeypatch):

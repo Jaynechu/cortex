@@ -16,8 +16,7 @@ def _runtime_resolvers():
     (directories), wishlist/handoff/wakeup_note (md files), and timing log
     (lives under ~/.config/marrow/logs/, not cortex/)."""
     pairs = []
-    for name in ("affect_flag_path", "self_schedule_path",
-                 "wake_signal_log_path", "wake_audit_log_path"):
+    for name in ("affect_flag_path", "self_schedule_path", "wake_audit_log_path"):
         pairs.append((f"config.{name}", getattr(config, name)))
     for name in ("wake_state_path", "watchdog_pidfile_path"):
         pairs.append((f"wake_state.{name}", getattr(wake_state, name)))

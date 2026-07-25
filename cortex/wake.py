@@ -1,5 +1,6 @@
-"""Wake runner (C3): on a pacemaker wake decision, assemble the wakeup note,
-call marrow's resumed full-env cortex session, and persist the session_id.
+"""Wake runner (C3): on a wake decision (daemon reconcile, ctl, or CLI
+--force), assemble the wakeup note, call marrow's resumed full-env cortex
+session, and persist the session_id.
 Freshness (a fresh marrow session, no resume_sid) comes only from the
 rotate/dead-window detection: a rotated or dead resident window is a new brain
 that reads the previous brain's handoff via SessionStart.
@@ -124,7 +125,7 @@ def _alert_respawn_failed(conn: sqlite3.Connection, wake_id: str, detail: str) -
     """The SOLE alert point in the wake ladder: a respawn that failed (exception
     / window did not come up). Writes a marrow `alerts` row (the surfaced alert
     table), falling back to an audit_log row if that table is absent. Best-effort
-    — never crashes the pacemaker."""
+    — never crashes the wake."""
     try:
         conn.execute(
             "INSERT INTO alerts (severity, type, message, source) VALUES (?, ?, ?, ?)",
@@ -950,7 +951,7 @@ def run_wake(
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Manual cortex wake entry point (supervised)")
-    parser.add_argument("--force", action="store_true", help="bypass pacemaker gates, wake now")
+    parser.add_argument("--force", action="store_true", help="bypass wake gates, wake now")
     parser.add_argument("--print-note", action="store_true",
                          help="assemble + print the real wakeup note only, no marrow call")
     args = parser.parse_args(argv)

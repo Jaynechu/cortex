@@ -116,9 +116,9 @@ def window_effort(cfg: dict) -> str:
 def wake_prompt(cfg: dict) -> str:
     """The single-line first prompt handed to a fresh cortex window: JUST the
     configured emoji (wake.wake_prompt, default '☀️') so no readable text shows
-    in the user's face. The full wake instructions (read the note, arm the ear,
-    choose next wake) are injected by marrow's UserPromptSubmit hook when this
-    emoji is submitted in a cortex window."""
+    in the user's face. The full wake instructions (read the note, choose next
+    wake) are injected by marrow's UserPromptSubmit hook when this emoji is
+    submitted in a cortex window."""
     return cfg["wake"].get("wake_prompt", "☀️")
 
 
@@ -149,7 +149,7 @@ def write_wake_receipt(cfg: dict, now, token=None, rearm: bool = False) -> None:
     at bell-send time. Records the exact visible bell text, gen, state_id, rearm
     flag, an ISO timestamp, and the current template prefix (so the consumer can
     shape-match without cortex config). Overwrites any prior receipt (stale
-    hygiene). Best-effort: a write failure never crashes the pacemaker — the
+    hygiene). Best-effort: a write failure never crashes the wake — the
     consumer then takes the shape fallback."""
     from datetime import timezone
 

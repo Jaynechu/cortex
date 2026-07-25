@@ -1,4 +1,4 @@
-2026-07-25
+2026-07-26
 
 # Cortex — MAP
 
@@ -8,10 +8,10 @@
 ```
 collectors (launchd 1800s) ──▶ ct_ tables (marrow.db)
                                     │
-pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
-                             ct_pacemaker_state       │
-                             ct_wake_log        note → iTerm window (resident claude) | marrow subprocess fallback
-                                                      │
+wake daemon (launchd KeepAlive, always on) ──reconcile (60s cadence)──▶ decision ──▶ wake.run_wake
+     Scheduler-hosted (synapse_core); 2 deadlines:       ct_pacemaker_state       │
+     <shell>.reconcile (fixed) / <shell> (business)      ct_wake_log        note → iTerm window (resident claude) | marrow subprocess fallback
+     socket kick (lie_down/kick.py) fires early                                 │
                                                 daybrief.md (marrow render, real file in NY) · watchdog (per-wake)
 ```
 
@@ -27,27 +27,25 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
 - health (default off, skeleton): JSON flatten → dot-path rows → upsert ct_health; no consumer yet (health.py:21-66).
 - usage_snapshot: marrow venv `-m marrow.usage_snapshot`, 15s, gated tick.usage_snapshot; redundant with marrow watcher 5-min loop (collect_tick.py:16-35).
 - activity.py: read-only helper over ct_activity (marrow Stop hook writes it); read_activity() zero production callers.
-## 3. Pacemaker (`pacemaker/`)
-- core.tick(state, context, config, now, rng) pure — no I/O/wall-clock (core.py:1-8). PacemakerState frozen; legacy desire/expect_reply dropped on load (core.py:19-32, integration.py:61-90).
-- Triggers (triggers.py): event (unwired) · affect_flag · self_scheduled · floor. Collision: any real reason silences plain floor this tick. reschedule_floor = uniform [floor_min_min,floor_max_min] (10/55) or explicit clamped.
-- Floor redraws on fire BEFORE gates from tick time; real wakes re-anchored to lie-down time by integration.lie_down; gated ticks keep tick-time anchor (core.py:56-59, verified intended).
-- Gates (gates.py): daily_budget vs today_tokens only (<=0 disables); the night-cap gate died with the night package (T3). No bypass, no short-circuit; wake = reasons and not gated_by.
-- NB triggers.py local `pierce` = real-reason set silencing floor (floor-collision only, NOT a gate bypass) — unrelated to any other pierce concept.
-- integration.py = sole I/O owner. State = single-row JSON ct_pacemaker_state id=1; side-channel window_tokens survives independently of dataclass saves.
-- build_context: active_session = ct_activity within 5min; cal_busy/at_home = config defaults (unwired); affect_flag/self_schedule from JSON; today_tokens = Cortex Today (integration._today_tokens); events [].
-- run_tick: load → build_context → tick → save_state + write_wake_log (every tick incl dry_run) → decision (integration.py).
-- Entry pacemaker_tick.py: `[core].shells` must list "cli" or the tick exits early (heartbeat off, pacemaker_tick.py:272); live wake → run_wake then lie_down only for headless ('window' owns its own).
-- Awake gate (_handle_awake, pacemaker_tick.py:54-81): wake-in-progress NEVER emits new signal — runs shared watchdog.silence_action (0.0 mtime = hold).
-- Stale reap (idle>=wake.stale.threshold_min 15) uses 1e9 so a gone transcript still reaped. Late sentinel into active wake silent here.
+## 3. Wake daemon + reconcile (`daemon.py`, `reconcile.py`)
+> Pacemaker package (core/triggers/gates/integration/pacemaker_tick/sentinel) deleted whole, T11 P4. The floor/trigger decision engine (event/affect_flag/self_scheduled triggers, gate collision) is retired — the durable next_wake_at ledger is the only wake source. Floor redraw survives as a plain dice draw (occupancy.reschedule_floor, §7).
+- daemon.py WakeDaemon embeds synapse_core.Scheduler over an AF_UNIX kick socket (config.daemon_socket_path, <=104 bytes). Two deadlines per scheduler shell key (Scheduler holds ONE per key; firing consumes it): `<shell>.reconcile` (fixed [daemon].reconcile_interval_sec cadence, self-rearms) and `<shell>` (business = min(next_wake_at, silence-round due); safety_horizon_sec when idle; retry_interval_sec after a held/failed fire) (daemon.py:93-126).
+- Every callback re-arms on entry AND in a `finally` (daemon.py:147-161) so a consumed Scheduler entry or a raised exception never leaves a key unarmed; `kick()` no-ops on a key with no entry, so the business key must always stay armed.
+- Blocking work (reconcile_once/business_once) runs via `asyncio.to_thread` so the kick socket stays responsive; an `asyncio.Lock` serialises the two callback bodies against each other (daemon.py:109,150,158).
+- reconcile.py `_reconcile`/`_handle_awake`: ledger reconcile relocated verbatim from the retired pacemaker_tick entry point (T11 P4) — DND hold (wake_state.is_paused), manual adopt (`[wake].auto_adopt`, under the spawn lock), dead+due fire (rotated?fresh:resume via `_fire_dead_window`), accidental-close resume, watchdog heal (respawn if pidfile dead), silence backup (delegates to watchdog.silence_action), stale-suspect debounce (`confirm_ticks` consecutive dead verdicts, epoch-guarded against a lie_down/reset mid-pass) (reconcile.py:21-100,227-264).
+- Fire path: synthesize a decision dict (`reasons`/`wake_reasons` kick|next_wake_at|silence|reconcile, ctl.py precedent) → `wake.run_wake`. Both `daemon._fire_wake` and `reconcile._fire_dead_window` gate on `gates.daily_budget.tokens` (hold, ledger un-consumed, retried next pass) and `[pacemaker].dry_run` (log-only floor redraw, no real wake) (daemon.py:207-224, reconcile.py:142-182).
+- kick.py `_notify_daemon` → `synapse_core.send_kick(socket_path, shell)`: state writes (reason queue / gen bump / floor clear) land first, then the kick makes the daemon re-read instantly instead of waiting for the next reconcile cadence. Unreachable socket → wake_audit row + stderr, wake deferred to reconcile (kick.py:73-100).
+- No more one-shot exact-time process (sentinel.py, deleted): the business deadline itself fires at the exact computed time via the Scheduler; lie_down's `persist_next_wake_at` (lie_down.py:196-207) writes the ledger then kicks the socket instead of spawning/killing a `sleep N` subprocess.
+- `[daemon]` config: enabled, shell, socket_path, kick_timeout_sec, reconcile_interval_sec, safety_horizon_sec, retry_interval_sec, lock_path (config.py:224-241). Singleton lock = `daemon.lock` (daemon.py:229-253).
 ## 4. Wake runner (`wake.py`)
 - run_wake: symlinks.ensure_all → assemble_note → window path (mode='window' AND real caller) else marrow subprocess. Freshness from rotate flag, no date compare; next-morning first wake = rebirth.
 - WakeTimer latency probe always-on: wake_id + CORTEX_WAKE_ID/CORTEX_WAKE_TIMING_LOG env; marks tick_fire→gate_eval→symlinks→note→injected/complete; marrow subprocess shares origin via env (timing.py).
 - _window_wake_plan classifier: fresh (rotate flag | newest transcript ≠ recorded = deliberate /clear) | resume (sid dead/gone, no flag) | ear (alive+unrotated; None recorded hint stays ear). Consumes rotate flag once/wake.
 - _window_wake path: fresh → _spawn_wake(resume=False) emoji; dead+no-flag → _resume_or_fresh_dead (sid → --resume same convo; absent → fresh, plain).
-- Alive → append bell → _signal_landed polls mtime 3s up to ear_timeout 90s.
+- Alive → type bell (type_wake_signal) → _signal_landed polls mtime 3s up to ear_timeout 90s.
 - _ear_miss_ladder (alive): type_wake_signal rearm → poll → land=ear; claude dead → _resume_or_fresh_dead; rearmed-unconfirmed → set_awake anyway.
 - Respawn failure (WindowError) = SOLE alert point → _alert_respawn_failed → marrow alerts row (audit_log fallback).
-- Signal line = BELL ONLY: append_wake_signal writes `wake_bell_template` human text (e.g. '☀️ HH:MM'), machine data (gen/state_id/rearm) goes to wake_state receipt sidecar; marrow UserPromptSubmit hook matches bell line against receipt → injects full note. type_wake_signal adds rearm_suffix.
+- Signal line = BELL ONLY: type_wake_signal writes `wake_bell_template` human text (e.g. '☀️ HH:MM') via write_wake_receipt; machine data (gen/state_id/rearm) goes to wake_state receipt sidecar; marrow UserPromptSubmit hook matches bell line against receipt → injects full note.
 - _spawn_wake P0 timing: record NEW transcript only after _wait_new_transcript (~8s poll for jsonl newer than pre-spawn or mtime≥spawn_ts); timeout → record None never stale (stale drove endless respawn loop).
 - None hint + alive + no flag → ear.
 - Headless fallback: window path None → call_marrow_cortex (marrow venv, inner marrow.call_timeout_s 600s, outer +30s); bad rc/JSON tail → WakeError (wake.py:71-99,349-350).
@@ -63,7 +61,7 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
 ### wake_state.json (`wake_state.py`)
 - Keys: awake set = awake/awake_since/wake_log_id/transcript/user_replied_this_wake/tuck_pending/last_note_ts/kick_round (cleared together by clear_awake/claim_lie_down).
 - tuck_pending = "last free-round injection at" ISO ts (silence-cycle carrier; legacy field name).
-- Also: session id; rotated (read-and-clear via take_rotated); sentinel_pid.
+- Also: session id; rotated (read-and-clear via take_rotated).
 - cli shell only. Non-cli shells keep their own ledger at `<paths.shell_state_dir>/<shell>.json` (config.py:373, mirror of marrow [cortex].shell_state_dir), written by that shell's host — this file is never shared.
 - load tolerates missing/corrupt → {}. Writes via _flock (blocking exclusive on sibling .lock, best-effort) + _save (temp + os.replace, no half-written read); cross-process lost-update fixed (wake_state.py:50-127).
 - claim_lie_down (wake_state.py:157-172): atomic read-and-clear of awake marker under the flock; pre-clear snapshot to single winner, None to later callers.
@@ -83,17 +81,12 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
 - force_slept="auto" = routine silence marker (note.py neutral, no catchup line), distinct from "timeout" (retired) and real incidents (fuse/stale).
 - _fuse: esc → write `⚙️ [FUSE]` marker (body = marrow [cortex].fuse_prompt_text: update own handoff + lie_down(rotate=True)) → poll awake 300s grace; proxy-lie_down only if session didn't; force_slept set only when handoff unwritten (watchdog.py:166-205).
 - esc verify: still growing → hard_interrupt SIGINT, gated hard_interrupt_enabled (43-66).
-### sentinel (`sentinel.py`) — exact-time wake
-- One-shot detached (start_new_session): sleeps `--seconds N` then one pacemaker_tick.main() — wakes fire on the second. launchd 5-min tick stays self-heal fallback.
-- Armed at every lie_down (_arm_sentinel, lie_down.py:135-153): kills recorded predecessor pid, spawns fresh for redrawn next_floor, records pid. Gated [wake].sentinel (default true = spawn, false = tick-only).
-- Self-guarded clear (sentinel.run, sentinel.py:40-48): on fire clears own sentinel_pid via clear_sentinel_pid(only_if_pid=self) BEFORE the tick, only if record still own pid (same self-guard as watchdog pidfile).
-- Killed on re-arm (_kill_sentinel) + user-wake reset (marrow _cortex_user_wake_reset, marrow/MAP.md §6.3).
 ## 5. lie_down / say
 - Env-gated MCP tools in marrow daemon (MARROW_CORTEX=<shell>) via `-m cortex.<mod>`; also CLI mains for watchdog proxy use. lie_down = every shell; say = cli only (marrow/MAP.md §6.2).
-- lie_down (lie_down.py): next_wake_min REQUIRED at MCP/CLI, clamped triggers.clamp_next_wake_minutes to [0, wake.next_wake_max] (240) at EVERY hour — 0 = immediate re-wake; proxy callers may pass None for uniform floor dice.
+- lie_down (lie_down.py): next_wake_min REQUIRED at MCP/CLI, clamped lie_down.clamp_next_wake_minutes to [0, wake.next_wake_max] (240) at EVERY hour — 0 = immediate re-wake; proxy callers may pass None for uniform floor dice.
 - claim_lie_down (§4) = atomic awake-claim, only winner runs body, later gets `{"skipped":"not awake"}`.
-- lie_down body: record occupancy `tokens` into ct_wake_log (sole writer; bare `except:pass` = known silent-drop; net_tokens column historical/unwritten) → clear due self_schedule → integration.lie_down floor redraw.
-- Then: store_window_tokens → kill watchdog (skip if self) → optional set_rotated → _arm_sentinel; result adds next_wake=HH:MM.
+- lie_down body: record occupancy `tokens` into ct_wake_log (sole writer; bare `except:pass` = known silent-drop; net_tokens column historical/unwritten) → clear due self_schedule → occupancy.lie_down floor redraw.
+- Then: store_window_tokens → kill watchdog (skip if self) → optional set_rotated → persist_next_wake_at (ledger write + daemon socket kick, §3); result adds next_wake=HH:MM.
 - say (say.py, window.py:476-483): sound + front resident window — urgent-only ping, else silent; --note accepted but ignored (CLI symmetry).
 - Handoff: per-shell rolling log `<cortex_home>/handoff-<shell>.md` (cli default config.DEFAULT_HANDOFF, override paths.handoff_file). Read via the session's own CLAUDE.md memory import; page-turn is marrow-side (marrow/MAP.md §6.3). Cortex reads its mtime only — fuse "handoff written?" (watchdog.py:206).
 ## 6. Wakeup note (`note.py`)
@@ -115,15 +108,15 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
 - marrow-owned (marrow/daybrief.py), real file in NY db-pages via marrow paths.daybrief (no cortex symlink); Cortex triggers render via marrow venv `-m marrow.daybrief` at collect_tick._render_daybrief + wake._render_daybrief.
 ## 9. Symlinks, install, deploy
 - symlinks.py: wishlist.md → NY db-pages; existing real file at target = no-op (never clobbers, guards daybrief migration); ensure_all safe per-wake (symlinks.py:11-39).
-- install.py: `python -m cortex.install [remove]` — writes 2 plists with 6 __TOKEN__ replacements, launchctl bootout+bootstrap gui/<uid>; no rollback (self-heals on re-run); zero test coverage (install.py:16-97).
+- install.py: `python -m cortex.install [remove]` — writes 2 plists (collect-tick, wake-daemon) with __TOKEN__ replacements, launchctl bootout+bootstrap gui/<uid>; also boots out the retired com.cortex.pacemaker-tick label (resolved plist left on disk, T11 P4 rollback path); no rollback for the live plists (self-heals on re-run); zero test coverage (install.py:32-38,68-96).
 - pyproject.toml (setuptools, no third-party deps); plists set WorkingDirectory=repo root so `-m` resolves cortex/ without install/PYTHONPATH.
-- Plists: RunAtLoad + StartInterval, no KeepAlive/backoff — crashing tick re-fires next interval.
-- pacemaker.dry_run=true in example config; live dry_run=false since 07-11.
+- Plists: collect-tick = RunAtLoad + StartInterval (tick.collect_interval_sec), no KeepAlive — a crash re-fires next interval. wake-daemon = RunAtLoad + KeepAlive + ThrottleInterval 10s — always on, launchd revives a crash.
+- pacemaker.dry_run=true in example config; live dry_run=false since 07-11 (reconcile.py:171 gates whether a fired ledger wake actually spawns).
 ## 10. Tests
-- Per-module test files under tests/; pure cores (pacemaker, note, geofence cursor) well covered. Gaps: install.py (untested), geofence same-minute-same-text dup.
+- Per-module test files under tests/; pure cores (reconcile, daemon, note, geofence cursor) well covered. Gaps: install.py (untested), geofence same-minute-same-text dup.
 ## 11. Status
-- Live: collectors (knowledgec) · pacemaker (dry_run=false) · wake window + watchdog + fuse + sentinel · note · daybrief render (real file in NY) · MCP lie_down/say · wishlist symlink · shells cli+tg.
-- Unwired: event triggers · cal_busy/at_home real data · health/geofence collectors (flagged off, no producer).
+- Live: collectors (knowledgec) · wake daemon (reconcile, dry_run=false) · wake window + watchdog + fuse · note · daybrief render (real file in NY) · MCP lie_down/say · wishlist symlink · shells cli+tg.
+- Unwired: health/geofence collectors (flagged off, no producer).
 ## 12. Marrow-side organs
 > Marrow's half of the bridge — ONE module marrow/cortex_bridge.py, behind [cortex].enabled. Details marrow/MAP.md §6; index only.
 - MCP tools via cortex_bridge.register(): wish (append → wishlist.md) · first (tick/untick → ct_first_tick) · goal (set/list/delete → goals table) — all sessions when enabled.

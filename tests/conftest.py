@@ -67,7 +67,6 @@ _LIVE_CONFIG_DIR = (Path.home() / ".config" / "marrow").resolve()
 _GUARDED_PATH_FUNCS = [
     (config, "cortex_home"),
     (config, "state_dir"),
-    (config, "wake_signal_log_path"),
     (config, "wake_audit_log_path"),
     (config, "handoff_path"),
     (config, "wake_timing_log_path"),

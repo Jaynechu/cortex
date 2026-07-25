@@ -104,7 +104,7 @@ def _spawn_lock(cfg: dict):
 
 def spawn(cfg: dict) -> int | None:
     """Launch a detached per-wake watchdog process (`python -m cortex.watchdog`)
-    that outlives the pacemaker tick. Singleton guard (permanent-residency
+    that outlives one daemon reconcile pass. Singleton guard (permanent-residency
     invariant): if the recorded pidfile still names a LIVE watchdog, do NOT spawn
     a second — return its pid. Only an absent/dead record spawns a fresh one. This
     is the single choke point behind every set_awake caller (fresh / typed bell)
@@ -467,7 +467,7 @@ def run(cfg: dict) -> int:
         # awake, so silence_action / _fuse below would forge a proxy lie_down
         # (writing a future next_wake_at floor that starves the reconcile rescue
         # branch). A dead window must never receive a proxy sleep from here —
-        # retire and let pacemaker reconcile (dead+awake+no-alarm -> resume) own
+        # retire and let daemon reconcile (dead+awake+no-alarm -> resume) own
         # the revival.
         from cortex import wake
         if not wake._window_alive(cfg):

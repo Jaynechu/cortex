@@ -1,6 +1,6 @@
 # cortex
 
-Awake-presence layer: collectors gather signals → pacemaker decides when to wake → a resident Claude Code session runs the wake.
+Awake-presence layer: collectors gather signals → the always-on wake daemon reconciles the alarm ledger and decides when to wake → a resident Claude Code session runs the wake.
 
 Assumes [marrow](../marrow) + synapse already installed and a Claude Code max plan. Window mode (default) additionally needs macOS + iTerm2.
 
@@ -33,7 +33,7 @@ Assumes [marrow](../marrow) + synapse already installed and a Claude Code max pl
    ```
    `python -m cortex.install remove` unloads them (retired jobs are unloaded too, their plist file left in place).
 
-Ships with `pacemaker.dry_run = true` — pacemaker logs decisions without waking until you flip it.
+Ships with `pacemaker.dry_run = true` — reconcile logs a due wake and redraws the floor without actually waking until you flip it.
 
 ## How it works
 

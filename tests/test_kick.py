@@ -28,7 +28,6 @@ def cfg(tmp_path):
             "watchdog_pidfile": str(home / "state" / "watchdog.pid"),
             "wake_audit_log": str(home / "state" / "wake_audit.log"),
         },
-        "wake": {"signal_log": str(home / "state" / "wake_signal.log")},
         "kick": {
             "reason_reply": 'Msg #{id} replied: "{text}"',
             "reason_timeout": "Msg #{id} no reply in {minutes}min",
@@ -55,12 +54,6 @@ def _ws(cfg) -> dict:
 def _audit(cfg) -> str:
     from cortex import config
     return config.wake_audit_log_path(cfg).read_text()
-
-
-def _signal(cfg) -> str:
-    from cortex import config
-    p = config.wake_signal_log_path(cfg)
-    return p.read_text() if p.exists() else ""
 
 
 def test_kick_asleep_ticks_and_writes_reason(cfg, _stub_spawn):
@@ -113,7 +106,6 @@ def test_asleep_interrupt_queues_reason(cfg, _stub_spawn):
     assert r["ticked"] is True                # asleep path unchanged (ticks)
     d = _ws(cfg)
     assert d["kick_reasons"] == ['Msg #3 replied: "hi"']
-    assert _signal(cfg) == ""                 # ear NOT written on the asleep path
 
 
 # --- awake kick -> carrier free-round for ALL kinds (replaces retired F3/C2) --
@@ -121,14 +113,13 @@ def test_asleep_interrupt_queues_reason(cfg, _stub_spawn):
 def _assert_carrier(cfg, r, _stub_spawn, expect_reason):
     # Common assertions for an awake kick: queues the reason, marks kick_round,
     # spawns one tick (the tick's silence_action carrier is the visible round),
-    # never bumps gen, never writes the ear directly.
+    # never bumps gen.
     assert r["awake"] is True and r["ticked"] is False
     assert r["round_opened"] is True
     assert len(_stub_spawn) == 1                        # exactly one tick
     d = _ws(cfg)
     assert d["kick_reasons"] == [expect_reason]         # reason queued for render
     assert d["kick_round"] is True                      # carrier marked
-    assert _signal(cfg) == ""                           # ear NOT written directly
 
 
 def test_awake_reply_opens_carrier(cfg, _stub_spawn):
