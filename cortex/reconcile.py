@@ -233,6 +233,9 @@ def _reconcile(conn, cfg: dict, st: dict, now) -> str | None:
       - window ALIVE                             -> None (normal flow / awake gate).
       - window dead + next_wake_at in the past   -> fire now (rotated?fresh:resume).
       - window dead + awake + no next_wake_at    -> accidental close -> resume now.
+      - window dead + ASLEEP + next_wake_at in the future -> SILENT resume
+        (reopen the same conversation, no bell, no awake flip, no ledger
+        change), then hold: the cadence still fires the wake at due time.
       - window dead + next_wake_at in the future -> hold (the cadence catches it
         at due time; the ledger is the source of truth, a re-arm would only
         duplicate the same fire). This hold is authoritative: it short-circuits
@@ -258,7 +261,15 @@ def _reconcile(conn, cfg: dict, st: dict, now) -> str | None:
         # immediately (1h prompt-cache tier — resume within ~5 min keeps it hot).
         return _fire_dead_window(conn, cfg, "accidental close of awake window")
     if due is not None:
-        # Dead window, ledger not yet due -> hold; ledger is authoritative, no
-        # other wake path may fire early.
+        # Dead window, ledger not yet due. The ledger is authoritative — no wake
+        # fires early — but the window itself is reopened SILENTLY (resume, no
+        # bell, no awake flip, no ledger change) so the shell keeps sleeping in
+        # a live window instead of a closed one. Awake+dead+future-ledger is NOT
+        # this case and still just holds.
+        if not st.get("awake"):
+            from cortex.wake import resume_asleep
+            resumed = resume_asleep(cfg)
+            if resumed:
+                return f"{resumed}; next wake {due.strftime('%H:%M')}"
         return f"ledger hold: next wake {due.strftime('%H:%M')}, window dead"
     return None

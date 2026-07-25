@@ -366,6 +366,101 @@ def test_fire_dead_window_accidental_close_resumes(cfg, monkeypatch):
     assert captured.get("resume") is True  # same conversation resumed, not fresh
 
 
+# --- silent resume of a window closed while ASLEEP ---------------------------
+
+def _silent_resume_env(cfg, monkeypatch, *, claude_sid="claude-sid-1"):
+    """Dead resident, a resumable claude session, and every machine-touching
+    call stubbed. Returns the recorder dict."""
+    from cortex import wake, window
+    rec = {"respawn": None, "bell": 0}
+    monkeypatch.setattr(wake, "_window_alive", lambda c: False)
+    monkeypatch.setattr(reconcile, "_adopt_manual_window", lambda cfg: None)
+    monkeypatch.setattr(window, "claude_session_id", lambda c: claude_sid)
+    monkeypatch.setattr(
+        window, "respawn",
+        lambda c, initial_prompt=None, resume_sid=None:
+        rec.__setitem__("respawn", (initial_prompt, resume_sid)) or "iterm-new")
+    monkeypatch.setattr(window, "type_wake_signal",
+                        lambda *a, **k: rec.__setitem__("bell", rec["bell"] + 1))
+    monkeypatch.setattr(window, "inject_prompt",
+                        lambda *a, **k: rec.__setitem__("bell", rec["bell"] + 1))
+    return rec
+
+
+def test_asleep_dead_window_silently_resumes(cfg, monkeypatch):
+    """Window closed while the shell is ASLEEP: reopen the SAME conversation
+    (--resume, no baked prompt), re-record the resident session id, and change
+    nothing else — no bell typed, still asleep, ledger untouched."""
+    rec = _silent_resume_env(cfg, monkeypatch)
+    now = datetime.now(_tz(cfg))
+    due = (now + timedelta(minutes=20)).isoformat()
+    wake_state.set_next_wake_at(cfg, due)
+    wake_state.set_session_id(cfg, "iterm-old")
+
+    msg = reconcile._reconcile(None, cfg, wake_state.load(cfg), now)
+
+    assert rec["respawn"] == (None, "claude-sid-1")  # resumed, no opener baked
+    assert rec["bell"] == 0                          # NOT a new turn
+    assert msg is not None and "silent resume" in msg
+    st = wake_state.load(cfg)
+    assert st.get("awake") is not True                # still asleep
+    assert st.get("session_id") == "iterm-new"        # new window recorded
+    assert wake_state.get_next_wake_at(cfg) == due    # ledger untouched
+
+
+def test_asleep_silent_resume_skips_retired_session(cfg, monkeypatch):
+    """A sid already retired by a rotate is never resumed — the scheduled wake
+    spawns a fresh brain instead."""
+    rec = _silent_resume_env(cfg, monkeypatch, claude_sid="retired-sid")
+    wake_state.update(cfg, retired_sid="retired-sid")
+    now = datetime.now(_tz(cfg))
+    wake_state.set_next_wake_at(cfg, (now + timedelta(minutes=20)).isoformat())
+    msg = reconcile._reconcile(None, cfg, wake_state.load(cfg), now)
+    assert rec["respawn"] is None
+    assert "hold" in msg.lower()
+
+
+def test_awake_dead_window_future_ledger_is_not_silently_resumed(cfg, monkeypatch):
+    """AWAKE + dead window is the wake path's business (bell on resume) — the
+    silent path must not touch it."""
+    rec = _silent_resume_env(cfg, monkeypatch)
+    now = datetime.now(_tz(cfg))
+    wake_state.set_next_wake_at(cfg, (now + timedelta(minutes=20)).isoformat())
+    wake_state.update(cfg, awake=True)
+    msg = reconcile._reconcile(None, cfg, wake_state.load(cfg), now)
+    assert rec["respawn"] is None
+    assert "hold" in msg.lower()
+
+
+def test_wake_time_dead_window_still_rings(cfg, monkeypatch):
+    """At wake time (ledger DUE) the dead-window path is unchanged: the normal
+    wake fires (resume + bell), not the silent resume."""
+    rec = _silent_resume_env(cfg, monkeypatch)
+    calls = _fire_spy(monkeypatch)
+    now = datetime.now(_tz(cfg))
+    wake_state.set_next_wake_at(cfg, (now - timedelta(minutes=1)).isoformat())
+    msg = reconcile._reconcile(None, cfg, wake_state.load(cfg), now)
+    assert "ledger due" in calls["why"] and msg.startswith("fired:")
+    assert rec["respawn"] is None  # went through the wake path, not silent resume
+
+
+def test_silent_resume_drops_commit_when_a_wake_lands_mid_spawn(cfg, monkeypatch):
+    """Epoch guard: a wake/user reset flipping awake while the window is coming
+    up wins — the silent path does not overwrite the resident session id."""
+    from cortex import wake, window
+    rec = _silent_resume_env(cfg, monkeypatch)
+
+    def _respawn_then_wake(c, initial_prompt=None, resume_sid=None):
+        rec["respawn"] = (initial_prompt, resume_sid)
+        wake_state.set_awake(cfg, None, None)  # a real wake lands mid-spawn
+        return "iterm-new"
+
+    monkeypatch.setattr(window, "respawn", _respawn_then_wake)
+    wake_state.set_session_id(cfg, "iterm-old")
+    assert "not recorded" in (wake.resume_asleep(cfg) or "")
+    assert wake_state.load(cfg).get("session_id") == "iterm-old"
+
+
 def test_reconcile_paused_holds_everything(cfg, monkeypatch):
     monkeypatch.setattr("cortex.wake._window_alive", lambda c: False)
     calls = _fire_spy(monkeypatch)
