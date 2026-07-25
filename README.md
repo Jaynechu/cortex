@@ -15,7 +15,7 @@ Assumes [marrow](../marrow) + synapse already installed and a Claude Code max pl
    cp config.example.toml ~/.config/marrow/cortex.toml
    ```
    Override the path with the `CORTEX_CONFIG` env var if needed.
-3. Enable the marrow-side bridge: set `[cortex] enabled = true` in marrow's config.toml, then restart the marrow watcher. This installs the MCP tools (`lie_down` / `wait` / `say` for the cortex session; `wish` / `first` / `goal` everywhere) and the wake hooks.
+3. Enable the marrow-side bridge: set `[cortex] enabled = true` in marrow's config.toml and list the shells that run as cortex shells in `[cortex] shells` (default `["cli"]`; mirror it in this repo's `[core] shells`), then restart the marrow watcher. This installs the MCP tools (`lie_down` for every shell, `say` for the cli shell; `wish` / `first` / `goal` everywhere) and the wake hooks.
 4. Seed the cortex home dir `~/.config/marrow/cortex/` (configurable via `[paths] cortex_home`) — this is the resident session's cwd and inner world. Copy [templates/](templates/) there and customise names/paths:
    ```
    cp templates/*.md ~/.config/marrow/cortex/
@@ -23,9 +23,9 @@ Assumes [marrow](../marrow) + synapse already installed and a Claude Code max pl
    - `CLAUDE.md` — world rules + house rules for the resident session
    - `playbook.md` — activity menu (what to do when awake)
    - `notebook.md` — long-term memory, self-maintained
-   - `handoff_template.md` — daily journal template (new page each day, old pages auto-archived)
+   - `handoff_template.md` — page template for the rolling log (per shell, `handoff-<shell>.md`; a page over `handoff_max_lines` is archived and a fresh page carries the unchecked todos + last lines)
    - `wishlist.md` — created automatically on first `wish`; template optional
-   Everything else under cortex_home (wakeup_note, wake_state, handoff.md, logs) is generated at runtime.
+   Everything else under cortex_home (wakeup_note, wake_state, handoff-cli.md, logs) is generated at runtime.
 5. Install the launchd jobs (collect-tick + pacemaker-tick):
    ```
    .venv/bin/python -m cortex.install
@@ -37,9 +37,9 @@ Ships with `pacemaker.dry_run = true` — pacemaker logs decisions without wakin
 ## How it works
 
 - Collectors (launchd, ~30 min) read macOS app-usage (plus optional geofence/health) into `ct_` tables on the shared marrow DB.
-- Pacemaker (launchd, ~5 min) evaluates triggers (floor timer, self-schedule, affect flag) against gates (night window, daily token budget) and decides wake or stay down.
+- Pacemaker (launchd, ~5 min) evaluates triggers (floor timer, self-schedule, affect flag) against the daily token budget gate and decides wake or stay down.
 - A wake lands in a resident iTerm window running `claude` (fresh spawn, `--resume`, or a bell into the live window), with the wakeup note injected by marrow's hook. Headless marrow-subprocess call is the fallback.
-- The session ends its wake itself via `lie_down(next_wake_min=N)` (or `wait(N)` to linger); a per-wake watchdog and a one-shot sentinel cover silence, token fuses, and exact-time wakes.
+- The session ends its wake itself via `lie_down(next_wake_min=N)` (0 = wake again immediately). While it stays up, every `silent_max_min` of user silence injects one free-round note + `[NEW ROUND]` line and re-arms the same timer — a perpetual cycle, never a forced sleep. A per-wake watchdog and a one-shot sentinel cover that cycle, token fuses, and exact-time wakes.
 
 ## Docs
 

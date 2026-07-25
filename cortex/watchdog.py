@@ -1,9 +1,9 @@
 """Per-wake watchdog: spawned at note injection, killed at lie_down, never
 resident. Every poll_sec it reads the transcript (mtime + window tokens) and
 the awake marker, applying two judgements:
-  (b) silent past silent_max_min without lie_down -> proxy lie_down (timeout).
-      The routine end: user replies keep the transcript mtime fresh, so an
-      active conversation never times out mid-turn.
+  (b) silent past silent_max_min -> inject one free-round note + marker line and
+      re-arm the same timer (perpetual cycle, never forces sleep). User replies
+      keep the transcript mtime fresh, so an active conversation never elapses.
   (c) window tokens >= fuse -> esc, then prompt the session to write its
       handoff and lie_down(rotate=True), give it a bounded grace window
       (fuse_handoff_grace_sec) to do so itself, else force it down (fuse).
@@ -356,7 +356,7 @@ def silence_action(cfg: dict, silent_min: float, *, allow_tuck: bool = True) -> 
     """Perpetual free-round cycle, shared by the watchdog and the tick awake
     gate: every silent_max_min of user silence, inject one free-round note +
     marker line and re-arm the SAME timer from that instant — repeat forever,
-    no forced sleep, no menu. tuck_pending doubles as the "last injection at"
+    no forced sleep. tuck_pending doubles as the "last injection at"
     marker (renamed at the API surface only; the persisted field stays
     tuck_pending, T5 territory). When the user never spoke this wake,
     `silent_min` is timed from awake_since instead so the gate still elapses.
@@ -500,7 +500,7 @@ def run(cfg: dict) -> int:
             _log(f"fuse: tokens={tokens} >= {fuse}")
             _fuse(cfg, grace)
             return 0
-        # Idle gate (tuck-in then grace), same bar regardless of user presence.
+        # Idle gate (free-round cycle), same bar regardless of user presence.
         # A proxy sleep here is force_slept="auto" (routine, not an incident).
         action = silence_action(cfg, silent_min)
         if action:

@@ -1,4 +1,4 @@
-2026-07-11
+2026-07-25
 
 # Cortex — MAP
 
@@ -31,12 +31,12 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
 - core.tick(state, context, config, now, rng) pure — no I/O/wall-clock (core.py:1-8). PacemakerState frozen; legacy desire/expect_reply dropped on load (core.py:19-32, integration.py:61-90).
 - Triggers (triggers.py): event (unwired) · affect_flag · self_scheduled · floor. Collision: any real reason silences plain floor this tick. reschedule_floor = uniform [floor_min_min,floor_max_min] (10/55) or explicit clamped.
 - Floor redraws on fire BEFORE gates from tick time; real wakes re-anchored to lie-down time by integration.lie_down; gated ticks keep tick-time anchor (core.py:56-59, verified intended).
-- Gates (gates.py): night window (wrap-capable, night_key = window-start date) cap vs gates.night.cap; daily_budget vs today_tokens (<=0 disables). No bypass, no short-circuit; wake = reasons and not gated_by.
+- Gates (gates.py): daily_budget vs today_tokens only (<=0 disables); the night-cap gate died with the night package (T3). No bypass, no short-circuit; wake = reasons and not gated_by.
 - NB triggers.py local `pierce` = real-reason set silencing floor (floor-collision only, NOT a gate bypass) — unrelated to any other pierce concept.
 - integration.py = sole I/O owner. State = single-row JSON ct_pacemaker_state id=1; side-channel window_tokens survives independently of dataclass saves.
 - build_context: active_session = ct_activity within 5min; cal_busy/at_home = config defaults (unwired); affect_flag/self_schedule from JSON; today_tokens = Cortex Today (integration._today_tokens); events [].
 - run_tick: load → build_context → tick → save_state + write_wake_log (every tick incl dry_run) → decision (integration.py).
-- Entry pacemaker_tick.py: _night_close (wrap-up once/night if awake, else set_rotated once/night) runs BEFORE awake-guard; live wake → run_wake then lie_down only for headless ('window' owns its own).
+- Entry pacemaker_tick.py: `[core].shells` must list "cli" or the tick exits early (heartbeat off, pacemaker_tick.py:272); live wake → run_wake then lie_down only for headless ('window' owns its own).
 - Awake gate (_handle_awake, pacemaker_tick.py:54-81): wake-in-progress NEVER emits new signal — runs shared watchdog.silence_action (0.0 mtime = hold).
 - Stale reap (idle>=wake.stale.threshold_min 15) uses 1e9 so a gone transcript still reaped. Late sentinel into active wake silent here.
 ## 4. Wake runner (`wake.py`)
@@ -61,44 +61,46 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
 - respawn(cfg, initial_prompt, resume_sid): _spawn + persist sid. Old window left OPEN, old claude NOT killed (rotate: predecessor stays for user to close; resume: nothing to kill). Silent — say() is sole attention-getter.
 - find_claude_pid: session tty → ps exact-match, fallback pgrep -x + cwd filter; 0 or >1 → None never guess (window.py:388-459). hard_interrupt = SIGINT on that pid only (462-473).
 ### wake_state.json (`wake_state.py`)
-- Keys: awake set = awake/awake_since/wake_log_id/transcript/silence_wait_until/wait_count/user_replied_this_wake/tuck_pending/last_note_ts (cleared together by clear_awake/claim_lie_down).
+- Keys: awake set = awake/awake_since/wake_log_id/transcript/user_replied_this_wake/tuck_pending/last_note_ts/kick_round (cleared together by clear_awake/claim_lie_down).
+- tuck_pending = "last free-round injection at" ISO ts (silence-cycle carrier; legacy field name).
 - Also: session id; rotated (read-and-clear via take_rotated); sentinel_pid.
-- night_wrap_key/night_rotated_key = once/night dedup (pacemaker_tick.py:38/47).
+- cli shell only. Non-cli shells keep their own ledger at `<paths.shell_state_dir>/<shell>.json` (config.py:373, mirror of marrow [cortex].shell_state_dir), written by that shell's host — this file is never shared.
 - load tolerates missing/corrupt → {}. Writes via _flock (blocking exclusive on sibling .lock, best-effort) + _save (temp + os.replace, no half-written read); cross-process lost-update fixed (wake_state.py:50-127).
 - claim_lie_down (wake_state.py:157-172): atomic read-and-clear of awake marker under the flock; pre-clear snapshot to single winner, None to later callers.
 - Guards watchdog poll vs tick awake-branch racing silence_action same window (lie_down.py:98-106).
 - lock_path (wake_state.py:40-47): sibling `.lock` of wake_state_file. COUPLED with marrow's `_wake_state_lock` (marrow/MAP.md §6.3) — each resolves from own config; overriding one without the other silently splits the lock.
 ### watchdog (`watchdog.py`)
-- Per-wake detached subprocess spawned at set_awake; pidfile self-guarded (unlinks only own pid, watchdog.py:29-40,169-181).
+- Per-wake detached subprocess spawned at set_awake; pidfile self-guarded (unlinks only own pid, watchdog.py:29-40,169-181). Not started when `[core].shells` omits "cli" (watchdog.py:514).
 - Poll 60s: retires when awake cleared externally; publishes occupancy via store_window_tokens each poll.
-- Fuse: window_tokens>=fuse_tokens (150k) → _fuse then exit; else silence_action (watchdog.py:202-232).
-- silence_action (watchdog.py:417-509, shared by watchdog.run + _handle_awake): one idle bar regardless of user presence, live wait_until (cortex.wait) holds it.
-- No-user wake → silent_min timed from awake_since (no user-message ts to derive it from), same bar as below.
-- silent_max_min (20) → tuck_in_text marker once (stamps tuck_pending), then tuck_grace_min (5) more → proxy lie_down.
-- Wait-expiry branch → wait(N) deadline past: epoch-guarded free-round injection immediately, bypasses silent_min (watchdog.py:355-461).
-- Every free-round injection prepends a diff-mode wakeup note ABOVE the 3-choice marker (intel-before-choice; marker is the final line so the block stays machine-tagged; D6, wait_expiry_note toggle, watchdog.py:227-303).
+- Fuse: window_tokens>=fuse_tokens (150k) → _fuse then exit; else silence_action (watchdog.py:458-511).
+- Silence loop (silence_action, watchdog.py:355-444, shared by watchdog.run + _handle_awake): every silent_max_min (20) of user silence → inject one free-round block → re-arm the SAME timer from that instant → repeat forever. The session stays up until it calls lie_down itself.
+- Free-round block = diff-mode wakeup note (events since wake_state.last_note_ts) then the tuck_in_text `[NEW ROUND]` line LAST, so the whole block reads machine-tagged (D6, `[wake].free_round_note` toggle, watchdog.py:220-302).
+- tuck_in_text MUST carry the `[NEW ROUND]` marker: an unmarked line counts as user speech and resets the cycle it just armed (perpetual-loop trap).
+- No-user wake → silent_min timed from awake_since (no user-message ts to derive it from), same bar.
+- Kick carrier (kick.py mark_kick_round) short-circuits the silent_min gate: inject now, then re-arm the same cycle.
+- Commit is epoch-guarded (conditional_mutate): a lie_down/user reset between build and write drops the injection (BUG B).
 - watchdog._log = timestamped heartbeat to watchdog.log (start/retire/fuse/silence_action) — proves the dedicated watchdog is live vs riding only the tick backup (watchdog.py:336-345).
 - force_slept="auto" = routine silence marker (note.py neutral, no catchup line), distinct from "timeout" (retired) and real incidents (fuse/stale).
-- _fuse: esc → inject fuse_handoff_prompt (summarize + handoff + lie_down(rotate=True)) → poll awake 300s grace; proxy-lie_down only if session didn't; catchup only when handoff unwritten (watchdog.py:76-109).
+- _fuse: esc → write `⚙️ [FUSE]` marker (body = marrow [cortex].fuse_prompt_text: update own handoff + lie_down(rotate=True)) → poll awake 300s grace; proxy-lie_down only if session didn't; catchup only when handoff unwritten (watchdog.py:166-205).
 - esc verify: still growing → hard_interrupt SIGINT, gated hard_interrupt_enabled (43-66).
 ### sentinel (`sentinel.py`) — exact-time wake
 - One-shot detached (start_new_session): sleeps `--seconds N` then one pacemaker_tick.main() — wakes fire on the second. launchd 5-min tick stays self-heal fallback.
 - Armed at every lie_down (_arm_sentinel, lie_down.py:135-153): kills recorded predecessor pid, spawns fresh for redrawn next_floor, records pid. Gated [wake].sentinel (default true = spawn, false = tick-only).
 - Self-guarded clear (sentinel.run, sentinel.py:40-48): on fire clears own sentinel_pid via clear_sentinel_pid(only_if_pid=self) BEFORE the tick, only if record still own pid (same self-guard as watchdog pidfile).
 - Killed on re-arm (_kill_sentinel) + user-wake reset (marrow _cortex_user_wake_reset, marrow/MAP.md §6.3).
-## 5. lie_down / wait / say
-- Env-gated MCP tools in marrow daemon (MARROW_CORTEX=1) via `-m cortex.<mod>`; also CLI mains for watchdog proxy use.
-- lie_down (lie_down.py): next_wake_min REQUIRED at MCP/CLI, clamped triggers.clamp_next_wake_minutes to [1, wake.next_wake_max] (240); proxy callers may pass None for uniform floor dice.
+## 5. lie_down / say
+- Env-gated MCP tools in marrow daemon (MARROW_CORTEX=<shell>) via `-m cortex.<mod>`; also CLI mains for watchdog proxy use. lie_down = every shell; say = cli only (marrow/MAP.md §6.2).
+- lie_down (lie_down.py): next_wake_min REQUIRED at MCP/CLI, clamped triggers.clamp_next_wake_minutes to [0, wake.next_wake_max] (240) at EVERY hour — 0 = immediate re-wake; proxy callers may pass None for uniform floor dice.
 - claim_lie_down (§4) = atomic awake-claim, only winner runs body, later gets `{"skipped":"not awake"}`.
 - lie_down body: record occupancy `tokens` into ct_wake_log (sole writer; bare `except:pass` = known silent-drop; net_tokens column historical/unwritten) → clear due self_schedule → integration.lie_down floor redraw.
 - Then: store_window_tokens → kill watchdog (skip if self) → optional set_rotated → _arm_sentinel; result adds next_wake=HH:MM.
-- wait (wait.py): one-shot watchdog silence extension; no consecutive EMPTY waits — commit_wait refuses while `wait_spent` set; any tool-call round / user msg / kick clears it (marrow `_cortex_round_activity` / `_cortex_user_wake_reset` / kick path). commit_wait bumps gen + writes a `commit_wait` wake_audit line (old->new gen) like lie_down_claim.
-- Clamped triggers.clamp_window_minutes to [wake.wait_min, wake.wait_max] (1/20) — OWN bounds, decoupled from floor draw window (floor_min_min/floor_max_min 10/55).
 - say (say.py, window.py:476-483): sound + front resident window — urgent-only ping, else silent; --note accepted but ignored (CLI symmetry).
+- Handoff: per-shell rolling log `<cortex_home>/handoff-<shell>.md` (cli default config.DEFAULT_HANDOFF, override paths.handoff_file). Read via the session's own CLAUDE.md memory import; page-turn is marrow-side (marrow/MAP.md §6.3). Cortex reads its mtime only — fuse "handoff written?" (watchdog.py:206), dead-window recovery (wake.py:846), note catchup (note.py:361).
 ## 6. Wakeup note (`note.py`)
 - gather (note.py:311-340): every section behind _safe(), render pure, omit cleanly when absent (386-446).
 - Sections: header Now/Plan Used/Active [+ force_slept | died_no_handoff catchup] · Pending self-schedule (note.pending_window_min 15).
-- Replay (note.replay_events 4, excl channels ('ct',), marker-stripped, 300ch) · turn_end_text · title prefix. "Wake:" reason line retired.
+- Replay (note.replay_events 4, marker-stripped, 300ch) · turn_end_text (default "") · title prefix. "Wake:" reason line retired.
+- Replay excludes the rendering shell's OWN channel: `note_render --shell <id>` picks note.shell_replay_exclude[id] (cli→ct, tg→tg); no --shell falls back to note.replay_exclude_channels.
 - Diff mode: replay filters events newer than wake_state.last_note_ts (baseline = wake's initial note); every gather() advances it to the newest eligible event (note.py:359-374).
 - Budget line (note.py:449-475): `Plan Used: 5h X% | 7d Y% | <label> Today Nk/Mk P% | Net Session Token: Wk`. 5h/7d from ct_rate_limit kv. One line per shell, label-first, note.shell_labels (Cortex-Cli / Cortex-Tg).
 - Cortex Today via note._today_tokens (delegates to integration._today_tokens, parity by construction).
@@ -120,16 +122,18 @@ pacemaker (launchd 300s) ──tick()──▶ decision ──▶ wake.run_wake
 ## 10. Tests
 - Per-module test files under tests/; pure cores (pacemaker, note, geofence cursor) well covered. Gaps: install.py (untested), geofence same-minute-same-text dup.
 ## 11. Status
-- Live: collectors (knowledgec) · pacemaker (dry_run=false) · wake window + watchdog + fuse + sentinel · note · daybrief render (real file in NY) · MCP lie_down/wait/say · wishlist symlink.
+- Live: collectors (knowledgec) · pacemaker (dry_run=false) · wake window + watchdog + fuse + sentinel · note · daybrief render (real file in NY) · MCP lie_down/say · wishlist symlink · shells cli+tg.
 - Unwired: event triggers · cal_busy/at_home real data · health/geofence collectors (flagged off, no producer).
 ## 12. Marrow-side organs
 > Marrow's half of the bridge — ONE module marrow/cortex_bridge.py, behind [cortex].enabled. Details marrow/MAP.md §6; index only.
-- Six MCP tools via cortex_bridge.register(): wish (append → wishlist.md) · first (tick/untick → ct_first_tick) · goal (set/list/delete → goals table) — all sessions when enabled.
-- lie_down · wait · say — cortex session only, shell `-m cortex.<mod>`.
-- Hook organs (bodies in cortex_bridge, gated call sites in marrow hooks.py): SessionStart handoff page-turn (fresh cortex window only) · lie_down deny (rotate/fuse-line blocked until handoff written).
+- MCP tools via cortex_bridge.register(): wish (append → wishlist.md) · first (tick/untick → ct_first_tick) · goal (set/list/delete → goals table) — all sessions when enabled.
+- lie_down (every shell in marrow [cortex].shells) · say (cli shell only) — shells `-m cortex.<mod>`.
+- Shell id rides `MARROW_CORTEX` (cli/tg; legacy "1" = cli); a channel absent from [cortex].shells runs plain (no cortex tools, no heartbeat). Mirror in this repo: `[core].shells`.
+- Hook organs (bodies in cortex_bridge, gated call sites in marrow hooks.py): SessionStart handoff page-turn, line-count (fresh cortex window only) · lie_down deny (rotate/fuse-line blocked until handoff written) · lie_down nudge (non-blocking additionalContext, rotate arg picks its copy) · FUSE/CTL covert bodies.
+- Non-cli shell host = the synapse tg bridge (synapse/MAP.md): owns the scheduler loop, feed turns, token ledger → `<shell_state_dir>/tg.json`, directed kick.
 - turn_inject 100k 亮牌 ([cortex_rotate].show_tokens) · kickout immunity (is_cortex_session(), env-only, not behind enabled).
 - Session runner: LLMClient.call_cortex (llm.py, stable cross-repo entry, wake.py calls by name) → cortex_bridge.call_cortex / run_claude_cortex.
-- Full-env resumed session, origin of MARROW_CORTEX=1 + MARROW_CHANNEL=ct, per-wake token cap + audit.
+- Full-env resumed session, origin of MARROW_CORTEX=cli + MARROW_CHANNEL=ct, per-wake token cap + audit.
 - Gates (marrow/MAP.md §6.1): `[cortex].enabled` = organs installed at all (default false); `MARROW_CORTEX` env = this session IS the cortex session.
 - Still marrow-side (marrow/MAP.md §6.5): storage.py migrations v29/v30/v31/v32+v34 · config [cortex]/[cortex_rotate]/[cortex_usage]/[llm.claude_cli_cortex].
 - deploy/commands/ct-clear.md (lie_down(rotate=True)) · _window_tokens_from_transcript in hooks.py (shared).

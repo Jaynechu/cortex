@@ -658,7 +658,7 @@ def _resume_fallback_bell(cfg, now, token, resume_sid: str, baseline: int) -> No
     bell fired at the full timeout regardless -- duplicating the wake every time.
     The caller (_spawn_wake) also commits the awake flip BEFORE calling this, so a
     harness turn landing during this poll sees the session already marked awake
-    (a wait()/lie_down() call mid-poll is not wrongly rejected as "not awake")."""
+    (a lie_down() call mid-poll is not wrongly rejected as "not awake")."""
     from cortex import window
 
     timeout = float(cfg["wake"].get("resume_turn_timeout_sec", 180))

@@ -16,7 +16,9 @@ DEFAULT_MARROW_DB = Path.home() / ".config" / "marrow" / "marrow.db"
 DEFAULT_KNOWLEDGEC_DB = (
     Path.home() / "Library" / "Application Support" / "Knowledge" / "knowledgeC.db"
 )
-DEFAULT_HANDOFF = Path.home() / ".config" / "marrow" / "cortex" / "handoff.md"
+# Per-shell rolling log; this repo is the cli shell (mirror of marrow
+# [cortex].handoff_file_pattern = "handoff-{shell}.md"). Override: paths.handoff_file.
+DEFAULT_HANDOFF = Path.home() / ".config" / "marrow" / "cortex" / "handoff-cli.md"
 DEFAULT_CORTEX_HOME = Path.home() / ".config" / "marrow" / "cortex"
 DEFAULT_NY_DB_PAGES = Path.home() / "Desktop" / "NY" / "db-pages"
 DEFAULT_MARROW_REPO = Path.home() / "CC-Lab" / "marrow"
@@ -25,8 +27,7 @@ DEFAULT_WAKE_TIMING_LOG = Path.home() / ".config" / "marrow" / "logs" / "wake_ti
 # Single source of truth for the machine-line marker family (wake bell /
 # free-round / fuse / ctl / slash-command). Referenced by _DEFAULTS below AND
 # by transcript._line_markers' fallback so the two can never drift.
-DEFAULT_MACHINE_LINE_MARKERS = ["[TUCK-IN]", "[NEW ROUND]",
-                                "[FUSE]", "[CTL]", "[CMD"]
+DEFAULT_MACHINE_LINE_MARKERS = ["[NEW ROUND]", "[FUSE]", "[CTL]", "[CMD"]
 
 _DEFAULTS: dict[str, Any] = {
     # shells = the shell ids running as cortex shells (mirror of marrow

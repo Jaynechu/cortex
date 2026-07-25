@@ -22,7 +22,9 @@ health_export = ""
 affect_flag_file = ""
 # Pacemaker self-schedule queue (JSON list of {due_at}). Default: ~/.config/marrow/cortex/state/self_schedule.json
 self_schedule_file = ""
-# Handoff note the next fresh window reads (assistant's handoff). Default: ~/.config/marrow/cortex/handoff.md
+# Handoff note the cli shell reads/writes (assistant's handoff; per-shell rolling
+# log, mirror of marrow [cortex].handoff_file_pattern).
+# Default: ~/.config/marrow/cortex/handoff-cli.md
 handoff_file = ""
 # Cortex session cwd (own CLAUDE.md lives here). Default: ~/.config/marrow/cortex
 cortex_home = ""
@@ -116,23 +118,18 @@ rearm_suffix = " (ear died — rearm)"
 # say() = the ONLY place cortex takes focus: it fronts the resident window and
 # plays a system sound (name of a /System/Library/Sounds/*.aiff; "" = silent).
 say_sound = "Glass"
-wait_min = 1                # wait(N) clamp lower bound (minutes) — short one-shot hold
-wait_max = 20               # wait(N) clamp upper bound (minutes)
-wait_ack_template = "Alarm set {until_local}"  # wait() success ack note ("alarm armed", not "already elapsed"); {until_local} = HH:MM in core.timezone
-next_wake_min = 21          # lie_down(next_wake_min=N) clamp lower bound (minutes)
-next_wake_max = 240         # lie_down(next_wake_min=N) clamp upper bound (minutes)
+next_wake_max = 240         # lie_down(next_wake_min=N) clamp upper bound (minutes); floor is 0 (immediate re-wake) at every hour
 sentinel = true             # arm cortex.sentinel (one-shot exact-time wake) at every lie_down; false = tick-only fallback
-# Marker line written to wake_signal.log when the observe window expires. MARKER
-# ONLY — the C2 menu body is NOT written here (it would show in the ear Monitor
-# event); marrow's UserPromptSubmit hook injects the menu invisibly via
-# additionalContext ([cortex].tuck_in_menu_text on the marrow side). Leading
-# "⏳ [NEW ROUND]" is the machine-line marker. {mins}/{user} optional.
+# Free-round line written to wake_signal.log at every silence-cycle injection
+# (last line of the block, after the freshly rendered note). MUST contain the
+# "[NEW ROUND]" machine-line marker — without it the line resets the silence
+# timer it just armed (perpetual loop). {mins}/{user} optional.
 tuck_in_text = "⏳ [NEW ROUND]"
 # Markers identifying a NON-user turn (so they don't reset the silence timer and
 # downstream memory drops them). The bell prefix (wake_bell_template) is added
 # automatically. Substring match: "[CMD" catches every ⚙️ [CMD ct-*] slash-command body.
-machine_line_markers = ["[TUCK-IN]", "[NEW ROUND]", "[NIGHT]", "[FUSE]", "[CTL]", "[CMD"]
-wait_expiry_note = true      # every free-round tuck-in (silence-gate or wait(N)-expiry) appends a freshly rendered wakeup note (diff mode: only events since the last rendered note this wake)
+machine_line_markers = ["[NEW ROUND]", "[FUSE]", "[CTL]", "[CMD"]
+free_round_note = true       # every free-round injection appends a freshly rendered wakeup note above the marker line (diff mode: only events since the last rendered note this wake)
 # Covert-delivery markers written to wake_signal.log (bell via ear Monitor; typed only if the
 # ear is dead). Only the marker reaches the window; the body is injected invisibly by the marrow
 # hook (fuse -> [cortex].fuse_prompt_text; ctl -> [cortex].ctl_sleep_text from the mins/rotate args).
@@ -145,9 +142,8 @@ rotate_refuse_text = "Rotate refused: your wake-signal monitor is still running.
 # Per-wake watchdog thresholds (spawned at injection, killed at lie_down).
 [wake.watchdog]
 poll_sec = 60
-silent_max_min = 20            # idle bar (same for chat or no-user wake): at this silence, append free-round marker (no live wait_until); same as wake.wait_max
-tuck_grace_min = 5             # after TUCK-IN, no wait/lie_down within this -> proxy lie_down(auto)
-fuse_tokens = 150000           # (c) window tokens >= this -> esc + proxy lie_down (fuse)
+silent_max_min = 20            # silence cycle (same bar for chat or no-user wake): at this silence, inject one free-round note + marker, then re-arm the same timer
+fuse_tokens = 150000           # window tokens >= this -> esc + proxy lie_down (fuse)
 # Process-level hard interrupt (SIGINT), a guaranteed esc-equivalent for when the
 # osascript esc may not land (no window focus). Fires after esc on the fuse
 # path, only if the transcript is still growing past the grace window.
@@ -212,21 +208,6 @@ cal_busy_default = false       # until calendar busy state is wired in
 [gates.daily_budget]
 tokens = 1000000
 
-# Night mode: flag-based low-frequency roaming (replaces the old fixed-window
-# gate). lie_down(mode='night') sets a persistent `mode: night` flag in
-# wake_state; the flag drives the floor band + a per-night cap and is cleared by
-# the morning kick (her first message past morning_start).
-[night]
-floor_min = 120           # roaming draw + lie_down(mode='night') clamp (min)
-floor_max = 360           # roaming draw + lie_down(mode='night') clamp (max)
-start = "22:00"           # self-check window opens (night-insert precondition)
-morning_start = "06:00"   # her first message from here clears the flag
-silence_hours = 1.5       # all-channel silence to insert the flag
-cap = 6                   # max self-wakes per flag-set->clear night (ceiling)
-# C6 ack: INVISIBLE audit-log line written when the night package runs
-# ({next_wake} renders at lie_down). Never reaches the window.
-ack_text = "Night shift: handoff ✓ → rotate to free up context → next wake {next_wake}"
-
 [triggers]
 # Wake-window (minutes) from lie-down. lie_down picks the next wake: an explicit
 # minutes choice (clamped to [min, max]) or a uniform "dice" draw when omitted.
@@ -274,7 +255,7 @@ handoff_title = "碎碎念"   # title of the handoff-note section (customisable 
 replay_title = "最近对话回放"     # title of the conversation-replay section
 handoff_wake_kinds = ["rotate"]  # wake kinds that get the handoff (fresh window only)
 cadence_bin = ""             # cadence CLI for cal/rem lines; empty = packaged default path
-turn_end_text = "NOTE: End activity with wait(N) or lie_down unless user is actively sending msg. Auto {silent_max_min} min idle without wait/lie_down. User's message resets all timers. No consecutive waits. wait(N) [{wait_min}-{wait_max}]; lie_down(next_wake_min=N) [{next_wake_min}-{next_wake_max}]."  # one-line reminder appended at the end of every rendered note; "" omits it. {wait_min}/{wait_max}/{next_wake_min}/{next_wake_max}/{silent_max_min} render from the wake clamps
+turn_end_text = ""           # one-line reminder appended at the end of every rendered note; "" omits it (the silence cycle already carries this). {next_wake_min}/{next_wake_max}/{silent_max_min} render from the wake clamps
 receipt_line = 'Note #{id} ({channel} {sent_hm}): she replied {replied_hm} "{text}"'  # reply-receipt line (C11); one per note she replied to since last note. {id}/{channel}/{sent_hm}/{replied_hm}/{text} from the outbox row; "" omits receipts
 # Header written into a freshly-created wishlist.md (append-only; never overwritten). Display text — customise freely.
 wishlist_header = "# Wishlist\n\n(owed treats / wants / self-rewards — append-only)\n"

@@ -92,8 +92,8 @@ def test_wake_bell_zwj_static_template_does_not_reset(cfg):
     assert 24.0 < transcript.user_silent_min(cfg) < 26.0
 
 
-def test_tuck_in_marker_line_does_not_reset(cfg):
-    _write(cfg, [_user("q", 18), _user("⏳ [TUCK-IN] legacy marker", 1)])
+def test_free_round_marker_line_does_not_reset(cfg):
+    _write(cfg, [_user("q", 18), _user("⏳ [NEW ROUND] free-round line", 1)])
     assert 17.0 < transcript.user_silent_min(cfg) < 19.0
 
 
