@@ -99,9 +99,9 @@ return "no"
 
 
 def window_model(cfg: dict) -> str:
-    """Explicit model for cortex windows — never inherit the (expensive top-tier)
-    system default. Reused by every cortex window spawn."""
-    return cfg["wake"].get("window_model", "opus")
+    """Model for cortex windows. Empty -> omit the flag (inherit the
+    environment default). Reused by every cortex window spawn."""
+    return cfg["wake"].get("window_model", "")
 
 
 def window_effort(cfg: dict) -> str:
@@ -187,8 +187,8 @@ def launch_command(cfg: dict, initial_prompt: str | None = None,
                    resume_sid: str | None = None) -> str:
     # Identity + channel markers set explicitly (hooks derive channel from
     # MARROW_CHANNEL; MARROW_CORTEX=cli = shell id / kickout immunity).
-    # --model/--effort pin tier + reasoning so the window never rides the
-    # system default. Reused by every cortex window spawn. A non-empty
+    # --model/--effort only when configured; unset = inherit the environment
+    # default. Reused by every cortex window spawn. A non-empty
     # initial_prompt (fresh_initial_prompt: emoji + bell marker) is baked in as
     # claude's first positional prompt so a freshly launched window starts
     # acting immediately — the marrow hook detects the marker and injects the
@@ -198,7 +198,10 @@ def launch_command(cfg: dict, initial_prompt: str | None = None,
     # session with full context — no fresh brain, no handoff catchup needed.
     home = str(config.cortex_home(cfg))
     cmd = cfg["wake"].get("launch_command", "claude")
-    flags = f" --model {window_model(cfg)}"
+    flags = ""
+    mdl = window_model(cfg)
+    if mdl:
+        flags += f" --model {mdl}"
     eff = window_effort(cfg)
     if eff:
         flags += f" --effort {eff}"

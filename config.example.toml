@@ -77,8 +77,8 @@ auto_adopt = true
 mode = "window"
 session_name = "cortex"        # iTerm session name for the resident window
 launch_command = "claude"      # command run in the window (env markers prepended)
-window_model = "opus"          # explicit --model for every cortex window; never
-                               # inherit the system default. Not a 1M-context variant.
+window_model = ""              # --model for cortex windows; "" = omit flag and
+                               # inherit the environment default
 window_effort = ""             # --effort (low|medium|high|xhigh|max); "" = omit flag
 skip_permissions = true        # add --dangerously-skip-permissions so a fresh dir's
                                # trust dialog never blocks the injected note
