@@ -71,8 +71,8 @@ def test_first_wake_no_resume_and_persists_session(marrow_conn, wcfg):
     assert caller.calls[0]["resume_sid"] is None
     assert caller.calls[0]["cwd"] == str(wcfg["paths"]["cortex_home"])
 
-    from cortex.pacemaker import integration
-    state = integration.load_state(marrow_conn)
+    from cortex import occupancy
+    state = occupancy.load_state(marrow_conn)
     assert state.cortex_session_id == "sid-abc"
 
 
@@ -98,8 +98,8 @@ def test_new_date_resumes_no_rebirth(marrow_conn, wcfg):
 
     assert caller2.calls[0]["resume_sid"] == "sid-day1"  # resumed, not reborn
 
-    from cortex.pacemaker import integration
-    state = integration.load_state(marrow_conn)
+    from cortex import occupancy
+    state = occupancy.load_state(marrow_conn)
     assert state.cortex_session_id == "sid-day2"
 
 
@@ -121,7 +121,7 @@ class FailCaller:
 def test_failed_wake_forces_fresh_next_no_archive(marrow_conn, wcfg):
     """A failed marrow call drops the resume sid (fresh session next wake).
     Rebirth/archiving is retired -> no archive dir is created."""
-    from cortex.pacemaker import integration
+    from cortex import occupancy
 
     good = FakeCaller(session_id="sid-day1")
     wake.run_wake(marrow_conn, wcfg, DECISION, now=DAY1, caller=good)
@@ -130,7 +130,7 @@ def test_failed_wake_forces_fresh_next_no_archive(marrow_conn, wcfg):
         wake.run_wake(marrow_conn, wcfg, DECISION,
                       now=DAY1 + timedelta(hours=1), caller=FailCaller())
 
-    st = integration.load_state(marrow_conn)
+    st = occupancy.load_state(marrow_conn)
     assert st.cortex_session_id is None            # fresh session next wake
 
     # Retry resumes fresh (resume None) and persists the new sid.
@@ -138,7 +138,7 @@ def test_failed_wake_forces_fresh_next_no_archive(marrow_conn, wcfg):
     wake.run_wake(marrow_conn, wcfg, DECISION,
                   now=DAY1 + timedelta(hours=2), caller=good2)
     assert good2.calls[0]["resume_sid"] is None
-    assert integration.load_state(marrow_conn).cortex_session_id == "sid-retry"
+    assert occupancy.load_state(marrow_conn).cortex_session_id == "sid-retry"
 
 
 def test_call_marrow_cortex_outer_timeout_derives_from_inner(monkeypatch, wcfg):
@@ -178,7 +178,7 @@ def test_token_cap_breach_forces_fresh_no_rearchive(marrow_conn, wcfg):
     """A mid-wake token-cap breach drops the resume sid (fresh session next
     wake). Rebirth/archiving is retired -> the same day's log is never
     re-archived."""
-    from cortex.pacemaker import integration
+    from cortex import occupancy
 
     good = FakeCaller(session_id="sid-1")
     wake.run_wake(marrow_conn, wcfg, DECISION, now=DAY1, caller=good)
@@ -189,7 +189,7 @@ def test_token_cap_breach_forces_fresh_no_rearchive(marrow_conn, wcfg):
     assert res["capped"] is True
     assert cap.calls[0]["resume_sid"] == "sid-1"  # resumed before the breach
 
-    st = integration.load_state(marrow_conn)
+    st = occupancy.load_state(marrow_conn)
     assert st.cortex_session_id is None            # fresh session next wake
 
     # Third wake same day: fresh (resume None), still no archive of day1.
@@ -197,7 +197,7 @@ def test_token_cap_breach_forces_fresh_no_rearchive(marrow_conn, wcfg):
     wake.run_wake(marrow_conn, wcfg, DECISION,
                   now=later + timedelta(hours=1), caller=good2)
     assert good2.calls[0]["resume_sid"] is None
-    assert integration.load_state(marrow_conn).cortex_session_id == "sid-3"
+    assert occupancy.load_state(marrow_conn).cortex_session_id == "sid-3"
 
 
 # --------------------------------------------------------------------------- #
@@ -423,8 +423,8 @@ def _wake_rows(conn):
 def test_log_activation_wake_row_writes_tagged_row(marrow_conn):
     """A non-tick wake logs its OWN wake=1 row, tagged, force_slept NULL (so
     force_slept-based auto-rate stats stay unaffected)."""
-    from cortex.pacemaker import integration
-    wid = integration.log_activation_wake_row(marrow_conn, DAY1, "user")
+    from cortex import occupancy
+    wid = occupancy.log_activation_wake_row(marrow_conn, DAY1, "user")
     assert isinstance(wid, int)
     rows = _wake_rows(marrow_conn)
     assert len(rows) == 1
@@ -437,7 +437,7 @@ def test_wake_log_id_writes_fresh_row_for_non_tick_wake(marrow_conn):
     """Chokepoint: a tagged (user/ctl/reconcile/rotate) wake gets a FRESH row
     even when an older scheduled row exists — so 'Last wake' never reuses a
     stale noon row (the BUG A symptom)."""
-    from cortex.pacemaker import integration
+    from cortex import occupancy
     # A stale scheduled row hours ago (the noon row in the incident).
     old_ts = (DAY1 - timedelta(minutes=280)).astimezone(timezone.utc).isoformat()
     marrow_conn.execute(

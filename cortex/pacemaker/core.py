@@ -8,23 +8,13 @@ injected by the caller (launchd loop / integration layer).
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass
 from datetime import datetime
 
+from cortex.occupancy import PacemakerState, reschedule_floor
 from cortex.pacemaker import gates
 from cortex.pacemaker.triggers import evaluate as evaluate_triggers
-from cortex.pacemaker.triggers import reschedule_floor
 
-
-@dataclass(frozen=True)
-class PacemakerState:
-    next_floor_due_at: datetime | None = None
-    last_wake_at: datetime | None = None
-    # C-wm timing: lie-down = wake finished; floor clock redraws from here.
-    last_lie_down_at: datetime | None = None
-    # Cortex session resume (C3). Opaque to tick() — only the wake caller
-    # (cortex.wake) reads/writes this.
-    cortex_session_id: str | None = None
+__all__ = ["PacemakerState", "tick"]
 
 
 def _render_explanation(now: datetime, reasons: list, gated: list) -> str:

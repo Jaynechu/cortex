@@ -542,15 +542,15 @@ def test_store_window_tokens_reaches_budget_line(cfg):
     """store_window_tokens publishes to ct_pacemaker_state; note reads it back
     (Budget line 'net Xk'). Survives lie_down's own floor-redraw save_state."""
     from cortex import note
-    from cortex.pacemaker import integration
+    from cortex import occupancy
 
     conn = db.connect(cfg)
     try:
-        integration.store_window_tokens(conn, 88_000)
+        occupancy.store_window_tokens(conn, 88_000)
         assert note._window_tokens(conn) == 88_000
         # a later floor-redraw save must NOT wipe it out of order
-        integration.lie_down(conn, cfg)
-        integration.store_window_tokens(conn, 90_000)
+        occupancy.lie_down(conn, cfg)
+        occupancy.store_window_tokens(conn, 90_000)
         assert note._window_tokens(conn) == 90_000
     finally:
         conn.close()
@@ -1019,7 +1019,7 @@ def test_today_tokens_two_windows_sum_finals(cfg):
     second run is the current window (added via the live hint). Finished finals
     sum to the first window's final only."""
     from cortex import note
-    from cortex.pacemaker import integration
+    from cortex import occupancy
     from datetime import datetime as _dt, timezone as _tz
 
     now = _dt.now(_tz.utc)
@@ -1032,10 +1032,10 @@ def test_today_tokens_two_windows_sum_finals(cfg):
                 (db.utcnow_iso(), occ))
         conn.commit()
         # finished finals = window 1 final (40k); window 2 is current -> live hint
-        integration.store_window_tokens(conn, 30_000)  # live occupancy grew past 25k
+        occupancy.store_window_tokens(conn, 30_000)  # live occupancy grew past 25k
         assert note._today_tokens(conn, now) == 40_000 + 30_000
         # gate agrees with the note line (same helper)
-        assert integration._today_tokens(conn, now) == 40_000 + 30_000
+        assert occupancy._today_tokens(conn, now) == 40_000 + 30_000
     finally:
         conn.close()
 
@@ -1044,23 +1044,23 @@ def test_today_tokens_current_window_added_from_live_hint(cfg):
     """The current window's contribution comes from the live window_tokens hint
     (fresher than its last ct_wake_log row), added on top of finished finals."""
     from cortex import note
-    from cortex.pacemaker import integration
+    from cortex import occupancy
     from datetime import datetime as _dt, timezone as _tz
 
     now = _dt.now(_tz.utc)
     conn = db.connect(cfg)
     try:
-        integration.store_window_tokens(conn, 12_345)  # only a live window, no finished rows
+        occupancy.store_window_tokens(conn, 12_345)  # only a live window, no finished rows
         assert note._today_tokens(conn, now) == 12_345
     finally:
         conn.close()
 
 
 def test_today_tokens_note_and_gate_agree(cfg):
-    """note._today_tokens and the gate's integration._today_tokens are the same
+    """note._today_tokens and the gate's occupancy._today_tokens are the same
     number by construction (note delegates to the gate helper)."""
     from cortex import note
-    from cortex.pacemaker import integration
+    from cortex import occupancy
     from datetime import datetime as _dt, timezone as _tz
 
     now = _dt.now(_tz.utc)
@@ -1071,8 +1071,8 @@ def test_today_tokens_note_and_gate_agree(cfg):
                 "INSERT INTO ct_wake_log (ts, wake, dry_run, tokens) VALUES (?,1,0,?)",
                 (db.utcnow_iso(), occ))
         conn.commit()
-        integration.store_window_tokens(conn, 18_000)
-        assert note._today_tokens(conn, now) == integration._today_tokens(conn, now)
+        occupancy.store_window_tokens(conn, 18_000)
+        assert note._today_tokens(conn, now) == occupancy._today_tokens(conn, now)
     finally:
         conn.close()
 

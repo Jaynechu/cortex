@@ -581,7 +581,7 @@ def test_today_tokens_melbourne_local_boundary(marrow_conn):
     excluded by the local-date filter, so they never open a spurious window /
     drop. The single today-run is the current window -> its final is added via
     the live hint (60k here)."""
-    from cortex.pacemaker import integration
+    from cortex import occupancy
     # now = 2026-07-08 00:30 AEST (+10) => UTC 2026-07-07T14:30Z
     now = datetime(2026, 7, 8, 0, 30, tzinfo=MEL)
     rows = [
@@ -597,7 +597,7 @@ def test_today_tokens_melbourne_local_boundary(marrow_conn):
     marrow_conn.executemany(
         "INSERT INTO ct_wake_log (ts, wake, dry_run, tokens) VALUES (?, 1, 0, ?)", rows)
     marrow_conn.commit()
-    integration.store_window_tokens(marrow_conn, 60_000)  # today's run is the live window
+    occupancy.store_window_tokens(marrow_conn, 60_000)  # today's run is the live window
     assert note._today_tokens(marrow_conn, now) == 60_000
 
 

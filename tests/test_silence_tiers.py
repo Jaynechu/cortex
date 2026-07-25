@@ -673,13 +673,13 @@ def test_lie_down_double_fire_single_effect(awake_no_sentinel, monkeypatch):
     same window. The atomic awake claim => exactly one acts (real result), the
     other no-ops; ct_wake_log force_slept + floor redraw happen once each."""
     from cortex import lie_down as lie_down_mod
-    from cortex.pacemaker import integration
+    from cortex import occupancy
     cfg = awake_no_sentinel
 
     redraws = []
-    real_floor = integration.lie_down
+    real_floor = occupancy.lie_down
     monkeypatch.setattr(
-        "cortex.pacemaker.integration.lie_down",
+        "cortex.occupancy.lie_down",
         lambda conn, cfg, minutes=None: redraws.append(1) or real_floor(conn, cfg, minutes=minutes))
 
     wid = wake_state.load(cfg)["wake_log_id"]

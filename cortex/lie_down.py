@@ -14,13 +14,13 @@ import argparse
 import json
 import os
 import signal
+import socket
 import subprocess
 import sys
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 
-from cortex import config, db, transcript, wake_state
-from cortex.pacemaker import integration
+from cortex import config, db, occupancy, transcript, wake_state
 
 
 def _now_utc() -> datetime:
@@ -44,7 +44,7 @@ def _clear_due_self_schedule(cfg: dict) -> int:
     kept = []
     for it in items:
         due = it.get("due_at") if isinstance(it, dict) else None
-        d = integration.parse_due_at(due, tz)  # tz-aware or naive-local (DST-correct)
+        d = occupancy.parse_due_at(due, tz)  # tz-aware or naive-local (DST-correct)
         if d is not None and d <= now:
             continue
         kept.append(it)
@@ -70,7 +70,7 @@ def _record_tokens(conn, cfg: dict, state: dict, force_slept: str | None) -> int
     """Record this wake's context occupancy (`tokens` — last assistant usage
     totals) into its ct_wake_log row. Occupancy grows monotonically within a
     window; the daily Cortex-Today metric sums each window's final occupancy
-    (integration._finished_window_finals) plus the live window, so no per-wake
+    (occupancy._finished_window_finals) plus the live window, so no per-wake
     net delta is stored. Returns the recorded occupancy."""
     tokens = transcript.window_tokens(cfg)
     wid = state.get("wake_log_id")
@@ -85,6 +85,19 @@ def _record_tokens(conn, cfg: dict, state: dict, force_slept: str | None) -> int
     return tokens
 
 
+def clamp_next_wake_minutes(minutes: float, config: dict,
+                            human_override: bool = False) -> float:
+    """Clamp a lie_down(next_wake_min=N) choice to [0, wake.next_wake_max] —
+    one merged band for every hour (0 = immediate re-wake, e.g. a rotate
+    starting the successor window right away). `human_override` (explicit ctl
+    minutes) passes unclamped. Proxy paths pass None and skip this clamp."""
+    if human_override:
+        return minutes
+    wcfg = config.get("wake", {})
+    hi = wcfg.get("next_wake_max", 240)
+    return max(0, min(hi, minutes))
+
+
 def lie_down(cfg: dict, force_slept: str | None = None, rotate: bool = False,
              next_wake_min: float | None = None,
              human_override: bool = False) -> dict:
@@ -95,8 +108,6 @@ def lie_down(cfg: dict, force_slept: str | None = None, rotate: bool = False,
     retired, N required at the MCP/CLI layer). `rotate` respawns a fresh window
     next wake. `human_override` (explicit ctl minutes) passes next_wake_min
     unclamped."""
-    from cortex.pacemaker.triggers import clamp_next_wake_minutes
-
     # Rotate precondition (P17): refuse a rotate while THIS window's own
     # wake-signal ear tail is still alive — a live monitor task replays its
     # completion notification when the rotated window resumes. Refuse BEFORE
@@ -139,12 +150,12 @@ def lie_down(cfg: dict, force_slept: str | None = None, rotate: bool = False,
                     "next_wake": None, "superseded": True}
         # wake redraw from now; next_floor drives the next_wake HH:MM the marrow
         # MCP wrapper surfaces to the session.
-        next_floor = integration.lie_down(conn, cfg, minutes=next_wake_min)
+        next_floor = occupancy.lie_down(conn, cfg, minutes=next_wake_min)
         # Publish AFTER the floor redraw's save_state (which drops the key), so the
         # next wake's Plan Used line sees this wake's window occupancy (statusline
         # total: input + cache_read + cache_creation + output — the same metric
         # `tokens` already computed above for rotate/fuse), not the NET spend.
-        integration.store_window_tokens(conn, tokens)
+        occupancy.store_window_tokens(conn, tokens)
         if _token_ok(cfg, token):
             _kill_watchdog(cfg)
         # Rotate is now an explicit session decision (the --rotate flag), not an
@@ -204,6 +215,40 @@ def _mark_rotated(transcript_path):
     return _m
 
 
+def persist_next_wake_at(cfg: dict, next_floor: datetime | None, token=None) -> bool:
+    """Persist the durable next-wake ledger for `next_floor` as a CONDITIONAL
+    child of the claim `token`, then notify the wake daemon. This is the alarm
+    write that must survive independently of any sentinel machinery: the ledger
+    is what a restarted daemon/tick reconciles against. Returns False when a
+    newer epoch (user reset / newer claim) already superseded this claim — the
+    caller must then drop every remaining alarm side effect."""
+    iso = _local_iso(next_floor, cfg) if next_floor is not None else None
+    try:
+        wake_state.conditional_mutate(cfg, token, _set_ledger(iso))
+    except wake_state.StateValidationError:
+        return False  # superseded -> newer epoch owns the ledger + alarm
+    _notify_daemon(cfg)
+    return True
+
+
+def _notify_daemon(cfg: dict) -> None:
+    """Best-effort kick to the wake daemon's scheduler socket so it re-reads the
+    ledger immediately instead of waiting for its safety tick. Silent no-op when
+    unconfigured or the daemon is down."""
+    dcfg = cfg.get("daemon") or {}
+    path = str(dcfg.get("socket_path") or "").strip()
+    if not path:
+        return
+    shell = str(dcfg.get("shell") or "cli")
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(float(dcfg.get("kick_timeout_sec", 1.0)))
+            s.connect(os.path.expanduser(path))
+            s.sendall((shell + "\n").encode("utf-8"))
+    except (OSError, ValueError):
+        pass
+
+
 def _arm_sentinel(cfg: dict, next_floor: datetime, token=None) -> datetime | None:
     """Persist the durable next-wake ledger and arm the one-shot exact-time wake
     sentinel for `next_floor`, all as CONDITIONAL children of the claim `token`.
@@ -218,13 +263,11 @@ def _arm_sentinel(cfg: dict, next_floor: datetime, token=None) -> datetime | Non
     Gated by [wake].sentinel; false = tick-only. Returns `next_floor` so the
     caller's reported next_wake always agrees with the ledger and sentinel."""
     _kill_sentinel(cfg)
-    iso = _local_iso(next_floor, cfg) if next_floor is not None else None
     # Conditional ledger write: a bump since the claim -> this alarm is stale,
     # write nothing (fail closed). No bump: a plain (non-gen) ledger write.
-    try:
-        wake_state.conditional_mutate(cfg, token, _set_ledger(iso))
-    except wake_state.StateValidationError:
-        return next_floor  # superseded -> newer epoch owns the ledger + alarm
+    if not persist_next_wake_at(cfg, next_floor, token):
+        return next_floor
+    iso = _local_iso(next_floor, cfg) if next_floor is not None else None
     if not cfg["wake"].get("sentinel", True):
         return next_floor
     if next_floor is None:

@@ -18,8 +18,7 @@ import sys
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from cortex import config, db, wake_state, window
-from cortex.pacemaker import integration
+from cortex import config, db, occupancy, wake_state, window
 
 
 def _now(cfg: dict) -> datetime:
@@ -52,7 +51,7 @@ def cmd_wake(cfg: dict) -> str:
                     "explanation": f"{now.strftime('%H:%M')} manual ctl wake"}
         result = run_wake(conn, cfg, decision, now=now)
         if result.get("mode") != "window":
-            next_floor = integration.lie_down(conn, cfg)
+            next_floor = occupancy.lie_down(conn, cfg)
             wake_state.set_next_wake_at(
                 cfg, next_floor.isoformat() if next_floor else None)
         rotated = "fresh" if wake_state.load(cfg).get("rotated") else "resume/spawn"

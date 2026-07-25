@@ -108,18 +108,18 @@ def test_bug_a_user_reset_right_after_claim_suppresses_all(cfg, monkeypatch):
     released = threading.Event()
     reached = threading.Event()
 
-    # Seam: block inside integration.lie_down (floor redraw) — the first late
+    # Seam: block inside occupancy.lie_down (floor redraw) — the first late
     # action, right after the claim. Actually pause BEFORE it via _token_ok so the
     # whole tail sees the stale token.
-    from cortex.pacemaker import integration
-    real_floor = integration.lie_down
+    from cortex import occupancy
+    real_floor = occupancy.lie_down
 
     def paused_floor(conn, cfg_, **kw):
         reached.set()
         released.wait(2.0)
         return real_floor(conn, cfg_, **kw)
 
-    monkeypatch.setattr("cortex.lie_down.integration.lie_down", paused_floor)
+    monkeypatch.setattr("cortex.occupancy.lie_down", paused_floor)
     spawned = []
     monkeypatch.setattr(sentinel, "spawn",
                         lambda cfg_, secs, **k: spawned.append(1) or 55555)

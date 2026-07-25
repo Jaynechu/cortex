@@ -50,6 +50,72 @@ def test_lie_down_persists_ledger(cfg):
     assert wake_state.get_next_wake_at(cfg) is not None  # ledger written by _arm_sentinel
 
 
+def test_persist_next_wake_at_writes_ledger_without_sentinel(cfg, monkeypatch):
+    """The ledger write is a plain wake_state-level call — it survives whatever
+    the sentinel machinery does, and kicks the daemon when one is configured."""
+    kicks = []
+    monkeypatch.setattr(lie_down, "_notify_daemon", lambda c: kicks.append(c))
+    now = datetime(2026, 7, 13, 9, 0, tzinfo=_tz(cfg))
+    assert lie_down.persist_next_wake_at(cfg, now) is True
+    assert wake_state.get_next_wake_at(cfg) == now.isoformat()
+    assert len(kicks) == 1
+    assert lie_down.persist_next_wake_at(cfg, None) is True  # None clears
+    assert wake_state.get_next_wake_at(cfg) is None
+
+
+def test_notify_daemon_noop_without_socket(cfg, monkeypatch):
+    """No [daemon] socket configured -> no socket touched at all."""
+    def _boom(*_a, **_k):
+        raise AssertionError("socket must not be opened")
+    monkeypatch.setattr(lie_down.socket, "socket", _boom)
+    lie_down._notify_daemon(cfg)  # no [daemon] section in defaults
+
+
+def test_notify_daemon_sends_shell_id(cfg, monkeypatch):
+    sent = []
+
+    class _FakeSock:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def settimeout(self, t):
+            pass
+
+        def connect(self, path):
+            sent.append(("connect", path))
+
+        def sendall(self, payload):
+            sent.append(("send", payload))
+
+    monkeypatch.setattr(lie_down.socket, "socket", lambda *a, **k: _FakeSock())
+    cfg["daemon"] = {"socket_path": "/tmp/ct-daemon.sock"}
+    lie_down._notify_daemon(cfg)
+    assert sent == [("connect", "/tmp/ct-daemon.sock"), ("send", b"cli\n")]
+
+
+def test_notify_daemon_swallows_dead_daemon(cfg, monkeypatch):
+    """Daemon down (socket file present but nobody listening) -> silent no-op."""
+    class _Dead:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def settimeout(self, t):
+            pass
+
+        def connect(self, path):
+            raise ConnectionRefusedError
+
+    monkeypatch.setattr(lie_down.socket, "socket", lambda *a, **k: _Dead())
+    cfg["daemon"] = {"socket_path": "/tmp/ct-daemon.sock"}
+    lie_down._notify_daemon(cfg)
+
+
 def test_set_awake_clears_ledger(cfg):
     wake_state.set_next_wake_at(cfg, "2026-07-13T09:00:00+10:00")
     wake_state.set_awake(cfg, 1, None)  # a fresh wake fired -> ledger consumed

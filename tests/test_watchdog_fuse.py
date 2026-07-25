@@ -127,7 +127,7 @@ def test_run_alive_window_reaches_idle_gate(cfg, monkeypatch):
             pass
 
     monkeypatch.setattr(watchdog.db, "connect", lambda c: _FakeConn())
-    monkeypatch.setattr(watchdog.integration, "store_window_tokens",
+    monkeypatch.setattr(watchdog.occupancy, "store_window_tokens",
                         lambda conn, tokens: None)
 
     reached = {"silence": False}

@@ -21,8 +21,8 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from cortex import config
-from cortex.pacemaker.integration import parse_due_at
-from cortex.pacemaker.integration import _today_tokens as _integration_today_tokens
+from cortex.occupancy import parse_due_at
+from cortex.occupancy import _today_tokens as _occupancy_today_tokens
 
 # ct_rate_limit is a flat kv table (key, value, updated_at) the marrow-side
 # collector owns (usage_snapshot). Keys read here: five_hour_pct /
@@ -361,9 +361,9 @@ def _last_active(conn: sqlite3.Connection, cfg: dict, now: datetime) -> dict | N
 def _today_tokens(conn: sqlite3.Connection, now: datetime) -> int:
     """Cortex Today = sum of today's finished-window final occupancies + the
     current live window occupancy. Delegates to the daily-budget gate's helper
-    (pacemaker.integration._today_tokens) so the note line and the gate always
+    (occupancy._today_tokens) so the note line and the gate always
     show the same figure (parity by construction, not by two copies)."""
-    return _integration_today_tokens(conn, now)
+    return _occupancy_today_tokens(conn, now)
 
 
 def _rate_limit_kv(conn: sqlite3.Connection) -> dict:

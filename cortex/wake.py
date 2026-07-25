@@ -23,8 +23,7 @@ from dataclasses import replace
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
-from cortex import config, db, note, symlinks
-from cortex.pacemaker import integration
+from cortex import config, db, note, occupancy, symlinks
 from cortex.timing import WakeTimer
 
 # Seconds added to the inner marrow claude-call budget (marrow.call_timeout_s)
@@ -143,7 +142,7 @@ def _force_fresh_next(conn: sqlite3.Connection, state, today: str) -> None:
     """Next wake starts a fresh marrow session (drop resume sid).
     Used on token-cap breach and marrow call failure/timeout so a broken/oversized
     session is never resumed."""
-    integration.save_state(conn, replace(state, cortex_session_id=None))
+    occupancy.save_state(conn, replace(state, cortex_session_id=None))
 
 
 _DAYBRIEF_TIMEOUT_S = 20
@@ -199,7 +198,7 @@ def _wake_log_id(conn: sqlite3.Connection, now: datetime,
     insert + bind one atomic locked step so a losing race never leaves an
     orphan row to clean up."""
     if wake_reasons:
-        wid = integration.log_activation_wake_row(conn, now, wake_reasons)
+        wid = occupancy.log_activation_wake_row(conn, now, wake_reasons)
         if wid is not None:
             return wid
     return _latest_wake_log_id(conn)
@@ -247,7 +246,7 @@ def _resolve_wake_log_id_fast_fail(conn: sqlite3.Connection, now: datetime,
             # a failed insert must never fall through to the decision-row
             # reuse fallback below (P1) — that reuse is scheduled-wake-only.
             try:
-                wid = integration.log_activation_wake_row(conn, now, wake_reasons)
+                wid = occupancy.log_activation_wake_row(conn, now, wake_reasons)
             except sqlite3.Error:
                 wid = None
             if wid is None:
@@ -884,7 +883,7 @@ def run_wake(
     symlinks.ensure_all(cfg)
     timer.mark("symlinks")
 
-    state = integration.load_state(conn)
+    state = occupancy.load_state(conn)
     resume_sid = state.cortex_session_id
     timer.mark("state_loaded")
 
@@ -1009,7 +1008,7 @@ def run_wake(
         state,
         cortex_session_id=result.get("session_id") or resume_sid,
     )
-    integration.save_state(conn, new_state)
+    occupancy.save_state(conn, new_state)
 
     _render_daybrief(cfg)
     timer.mark("daybrief")

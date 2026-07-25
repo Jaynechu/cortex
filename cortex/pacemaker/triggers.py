@@ -16,9 +16,13 @@ Expected context keys used here:
 
 from __future__ import annotations
 
-import random
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime
+
+from cortex.lie_down import clamp_next_wake_minutes  # re-export (moved home)
+from cortex.occupancy import reschedule_floor  # re-export (moved home)
+
+__all__ = ["TriggerReason", "clamp_next_wake_minutes", "evaluate", "reschedule_floor"]
 
 
 @dataclass(frozen=True)
@@ -95,29 +99,3 @@ def evaluate(
     return _floor_trigger(next_floor_due_at, now)
 
 
-def clamp_next_wake_minutes(minutes: float, config: dict,
-                            human_override: bool = False) -> float:
-    """Clamp a lie_down(next_wake_min=N) choice to [0, wake.next_wake_max] —
-    one merged band for every hour (0 = immediate re-wake, e.g. a rotate
-    starting the successor window right away). `human_override` (explicit ctl
-    minutes) passes unclamped. Proxy paths pass None and skip this clamp."""
-    if human_override:
-        return minutes
-    wcfg = config.get("wake", {})
-    hi = wcfg.get("next_wake_max", 240)
-    return max(0, min(hi, minutes))
-
-
-def reschedule_floor(now: datetime, config: dict, rng: random.Random,
-                     minutes: float | None = None) -> datetime:
-    """Draw the next wake due time from `now`. `minutes` = an explicit choice
-    (already clamped by the caller); None = a uniform "dice" draw within the
-    floor band [floor_min_min, floor_max_min]. Callers pass lie-down time as
-    `now` on the wake path (C-wm: the clock runs from lie-down, not wake);
-    gated firings redraw from tick time so a blocked floor doesn't re-fire
-    every tick."""
-    trig_config = config.get("triggers", {})
-    lo = trig_config.get("floor_min_min", 10)
-    hi = trig_config.get("floor_max_min", 55)
-    draw = rng.uniform(lo, hi) if minutes is None else minutes
-    return now + timedelta(minutes=draw)

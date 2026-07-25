@@ -24,8 +24,7 @@ import sys
 import time
 from datetime import datetime, timezone
 
-from cortex import config, db, transcript, wake_state, window
-from cortex.pacemaker import integration
+from cortex import config, db, occupancy, transcript, wake_state, window
 
 
 def _pid_alive(pid: int | None) -> bool:
@@ -492,7 +491,7 @@ def run(cfg: dict) -> int:
         # wake's Budget line; reuse `tokens` computed above (also drives fuse).
         conn = db.connect(cfg)
         try:
-            integration.store_window_tokens(conn, tokens)
+            occupancy.store_window_tokens(conn, tokens)
         finally:
             conn.close()
 
