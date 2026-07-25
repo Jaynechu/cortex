@@ -356,10 +356,10 @@ def test_two_consecutive_injections_second_diffs_against_first(awake_window):
 
 
 def test_stale_epoch_kick_round_does_not_advance_baseline(awake_window, monkeypatch):
-    """FIX 6: the diff baseline (last_note_ts) must advance ONLY after the
+    """FIX 6: the diff cursor (last_note_row_id) must advance ONLY after the
     injection commit + write succeed. If conditional_mutate raises (user
     returned = stale epoch) the injection is dropped, so its replay events must
-    stay replayable next round — last_note_ts unchanged, nothing written to
+    stay replayable next round — cursor unchanged, nothing written to
     wake_signal.log."""
     cfg = awake_window
     wake_state.update(cfg, user_replied_this_wake=True)
@@ -372,7 +372,7 @@ def test_stale_epoch_kick_round_does_not_advance_baseline(awake_window, monkeypa
         "VALUES ('s', '2026-07-08T03:00:00+00:00', 'user', 'unseen event', 'wx')")
     conn.commit()
     conn.close()
-    before = wake_state.get_last_note_ts(cfg)  # None (no note rendered yet)
+    before = wake_state.get_last_note_row_id(cfg)  # None (no note rendered yet)
     wake_state.mark_kick_round(cfg)
     # Simulate a user return between render and commit: conditional_mutate raises.
     def _stale(*a, **k):
@@ -380,12 +380,12 @@ def test_stale_epoch_kick_round_does_not_advance_baseline(awake_window, monkeypa
     monkeypatch.setattr(wake_state, "conditional_mutate", _stale)
     assert watchdog.silence_action(cfg, silent_min=0.0) is None  # dropped
     assert _signal_lines(cfg) == []  # nothing injected
-    assert wake_state.get_last_note_ts(cfg) == before  # baseline NOT advanced
+    assert wake_state.get_last_note_row_id(cfg) == before  # baseline NOT advanced
 
 
 def test_ear_delivery_and_baseline_advance_are_atomic_under_shared_lock(
         awake_window, monkeypatch):
-    """Dup-replay bug: the ear delivery and the last_note_ts advance must commit
+    """Dup-replay bug: the ear delivery and the cursor advance must commit
     together under the ONE advisory lock the marrow replay hook reads under
     (lock_path / _flock, byte-coupled with cortex_bridge._wake_state_lock).
 
@@ -446,8 +446,8 @@ def test_ear_delivery_and_baseline_advance_are_atomic_under_shared_lock(
     assert "[NEW ROUND]" in "\n".join(_signal_lines(cfg))
     assert "delivered row" in _staged(cfg)
     assert probe["lock_held_during_ear_write"] is True
-    # Baseline advanced in the same section -> no stale window for the reader.
-    assert wake_state.get_last_note_ts(cfg) == "2026-07-08T03:00:00+00:00"
+    # Cursor advanced in the same section -> no stale window for the reader.
+    assert wake_state.get_last_note_row_id(cfg) == 1
 
 
 # --- F9: ct-note claim tied to a VISIBLE round (death replay) ----------------
@@ -546,7 +546,7 @@ def test_failed_type_unstages_the_invisible_note(awake_window, monkeypatch):
     monkeypatch.setattr(watchdog, "_type_tuck_in_line", lambda c, line: False)
     assert watchdog.silence_action(cfg, silent_min=21.0) == "free-round appended"
     assert _staged(cfg) == ""
-    assert wake_state.get_last_note_ts(cfg) is None
+    assert wake_state.get_last_note_row_id(cfg) is None
 
 
 def _fresh_transcript(cfg):
@@ -742,7 +742,7 @@ def test_lie_down_double_fire_single_effect(awake_window, monkeypatch):
 def test_failed_typing_does_not_advance_baseline(awake_window, monkeypatch):
     """T11 P3: delivery is typed now, so 'written' no longer means 'delivered'.
     A typing failure (no resident window) must keep the round's events
-    replayable — last_note_ts stays where it was."""
+    replayable — the cursor stays where it was."""
     cfg = awake_window
     wake_state.update(cfg, user_replied_this_wake=True)
     conn = db.connect(cfg)
@@ -754,13 +754,13 @@ def test_failed_typing_does_not_advance_baseline(awake_window, monkeypatch):
         "VALUES ('s', '2026-07-08T03:00:00+00:00', 'user', 'unseen event', 'wx')")
     conn.commit()
     conn.close()
-    before = wake_state.get_last_note_ts(cfg)
+    before = wake_state.get_last_note_row_id(cfg)
 
     from cortex import window
     monkeypatch.setattr(window, "inject_prompt", lambda cfg_, text: False)
 
     assert watchdog.silence_action(cfg, silent_min=999.0) == "free-round appended"
-    assert wake_state.get_last_note_ts(cfg) == before  # nothing landed -> no advance
+    assert wake_state.get_last_note_row_id(cfg) == before  # nothing landed -> no advance
 
 
 def test_typing_raising_window_error_does_not_advance_baseline(
@@ -769,7 +769,7 @@ def test_typing_raising_window_error_does_not_advance_baseline(
     (not an exception out of the watchdog), and the baseline still holds."""
     cfg = awake_window
     wake_state.update(cfg, user_replied_this_wake=True)
-    before = wake_state.get_last_note_ts(cfg)
+    before = wake_state.get_last_note_row_id(cfg)
 
     from cortex import window
 
@@ -778,4 +778,4 @@ def test_typing_raising_window_error_does_not_advance_baseline(
     monkeypatch.setattr(window, "inject_prompt", _boom)
 
     assert watchdog.silence_action(cfg, silent_min=999.0) == "free-round appended"
-    assert wake_state.get_last_note_ts(cfg) == before
+    assert wake_state.get_last_note_row_id(cfg) == before

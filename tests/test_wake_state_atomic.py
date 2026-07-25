@@ -58,3 +58,35 @@ def test_lie_down_cli_requires_next_wake_min(cfg, monkeypatch):
     with pytest.raises(SystemExit) as exc:
         lie_down.main([])
     assert exc.value.code != 0
+
+
+def test_row_cursor_lifecycle_and_legacy_ts_erased(cfg):
+    """The row-id replay cursor follows the awake lifecycle: reset on wake-open,
+    popped on sleep. A state file still carrying the legacy `last_note_ts` has it
+    erased at wake-open so it can never shadow the fresh cursor."""
+    wake_state.update(cfg, last_note_ts="2026-07-08T03:00:00+00:00")
+    wake_state.set_awake(cfg, 1, None)
+    d = wake_state.load(cfg)
+    assert "last_note_ts" not in d
+    assert d["last_note_row_id"] is None
+
+    wake_state.set_last_note_row_id(cfg, 42)
+    assert wake_state.get_last_note_row_id(cfg) == 42
+
+    wake_state.clear_awake(cfg)
+    assert "last_note_row_id" not in wake_state.load(cfg)
+    assert wake_state.get_last_note_row_id(cfg) is None
+
+
+def test_deliver_then_advance_is_monotonic_on_row_ids(cfg):
+    """Numeric compare, not string: 9 -> 10 must advance, 10 -> 9 must not."""
+    wake_state.set_awake(cfg, 1, None)
+    wake_state.deliver_then_advance(cfg, lambda: True, 9)
+    assert wake_state.get_last_note_row_id(cfg) == 9
+    wake_state.deliver_then_advance(cfg, lambda: True, 10)
+    assert wake_state.get_last_note_row_id(cfg) == 10
+    wake_state.deliver_then_advance(cfg, lambda: True, 9)
+    assert wake_state.get_last_note_row_id(cfg) == 10
+    # a failed delivery never advances
+    wake_state.deliver_then_advance(cfg, lambda: False, 99)
+    assert wake_state.get_last_note_row_id(cfg) == 10

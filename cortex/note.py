@@ -415,27 +415,58 @@ def _strip_markers(text: str) -> str:
     return _MEDIA_TAG_RE.sub(" ", text).strip()
 
 
+def _since_row_id(conn: sqlite3.Connection, ws: dict) -> int | None:
+    """The replay cursor: `wake_state.last_note_row_id`, the events row id of the
+    last row a rendered note consumed. Shared byte-for-byte with the marrow replay
+    hook (hooks.py:_replay_cortex_since_row_id), so a turn delivered on either
+    side is never re-delivered by the other. `id` is AUTOINCREMENT insert order —
+    the true replay order — and, unlike a timestamp string, it tells two
+    same-second rows apart, so a real event landing in the same second as an
+    already-consumed row is never skipped.
+
+    Migration (one-time read): state carrying only the legacy `last_note_ts`
+    resolves to the newest row at-or-before that timestamp, so nothing already
+    shown re-appears and nothing unseen is skipped. None = no cursor yet (full
+    replay)."""
+    v = ws.get("last_note_row_id")
+    if isinstance(v, int):
+        return v
+    since_ts = ws.get("last_note_ts")
+    if not since_ts:
+        return None
+    try:
+        row = conn.execute(
+            "SELECT MAX(id) AS id FROM events WHERE timestamp <= ?", (since_ts,)
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    return int(row["id"]) if row and row["id"] is not None else None
+
+
 def _replay(conn: sqlite3.Connection, cfg: dict, limit: int, per_chars: int,
-            since_ts: str | None = None) -> tuple[list[dict], str | None]:
+            since_row_id: int | None = None
+            ) -> tuple[list[dict], str | None, int | None]:
     """Fetch the replay events AND the exact cutoff of the RENDERED subset in a
-    single read. Returns (events, cutoff_ts).
+    single read. Returns (events, cutoff_ts, cutoff_row_id).
 
     events: last `limit` real user/assistant events (cross-session,
     chronological), each tagged [channel HH:mm] + role marker (N=user,
     Y=assistant) and capped at per_chars. Excludes role='tl' and cortex
     self-talk channels.
 
-    cutoff_ts: the max raw timestamp of the events actually returned, i.e. the
-    cutoff of exactly what was rendered — never a re-query of the newest event
-    overall. When more new rows exist than `limit`, the query keeps only the
+    cutoff_ts / cutoff_row_id: the max raw timestamp and the max row id of the
+    events actually returned, i.e. the cutoff of exactly what was rendered —
+    never a re-query of the newest event overall. cutoff_row_id is the cursor
+    the caller advances; cutoff_ts is display/staleness only. When more new rows
+    exist than `limit`, the query keeps only the
     newest `limit` (ORDER BY id DESC LIMIT), so cutoff is the newest of that
     rendered subset; older-but-still-new overflow rows below the limit are NOT
     covered by this cutoff and remain replayable on the next round (the caller
     that seeds/advances the baseline uses this cutoff, so overflow is never
-    skipped). When no eligible events are returned, cutoff_ts is None — the
+    skipped). When no eligible events are returned, both are None — the
     caller keeps the prior baseline (no advance, no rewind).
 
-    `since_ts` (diff mode, D6): only events with timestamp > since_ts — a
+    `since_row_id` (diff mode, D6): only events with id > since_row_id — a
     free-round tuck-in replays what happened since the wake's last rendered
     note, not the whole wake. None = full replay (epoch zero / wake's initial
     note).
@@ -444,84 +475,104 @@ def _replay(conn: sqlite3.Connection, cfg: dict, limit: int, per_chars: int,
     own wake monologues (channel='ct') are excluded so the note does not replay
     itself. The excluded channel set is config-driven (note.replay_exclude_channels)."""
     if limit <= 0:
-        return [], None
+        return [], None, None
     exclude = _replay_exclude_channels(cfg)
     placeholders = ",".join("?" for _ in exclude) if exclude else ""
     where_channel = (
         f" AND COALESCE(channel,'') NOT IN ({placeholders})" if exclude else "")
-    where_since = " AND timestamp > ?" if since_ts else ""
-    params = (*exclude, *((since_ts,) if since_ts else ()), limit)
+    where_since = " AND id > ?" if since_row_id is not None else ""
+    params = (*exclude, *((since_row_id,) if since_row_id is not None else ()),
+              limit)
     try:
         rows = conn.execute(
-            "SELECT role, content, timestamp, channel FROM events "
+            "SELECT id, role, content, timestamp, channel FROM events "
             "WHERE role IN ('user', 'assistant')" + where_channel + where_since
             + " ORDER BY id DESC LIMIT ?",
             params,
         ).fetchall()
     except sqlite3.OperationalError:
-        return [], None
+        return [], None, None
     events = []
     cutoff_ts: str | None = None
+    cutoff_row_id: int | None = None
     for row in reversed(rows):  # chronological
         ts = row["timestamp"]
         content = _strip_markers(row["content"])
         if not content:
             continue
-        # Cutoff tracks the max ts of the RENDERED subset only. Rows are the
+        # Cutoff tracks the max ts/id of the RENDERED subset only. Rows are the
         # newest `limit` (ORDER BY id DESC LIMIT), reversed to chronological, so
-        # the last kept row carries the newest ts. Guard on value in case of
+        # the last kept row carries the newest id. Guard on value in case of
         # non-monotonic ts across the window.
         if ts and (cutoff_ts is None or ts > cutoff_ts):
             cutoff_ts = ts
+        if cutoff_row_id is None or row["id"] > cutoff_row_id:
+            cutoff_row_id = row["id"]
         events.append({
             "channel": row["channel"] or "?",
             "hm": _local_hm(ts, cfg) if ts else "??:??",
             "role": "N" if row["role"] == "user" else "Y",
             "content": _truncate(content, per_chars),
         })
-    return events, cutoff_ts
+    return events, cutoff_ts, cutoff_row_id
 
 
 def _replay_events(conn: sqlite3.Connection, cfg: dict, limit: int, per_chars: int,
-                   since_ts: str | None = None) -> list[dict]:
-    """Thin wrapper: the rendered replay events only (drops the cutoff). See
+                   since_row_id: int | None = None) -> list[dict]:
+    """Thin wrapper: the rendered replay events only (drops the cutoffs). See
     `_replay` for the full contract."""
-    return _replay(conn, cfg, limit, per_chars, since_ts)[0]
+    return _replay(conn, cfg, limit, per_chars, since_row_id)[0]
 
 
 _OMITTED = object()
 
 
 def seed_baseline(conn: sqlite3.Connection, cfg: dict,
-                  cutoff_ts=_OMITTED) -> None:
-    """Seed the diff-mode replay baseline (wake_state.last_note_ts) so the FIRST
+                  cutoff_row_id=_OMITTED) -> None:
+    """Seed the diff-mode replay cursor (wake_state.last_note_row_id) so the FIRST
     free-round tuck-in diffs from the wake-open moment, not epoch zero (D6:
     baseline = the wake's initial note). Called once per wake AFTER set_awake
-    (which resets last_note_ts=None).
+    (which resets last_note_row_id=None).
 
-    `cutoff_ts` (P2-A): the replay cutoff captured when the wake's initial note
+    `cutoff_row_id` (P2-A): the replay cutoff captured when the wake's initial note
     was assembled. Semantics by value:
-      - a truthy ts  -> seed that ts verbatim (the baseline must be EXACTLY the
+      - a row id -> seed that id verbatim (the cursor must be EXACTLY the
         cutoff of what was rendered, never a later re-query that could race in an
         event the note never showed and drop it from the first free-round).
       - explicit None -> the assembled note had ZERO eligible replay events; seed
-        NOTHING, keep the baseline as-is (#2). run_wake always passes the note's
+        NOTHING, keep the cursor as-is (#2). run_wake always passes the note's
         captured cutoff, so None here is a valid empty note, NOT an omitted arg.
       - OMITTED (arg not passed) -> legacy / test callers with no captured cutoff;
-        fall back to a fresh _latest_replay_ts query.
+        fall back to a fresh _latest_replay_row_id query.
 
     No-op when there is nothing to seed. Never raises — a failed seed just falls
     back to full replay on the first free-round."""
     try:
         from cortex import wake_state
-        if cutoff_ts is _OMITTED:
-            latest_ts = _latest_replay_ts(conn, cfg)
+        if cutoff_row_id is _OMITTED:
+            latest = _latest_replay_row_id(conn, cfg)
         else:
-            latest_ts = cutoff_ts
-        if latest_ts:
-            wake_state.set_last_note_ts(cfg, latest_ts)
+            latest = cutoff_row_id
+        if latest is not None:
+            wake_state.set_last_note_row_id(cfg, latest)
     except Exception:
         pass
+
+
+def _latest_replay_row_id(conn: sqlite3.Connection, cfg: dict) -> int | None:
+    """events.id of the most recent non-ct user/assistant event, or None."""
+    exclude = _replay_exclude_channels(cfg)
+    ph = ",".join("?" for _ in exclude) if exclude else ""
+    where_ch = f" AND COALESCE(channel,'') NOT IN ({ph})" if exclude else ""
+    try:
+        row = conn.execute(
+            "SELECT MAX(id) as id FROM events "
+            "WHERE role IN ('user', 'assistant')" + where_ch,
+            (*exclude,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return None
+    return int(row["id"]) if row and row["id"] is not None else None
 
 
 def _latest_replay_ts(conn: sqlite3.Connection, cfg: dict) -> str | None:
@@ -632,7 +683,7 @@ def gather(
     re-set after this note is written. awake_since still comes from wake_state.
 
     `advance_baseline` (default False): move the diff-mode replay baseline
-    (wake_state.last_note_ts) to the newest eligible event. ONLY the free-round
+    (wake_state.last_note_row_id) to the newest eligible event. ONLY the free-round
     tuck-in path passes True — each free-round consumes the events it showed so
     the next one diffs from here. Every render-only path (marrow render_module /
     --print-note / any SessionStart re-render) MUST leave this False, else a
@@ -677,16 +728,16 @@ def gather(
         except (TypeError, ValueError):
             pass
     # Diff mode (D6): replay only events newer than the last rendered note this
-    # wake (last_note_ts). Absent (wake's initial note, or wake_state load
+    # wake (last_note_row_id). Absent (wake's initial note, or wake_state load
     # failed) -> full replay, same as before this refactor. `full_replay` forces
     # a full (non-diff) render for the on-disk mirror without touching baseline.
-    note_since_ts = None if full_replay else ws.get("last_note_ts")
-    replay, rendered_cutoff = _safe(
+    note_since_row_id = None if full_replay else _safe(_since_row_id, conn, ws)
+    replay, rendered_cutoff, rendered_cutoff_row_id = _safe(
         _replay, conn, cfg,
         ncfg.get("replay_events", 4),
         ncfg.get("replay_event_chars", 300),
-        note_since_ts,
-        default=([], None),
+        note_since_row_id,
+        default=([], None, None),
     )
     replay_stale = False
     if last_wake:
@@ -710,7 +761,7 @@ def gather(
                         replay_stale = _parse_utc(latest_ts) < last_wake_dt
                     except (TypeError, ValueError):
                         pass
-            elif note_since_ts is None and rendered_cutoff:
+            elif note_since_row_id is None and rendered_cutoff:
                 # Initial-wake FULL replay (no diff baseline yet): _replay applied
                 # no since filter, so it can return events that all PREDATE this
                 # wake. Their newest (rendered_cutoff) older than the prior wake =
@@ -721,20 +772,22 @@ def gather(
                         replay_stale = True
                 except (TypeError, ValueError):
                     pass
-    # The replay cutoff this render actually used: the max ts of the RENDERED
-    # subset (rendered_cutoff), or the diff baseline it started from when nothing
+    # The replay cutoff this render actually used: the max row id of the RENDERED
+    # subset (rendered_cutoff_row_id), or the cursor it started from when nothing
     # new was rendered. Derived from the same read as `replay` — never a separate
     # re-query, which could race in an event this note never showed and then drop
     # it from the next round (P2-A / P2-B / #1). With more new rows than the render
-    # limit, rendered_cutoff is the newest of the rendered subset only, so overflow
-    # rows below the limit stay > baseline and replay next round (never skipped).
-    replay_cutoff_ts = rendered_cutoff or note_since_ts
-    # Advance the diff-mode baseline to the cutoff of what was rendered, so the
+    # limit, the cutoff is the newest of the rendered subset only, so overflow
+    # rows below the limit stay > cursor and replay next round (never skipped).
+    replay_cutoff_row_id = (rendered_cutoff_row_id if rendered_cutoff_row_id
+                            is not None else note_since_row_id)
+    # Advance the diff-mode cursor to the cutoff of what was rendered, so the
     # NEXT free-round tuck-in diffs from here. Monotonic: only moves forward.
     # Gated on advance_baseline: render-only callers never write it.
-    if advance_baseline and rendered_cutoff and (
-            not note_since_ts or rendered_cutoff > note_since_ts):
-        _safe(wake_state.set_last_note_ts, cfg, rendered_cutoff)
+    if advance_baseline and rendered_cutoff_row_id is not None and (
+            note_since_row_id is None
+            or rendered_cutoff_row_id > note_since_row_id):
+        _safe(wake_state.set_last_note_row_id, cfg, rendered_cutoff_row_id)
 
     # Kick reason flags (cortex.kick): plain lines (no header). Pending-visible:
     # peek (render, no clear) on any read; settle (clear) only when an injection
@@ -762,7 +815,7 @@ def gather(
         ct_notes = _peek_ct_notes(cfg, conn)
 
     return {
-        "replay_cutoff_ts": replay_cutoff_ts,
+        "replay_cutoff_row_id": replay_cutoff_row_id,
         "kick_reasons": kick_reasons,
         "receipts": receipts,
         "ct_notes": ct_notes,

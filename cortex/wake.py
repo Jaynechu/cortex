@@ -65,15 +65,15 @@ def assemble_note(conn: sqlite3.Connection, cfg: dict, now: datetime,
     """Thin wrapper: gather() + render(). `fresh`/`wake_kind` gate the handoff
     section — only a fresh window (rotate) receives it.
 
-    `return_cutoff` (default False): return (text, replay_cutoff_ts) instead of
-    just text. The cutoff is the replay ts this note was built on, captured at
+    `return_cutoff` (default False): return (text, replay_cutoff_row_id) instead
+    of just text. The cutoff is the replay row id this note was built on, captured at
     assembly so the D6 wake-open seed anchors to exactly what was rendered — not
     a later re-query that could race in an event this note never showed."""
     data = note.gather(conn, cfg, now, decision=decision,
                        fresh=fresh, wake_kind=wake_kind, consume_kick=True)
     text = note.render(cfg, now, data)
     if return_cutoff:
-        return text, data.get("replay_cutoff_ts")
+        return text, data.get("replay_cutoff_row_id")
     return text
 
 
@@ -915,13 +915,13 @@ def run_wake(
             timer.mark("wake_complete")
             return win
         if win is not None:
-            # D6 seed: set_awake (inside _window_wake) just reset last_note_ts to
+            # D6 seed: set_awake (inside _window_wake) just reset last_note_row_id to
             # None. Anchor the diff-mode baseline to the cutoff captured when the
             # DELIVERED note was assembled (P2-A) — not a fresh query after the
             # ~90s window spawn, which would race in an event absent from the note
             # and drop it from the first free-round.
             seed_cutoff = window_cutoff
-            note.seed_baseline(conn, cfg, cutoff_ts=seed_cutoff)
+            note.seed_baseline(conn, cfg, cutoff_row_id=seed_cutoff)
             timer.mark("window_injected")
             timer.mark("wake_complete")
             return win

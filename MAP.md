@@ -60,7 +60,7 @@ wake daemon (launchd KeepAlive, always on) ──reconcile (60s cadence)──�
 - respawn(cfg, initial_prompt, resume_sid): _spawn + persist sid. Old window left OPEN, old claude NOT killed (rotate: predecessor stays for user to close; resume: nothing to kill). Silent — say() is sole attention-getter.
 - find_claude_pid: session tty → ps exact-match, fallback pgrep -x + cwd filter; 0 or >1 → None never guess (window.py:388-459). hard_interrupt = SIGINT on that pid only (462-473).
 ### wake_state.json (`wake_state.py`)
-- Keys: awake set = awake/awake_since/wake_log_id/transcript/user_replied_this_wake/tuck_pending/last_note_ts/kick_round (cleared together by clear_awake/claim_lie_down).
+- Keys: awake set = awake/awake_since/wake_log_id/transcript/user_replied_this_wake/tuck_pending/last_note_row_id/kick_round (cleared together by clear_awake/claim_lie_down).
 - tuck_pending = "last free-round injection at" ISO ts (silence-cycle carrier; legacy field name).
 - Also: session id; rotated (read-and-clear via take_rotated).
 - cli shell only. Non-cli shells keep their own ledger at `<paths.shell_state_dir>/<shell>.json` (config.py:373, mirror of marrow [cortex].shell_state_dir), written by that shell's host — this file is never shared.
@@ -75,7 +75,7 @@ wake daemon (launchd KeepAlive, always on) ──reconcile (60s cadence)──�
 - Silence loop (silence_action, watchdog.py:394-485, shared by watchdog.run + _handle_awake + daemon business): every silent_max_min (20) of user silence → inject one free-round block → re-arm the SAME timer from that instant → repeat forever. The session stays up until it calls lie_down itself.
 - Silence basis (wake_state.silence_basis_min): newest of the transcript read and the hook-stamped `last_user_msg_ts`, else awake_since when the user never spoke this wake. The transcript lags the marrow hook, which drops tuck_pending in the same write — transcript-only re-fires a round on top of the user's own message.
 - tuck_pending (last-fire marker) is stamped under the epoch lock BEFORE delivery, so an esc-interrupted or failed injection is still consumed (no retry, no re-fire inside the window).
-- Free-round round = the SHORT tuck_in_text `[NEW ROUND]` line is the ONLY thing typed; the diff-mode note (events since wake_state.last_note_ts) is staged to `wake_state.free_round_note_path` (`[paths].free_round_note_file`, default <home>/free_round_note.md) and injected INVISIBLY by the marrow hook on that marker turn (read+consume, TTL = receipt_ttl_min) — same bell→note chain (`[wake].free_round_note` toggle, watchdog.py:_build_tuck_in_line/_deliver_free_round). Staging APPENDS (the ct-note round types a second marker right after) and a failed type un-stages, so no orphan payload and FIX 6 holds (baseline advances only after the marker landed).
+- Free-round round = the SHORT tuck_in_text `[NEW ROUND]` line is the ONLY thing typed; the diff-mode note (events since wake_state.last_note_row_id) is staged to `wake_state.free_round_note_path` (`[paths].free_round_note_file`, default <home>/free_round_note.md) and injected INVISIBLY by the marrow hook on that marker turn (read+consume, TTL = receipt_ttl_min) — same bell→note chain (`[wake].free_round_note` toggle, watchdog.py:_build_tuck_in_line/_deliver_free_round). Staging APPENDS (the ct-note round types a second marker right after) and a failed type un-stages, so no orphan payload and FIX 6 holds (baseline advances only after the marker landed).
 - ct notes (F9) ride the same invisible chain: claimed AFTER the first round commits, staged, second short marker typed (_deliver_ct_notes).
 - tuck_in_text MUST carry the `[NEW ROUND]` marker: an unmarked line counts as user speech and resets the cycle it just armed (perpetual-loop trap).
 - No-user wake → silent_min timed from awake_since (no user-message ts to derive it from), same bar.
@@ -98,7 +98,7 @@ wake daemon (launchd KeepAlive, always on) ──reconcile (60s cadence)──�
 - Sections: header Now/Plan Used/Active [+ force_slept] · Pending self-schedule (note.pending_window_min 15).
 - Replay (note.replay_events 4, marker-stripped, 300ch) · turn_end_text (default "") · title prefix. "Wake:" reason line retired.
 - Replay excludes the rendering shell's OWN channel: `note_render --shell <id>` picks note.shell_replay_exclude[id] (cli→ct, tg→tg); no --shell falls back to note.replay_exclude_channels.
-- Diff mode: replay filters events newer than wake_state.last_note_ts (baseline = wake's initial note); every gather() advances it to the newest eligible event (note.py:359-374).
+- Diff mode: replay filters events by `id > wake_state.last_note_row_id` (baseline = wake's initial note; row id is AUTOINCREMENT insert order, so same-second rows are never skipped); every gather() advances it to the newest eligible row id. Legacy `last_note_ts` state migrates once via MAX(id) WHERE timestamp <= ts (note.py:_since_row_id) and is erased at the next wake-open.
 - Budget line (note.py:449-475): `Plan Used: 5h X% | 7d Y% | <label> Today Nk/Mk P% | Net Session Token: Wk`. 5h/7d from ct_rate_limit kv. One line per shell, label-first, note.shell_labels (Cortex-Cli / Cortex-Tg).
 - Cortex Today via note._today_tokens (delegates to integration._today_tokens, parity by construction).
 - Net Session = window_tokens key from ct_pacemaker_state (label kept for marrow parity, not net spend).
