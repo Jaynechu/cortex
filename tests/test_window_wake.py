@@ -139,8 +139,9 @@ def test_clear_due_self_schedule_bare_dict(cfg):
 
 def test_window_wake_alive_types_bell(cfg, monkeypatch):
     """Alive resident window: _window_wake writes the note file, TYPES ONE bell
-    line (no respawn, no note-as-prompt), captures the wake row id, sets the
-    awake marker, and lights the watchdog — verified without osascript."""
+    line (no respawn, no note-as-prompt), logs its own fresh wake row (never
+    adopting an unrelated pre-existing one), sets the awake marker, and lights
+    the watchdog — verified without osascript."""
     from cortex import wake, watchdog, window
 
     conn = db.connect(cfg)
@@ -148,7 +149,7 @@ def test_window_wake_alive_types_bell(cfg, monkeypatch):
         "INSERT INTO ct_wake_log (ts, wake, dry_run, explanation) VALUES (?,1,0,?)",
         (db.utcnow_iso(), "dispatch"))
     conn.commit()
-    wid = conn.execute("SELECT MAX(id) AS id FROM ct_wake_log").fetchone()["id"]
+    old_wid = conn.execute("SELECT MAX(id) AS id FROM ct_wake_log").fetchone()["id"]
 
     calls = {}
     monkeypatch.setattr(wake, "_window_alive", lambda c: True)
@@ -161,7 +162,8 @@ def test_window_wake_alive_types_bell(cfg, monkeypatch):
     monkeypatch.setattr(watchdog, "spawn", lambda c: calls.setdefault("watchdog", True))
 
     from datetime import datetime as _dt
-    res = wake._window_wake(conn, cfg, "NOTE-BODY", _dt.now(timezone.utc))
+    res = wake._window_wake(conn, cfg, "NOTE-BODY", _dt.now(timezone.utc),
+                            wake_reasons="user")
     conn.close()
     assert res == {"mode": "window", "session_id": None, "text": None}
     assert "respawn" not in calls               # live window is not respawned
@@ -170,7 +172,8 @@ def test_window_wake_alive_types_bell(cfg, monkeypatch):
     # note file written with the note body
     assert wake_state.wakeup_note_path(cfg).read_text() == "NOTE-BODY"
     d = wake_state.load(cfg)
-    assert d["awake"] is True and d["wake_log_id"] == wid
+    assert d["awake"] is True
+    assert d["wake_log_id"] is not None and d["wake_log_id"] != old_wid
 
 
 def test_window_wake_respawn_delivers_note_as_prompt(cfg, monkeypatch):
@@ -186,7 +189,7 @@ def test_window_wake_respawn_delivers_note_as_prompt(cfg, monkeypatch):
         "INSERT INTO ct_wake_log (ts, wake, dry_run, explanation) VALUES (?,1,0,?)",
         (db.utcnow_iso(), "respawn"))
     conn.commit()
-    wid = conn.execute("SELECT MAX(id) AS id FROM ct_wake_log").fetchone()["id"]
+    old_wid = conn.execute("SELECT MAX(id) AS id FROM ct_wake_log").fetchone()["id"]
 
     calls = {}
     monkeypatch.setattr(window, "respawn",
@@ -201,7 +204,7 @@ def test_window_wake_respawn_delivers_note_as_prompt(cfg, monkeypatch):
 
     from datetime import datetime as _dt
     now = _dt.now(timezone.utc)
-    res = wake._window_wake(conn, cfg, "N", now, respawn=True)
+    res = wake._window_wake(conn, cfg, "N", now, respawn=True, wake_reasons="ctl")
     conn.close()
     assert res["mode"] == "window"
     # Visible baked prompt = human text only (template) — no marker/token on
@@ -222,7 +225,8 @@ def test_window_wake_respawn_delivers_note_as_prompt(cfg, monkeypatch):
     assert "signal" not in calls                # fresh path never types a bell
     assert calls["watchdog"] is True
     d = wake_state.load(cfg)
-    assert d["awake"] is True and d["wake_log_id"] == wid
+    assert d["awake"] is True
+    assert d["wake_log_id"] is not None and d["wake_log_id"] != old_wid
 
 
 def test_window_wake_ear_epoch_reject_writes_no_phantom_row(cfg, monkeypatch):
@@ -291,17 +295,16 @@ def test_bind_wake_log_id_stale_token_inserts_nothing(cfg, monkeypatch):
 
 
 def test_bind_wake_log_id_racing_scheduled_wake_cannot_adopt(cfg, monkeypatch):
-    """Adoption hole (codex gate): a racing SCHEDULED wake (wake_reasons=None,
-    reuses the latest decision row via _latest_wake_log_id) must never adopt a
-    row from an in-flight ear activation. _latest_wake_log_id is scoped to
-    explanation IS NOT NULL (only run_tick's write_wake_log sets it) so an
-    activation row (no explanation) is invisible to that reuse — the winner
-    (ear activation, token still current) gets its own valid row id; the
-    scheduled wake reuses ONLY the genuine decision row, never the winner's."""
+    """Adoption hole (codex gate): an in-flight ear activation must get its OWN
+    fresh row, never adopting an unrelated pre-existing wake=1 row (e.g. an old
+    row left with an `explanation` set). A separate _wake_log_id call with a
+    falsy wake_reasons (not a live path -- every real producer passes a
+    truthy tag) must likewise never adopt either existing row; it logs its own
+    tagged "unknown" row instead."""
     from cortex import wake, wake_state
 
     conn = db.connect(cfg)
-    # The pacemaker decision row a scheduled wake would normally reuse.
+    # A pre-existing unrelated wake=1 row (old-style explanation column set).
     decision_id = conn.execute(
         "INSERT INTO ct_wake_log (ts, wake, dry_run, explanation) VALUES (?,1,0,?)",
         (db.utcnow_iso(), "14:00 floor check due")).lastrowid
@@ -320,12 +323,11 @@ def test_bind_wake_log_id_racing_scheduled_wake_cannot_adopt(cfg, monkeypatch):
     assert ear_wid is not None and ear_wid != decision_id
     assert {r["id"] for r in rows} == {decision_id, ear_wid}
 
-    # A scheduled wake racing in now (wake_reasons=None) must reuse ONLY the
-    # genuine decision row -- never adopt the ear activation's row.
+    # A falsy wake_reasons arrival must never adopt either existing row -- it
+    # logs its own tagged "unknown" row instead.
     scheduled_wid = wake._wake_log_id(conn, now, None)
     conn.close()
-    assert scheduled_wid == decision_id
-    assert scheduled_wid != ear_wid
+    assert scheduled_wid not in (decision_id, ear_wid)
 
 
 def test_bind_wake_log_id_fails_fast_under_db_write_contention(cfg, monkeypatch):
@@ -439,7 +441,7 @@ def test_window_wake_ear_miss_alive_types_rearm_not_respawn(cfg, monkeypatch):
         "INSERT INTO ct_wake_log (ts, wake, dry_run, explanation) VALUES (?,1,0,?)",
         (db.utcnow_iso(), "rearm"))
     conn.commit()
-    wid = conn.execute("SELECT MAX(id) AS id FROM ct_wake_log").fetchone()["id"]
+    old_wid = conn.execute("SELECT MAX(id) AS id FROM ct_wake_log").fetchone()["id"]
 
     calls = {"respawn": 0}
     typed = []
@@ -455,13 +457,15 @@ def test_window_wake_ear_miss_alive_types_rearm_not_respawn(cfg, monkeypatch):
     monkeypatch.setattr(watchdog, "spawn", lambda c: None)
 
     from datetime import datetime as _dt
-    res = wake._window_wake(conn, cfg, "N", _dt.now(timezone.utc))
+    res = wake._window_wake(conn, cfg, "N", _dt.now(timezone.utc), wake_reasons="user")
     conn.close()
     assert res["mode"] == "window"
     assert calls["respawn"] == 0   # alive window is NOT respawned
     assert len(typed) == 2         # first bell (with epoch token), then the retype
     assert typed[0] is not None and typed[1] is None
-    assert wake_state.load(cfg)["awake"] is True and wake_state.load(cfg)["wake_log_id"] == wid
+    d = wake_state.load(cfg)
+    assert d["awake"] is True
+    assert d["wake_log_id"] is not None and d["wake_log_id"] != old_wid
 
 
 def test_window_wake_ear_miss_dead_respawns(cfg, monkeypatch):

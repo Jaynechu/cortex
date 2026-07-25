@@ -12,7 +12,8 @@ TZ = timezone(timedelta(hours=10))
 DAY1 = datetime(2026, 7, 3, 21, 0, tzinfo=TZ)
 DAY2 = datetime(2026, 7, 4, 9, 0, tzinfo=TZ)
 
-DECISION = {"wake": True, "reasons": [], "gated_by": [], "explanation": "test wake"}
+DECISION = {"wake": True, "reasons": [], "gated_by": [], "explanation": "test wake",
+            "wake_reasons": "ctl"}
 
 
 @pytest.fixture(autouse=True)
@@ -453,22 +454,24 @@ def test_wake_log_id_writes_fresh_row_for_non_tick_wake(marrow_conn):
     assert rows[-1]["reasons"] == "user"
 
 
-def test_wake_log_id_reuses_latest_for_scheduled(marrow_conn):
-    """Scheduled wake (wake_reasons=None): reuse the decision row run_tick already
-    wrote (explanation set -- only write_wake_log sets it, the discriminator
-    _latest_wake_log_id scopes on to avoid adopting a different actor's
-    activation row) — no duplicate activation row."""
+def test_wake_log_id_falsy_reasons_logs_unknown_row(marrow_conn):
+    """Falsy wake_reasons is not a live path (every real run_wake producer
+    passes a truthy tag -- ctl/reconcile/user/rotate), but the chokepoint
+    must never adopt an unrelated pre-existing wake=1 row for it; it logs its
+    own fresh row tagged 'unknown' instead."""
     ts = DAY1.astimezone(timezone.utc).isoformat()
     marrow_conn.execute(
         "INSERT INTO ct_wake_log (ts, wake, dry_run, reasons, explanation) "
         "VALUES (?, 1, 0, 'floor', '14:00 floor check due')",
         (ts,))
     marrow_conn.commit()
-    scheduled_id = _wake_rows(marrow_conn)[0]["id"]
+    old_id = _wake_rows(marrow_conn)[0]["id"]
 
     wid = wake._wake_log_id(marrow_conn, DAY1, None)
-    assert wid == scheduled_id  # reused, not a new row
-    assert len(_wake_rows(marrow_conn)) == 1
+    assert wid != old_id  # never adopts the unrelated old row
+    rows = _wake_rows(marrow_conn)
+    assert len(rows) == 2
+    assert rows[-1]["reasons"] == "unknown"
 
 
 def test_main_print_note_no_marrow_call(monkeypatch, marrow_conn, wcfg, capsys):
@@ -513,12 +516,13 @@ def test_headless_wake_with_reasons_logs_activation_row(marrow_conn, wcfg):
     assert [r["reasons"] for r in rows] == ["ctl"]
 
 
-def test_headless_wake_scheduled_no_reasons_writes_no_row(marrow_conn, wcfg):
-    """Counterpart: a pacemaker-decided wake (wake_reasons absent/None) reuses
-    run_tick's own decision row -> the headless path must not write a second
-    one (no duplicate wake=1 rows for a scheduled wake)."""
+def test_headless_wake_no_reasons_writes_no_row(marrow_conn, wcfg):
+    """Counterpart: a decision without a wake_reasons tag (defensive case --
+    no live producer omits one) must not write a headless activation row;
+    run_wake never invents a tag on its own."""
     caller = FakeCaller()
-    wake.run_wake(marrow_conn, wcfg, DECISION, now=DAY1, caller=caller)
+    untagged = {**DECISION, "wake_reasons": None}
+    wake.run_wake(marrow_conn, wcfg, untagged, now=DAY1, caller=caller)
 
     n = marrow_conn.execute(
         "SELECT COUNT(*) AS n FROM ct_wake_log WHERE wake=1").fetchone()["n"]

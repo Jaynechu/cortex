@@ -164,45 +164,21 @@ def _render_daybrief(cfg: dict) -> None:
         pass
 
 
-def _latest_wake_log_id(conn: sqlite3.Connection) -> int | None:
-    """Latest PACEMAKER DECISION row (wake=1), never an activation row from a
-    different in-flight actor. Scoped on `explanation IS NOT NULL`: only
-    run_tick's write_wake_log sets that column (every decision carries one);
-    log_activation_wake_row never does. Without this scope, a scheduled wake
-    racing an ear/user/ctl activation could adopt the OTHER actor's just-
-    inserted row via this "latest wake=1" query — a real adoption hole (the
-    activation's own bind would then either double-bind the same row to two
-    wakes, or lose it if the activation's compensating cleanup ever deleted
-    a row the adopter now depends on)."""
-    row = conn.execute(
-        "SELECT id FROM ct_wake_log WHERE wake = 1 AND explanation IS NOT NULL "
-        "ORDER BY id DESC LIMIT 1"
-    ).fetchone()
-    return row["id"] if row else None
-
-
 def _wake_log_id(conn: sqlite3.Connection, now: datetime,
                  wake_reasons: str | None) -> int | None:
     """The single chokepoint every UNCONDITIONAL set_awake caller uses to bind
     its wake row (fresh spawn / resume / rearm — none of these have a reject
-    path, so insert-then-bind can never race a losing epoch check). A
-    pacemaker-decided wake (`wake_reasons` None) reuses the decision row
-    run_tick already wrote (its latest wake=1 row WITH an explanation — see
-    _latest_wake_log_id). Every non-tick wake (user / ctl / reconcile / rotate
-    — `wake_reasons` set) writes its OWN activation row so the wakeup note's
-    "Last wake" segment counts it. Both feed the same wake_log_id lie_down
-    later updates with tokens/force_slept, so accounting is unchanged. Falls
-    back to the latest decision row if the fresh insert failed.
+    path, so insert-then-bind can never race a losing epoch check). Every
+    caller (user / ctl / reconcile / rotate) writes its OWN activation row so
+    the wakeup note's "Last wake" segment counts it. `wake_reasons` is truthy
+    on every live caller; a falsy arrival is tagged "unknown" rather than
+    crashing.
 
     The ear path (the one set_awake call with a real conditional reject,
     expected_gen) does NOT use this — see _bind_wake_log_id, which makes the
     insert + bind one atomic locked step so a losing race never leaves an
     orphan row to clean up."""
-    if wake_reasons:
-        wid = occupancy.log_activation_wake_row(conn, now, wake_reasons)
-        if wid is not None:
-            return wid
-    return _latest_wake_log_id(conn)
+    return occupancy.log_activation_wake_row(conn, now, wake_reasons or "unknown")
 
 
 _BIND_INSERT_BUSY_TIMEOUT_MS = 500
@@ -210,58 +186,39 @@ _BIND_INSERT_BUSY_TIMEOUT_MS = 500
 
 def _resolve_wake_log_id_fast_fail(conn: sqlite3.Connection, now: datetime,
                                    wake_reasons: str | None) -> int | None:
-    """The full _wake_log_id sequence (insert-or-reuse), but with the shared
-    connection's busy_timeout temporarily dropped to ~500ms for every DB
-    statement here (restored after, success or failure, so every OTHER caller
-    of the same `conn` keeps the normal 30s default). Used ONLY inside
+    """The same log_activation_wake_row insert _wake_log_id makes, but with the
+    shared connection's busy_timeout temporarily dropped to ~500ms for the
+    insert (restored after, success or failure, so every OTHER caller of the
+    same `conn` keeps the normal 30s default). Used ONLY inside
     _bind_wake_log_id's locked closure — every DB statement there runs while
     _strict_flock is held, and the connection's real busy_timeout is 30s
-    (db.py connect_path); under write contention any one of them could hold
-    the lock up to 30s, starving competing set_awake/claim_lie_down callers
-    (5s deadline) into failing closed.
+    (db.py connect_path); under write contention the insert could hold the
+    lock up to 30s, starving competing set_awake/claim_lie_down callers (5s
+    deadline) into failing closed.
 
-    codex gate P1: when `wake_reasons` is set (an activation-tagged wake), a
-    FAILED insert must NEVER fall through to the decision-row reuse fallback
-    (_latest_wake_log_id) — that fallback is only for the scheduled
-    (wake_reasons=None) path. Under BEGIN IMMEDIATE contention the fallback
-    SELECT can still succeed (it's a read), so falling through would bind this
-    wake to an UNRELATED old pacemaker decision row; a later lie_down would
-    then overwrite THAT row's tokens/force_slept, corrupting a wake that
-    already happened. A failed insert also leaves an implicit transaction open
-    on `conn` (Python's sqlite3 begins one on the first DML, even a failing
-    one) — rolled back here (best-effort) so no open txn survives this call.
-
-    A contention miss on the activation path returns None outright (skip the
-    row this wake — best-effort accounting, never a reason to hold the state
-    lock longer or corrupt another wake's row)."""
+    A contention miss returns None outright (skip the row this wake —
+    best-effort accounting, never a reason to hold the state lock longer)."""
     try:
         prev_timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
     except sqlite3.Error:
         prev_timeout = None
     try:
         conn.execute(f"PRAGMA busy_timeout={_BIND_INSERT_BUSY_TIMEOUT_MS}")
-        if wake_reasons:
-            # log_activation_wake_row catches its own sqlite3.Error and
-            # returns None on failure rather than raising, so the failure
-            # signal here is the return value, not an exception. Either way,
-            # a failed insert must never fall through to the decision-row
-            # reuse fallback below (P1) — that reuse is scheduled-wake-only.
-            try:
-                wid = occupancy.log_activation_wake_row(conn, now, wake_reasons)
-            except sqlite3.Error:
-                wid = None
-            if wid is None:
-                # A failed/attempted insert can leave an implicit transaction
-                # open on `conn` (Python's sqlite3 begins one on the first DML,
-                # even a failing one) -- roll it back so no open txn survives
-                # this call. A no-op if nothing was ever opened.
-                with contextlib.suppress(sqlite3.Error):
-                    conn.rollback()
-            return wid
+        # log_activation_wake_row catches its own sqlite3.Error and returns
+        # None on failure rather than raising, so the failure signal here is
+        # the return value, not an exception.
         try:
-            return _latest_wake_log_id(conn)
+            wid = occupancy.log_activation_wake_row(conn, now, wake_reasons or "unknown")
         except sqlite3.Error:
-            return None
+            wid = None
+        if wid is None:
+            # A failed/attempted insert can leave an implicit transaction
+            # open on `conn` (Python's sqlite3 begins one on the first DML,
+            # even a failing one) -- roll it back so no open txn survives
+            # this call. A no-op if nothing was ever opened.
+            with contextlib.suppress(sqlite3.Error):
+                conn.rollback()
+        return wid
     finally:
         if prev_timeout is not None:
             with contextlib.suppress(sqlite3.Error):
