@@ -70,6 +70,7 @@ _GUARDED_PATH_FUNCS = [
     (config, "wake_audit_log_path"),
     (config, "handoff_path"),
     (config, "wake_timing_log_path"),
+    (config, "marrow_config_dir"),
     (wake_state, "wake_state_path"),
     (wake_state, "wakeup_note_path"),
     (wake_state, "watchdog_pidfile_path"),

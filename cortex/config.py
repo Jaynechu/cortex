@@ -300,6 +300,13 @@ def marrow_db_path(cfg: dict) -> Path:
     return Path(raw).expanduser() if raw else DEFAULT_MARROW_DB
 
 
+def marrow_config_dir(cfg: dict) -> Path:
+    """The shared marrow config/state dir (parent of marrow.db). Home of
+    config.toml, breaker.json and fuse_events.json — the cross-repo protocol
+    files cortex, marrow and the synapse bridges all read."""
+    return marrow_db_path(cfg).parent
+
+
 def user_name(cfg: dict, default: str = "the user") -> str:
     """The user's name, read from marrow's config.toml (sibling of cortex.toml in
     the shared config dir) — cortex inherits it, never carries its own copy (OSS:

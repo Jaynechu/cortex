@@ -33,7 +33,9 @@ from pathlib import Path
 
 from synapse_core.scheduler import Scheduler
 
-from cortex import config, db, occupancy, reconcile, transcript, wake_state
+from cortex import (
+    breaker, config, db, occupancy, reconcile, transcript, wake_state,
+)
 
 RECONCILE_SUFFIX = ".reconcile"
 
@@ -148,7 +150,7 @@ class WakeDaemon:
         """The pending business deadline; safety horizon when idle. An armed alarm
         IS the deadline — never min()'d with the idle cycle, which does not tick
         while an alarm stands. A target already in the past means the fire was
-        held (paused / gated / failed) — retry on the retry interval rather than
+        held (breaker / gated / failed) — retry on the retry interval rather than
         spinning."""
         try:
             st = wake_state.load(self.cfg)
@@ -199,8 +201,8 @@ class WakeDaemon:
         try:
             st = wake_state.load(cfg)
             snap_gen = st.get("gen") if isinstance(st.get("gen"), int) else None
-            if wake_state.is_paused(cfg):
-                return "paused (DND): reconcile + reaps + injections held"
+            if breaker.holds(cfg, self.shell):
+                return breaker.held_line(cfg, "reconcile + reaps + injections held")
             rc = reconcile._reconcile(conn, cfg, st, occupancy._now(cfg))
             if rc is not None:
                 return rc
@@ -214,8 +216,10 @@ class WakeDaemon:
         cfg = self.cfg
         if not config.shell_enabled(cfg, self.shell):
             return f"{self.shell} shell off ([core].shells): business skipped"
-        if wake_state.is_paused(cfg):
-            return "paused (DND): business deadline held"
+        if breaker.holds(cfg, self.shell):
+            # Held BEFORE _fire_wake consumes the alarm, so next_wake_at stands
+            # and fires on the first pass after the breaker clears.
+            return breaker.held_line(cfg, "business deadline held")
         st = wake_state.load(cfg)
         now = occupancy._now(cfg)
         reason = business_reason(cfg, st, now)

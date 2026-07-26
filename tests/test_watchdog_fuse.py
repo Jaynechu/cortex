@@ -11,6 +11,8 @@ def cfg(tmp_path):
     c = config.load(path=tmp_path / "absent.toml")
     c["paths"]["wake_state_file"] = str(tmp_path / "wake_state.json")
     c["paths"]["handoff_file"] = str(tmp_path / "handoff.md")
+    # Parent of marrow_db = the shared config dir (breaker.json / fuse_events.json).
+    c["paths"]["marrow_db"] = str(tmp_path / "marrow.db")
     c.setdefault("wake", {}).setdefault("watchdog", {})["fuse_handoff_grace_sec"] = 1.0
     return c
 

@@ -2,12 +2,16 @@
 ledger paths the wake daemon uses, so a human can drive the resident window by
 hand without racing the reconcile.
 
-  wake            immediate wake via the standard run_wake pipeline (alive
-                  resident -> ear signal; dead -> rotated?fresh:resume)
+  wake            clear the circuit breaker, then wake immediately via the
+                  standard run_wake pipeline (alive resident -> ear signal;
+                  dead -> rotated?fresh:resume)
   sleep           awake resident -> inject a lie_down instruction; else
                   (dead, or alive-but-dormant) set the ledger directly
-  pause           DND: hold daemon reconcile / watchdog reaps / injections
-  resume          leave DND; overdue ledger alarms fire on the next reconcile
+  pause           throw the circuit breaker: stop cortex autonomous activity
+                  (auto wake / spawn / fed round) for all shells, or one shell
+                  with --shell. Persistent across restarts.
+  resume          clear the breaker without waking
+  status          print the breaker + ledger state
 
 Each subcommand prints one human-readable result line.
 """
@@ -18,7 +22,7 @@ import sys
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from cortex import config, db, occupancy, wake_state, window
+from cortex import breaker, config, db, occupancy, wake_state, window
 
 
 def _now(cfg: dict) -> datetime:
@@ -27,15 +31,18 @@ def _now(cfg: dict) -> datetime:
 
 def cmd_wake(cfg: dict) -> str:
     from cortex.wake import run_wake, _window_alive
-    # A human explicitly waking wants activity back — clear DND first.
-    wake_state.set_paused(cfg, False)
+    # A human explicitly waking wants activity back — clear the WHOLE breaker
+    # first (both shells, auto or manual). No silent bypass: the state file
+    # never disagrees with what is actually running.
+    released = breaker.release(cfg)
+    prefix = "breaker cleared; " if released else ""
     # Already-on-duty guard (singleton invariant): a resident window that is both
     # alive AND awake is already on duty — re-driving run_wake would re-set_awake
     # and spawn a second watchdog. The live session already has the human's
     # attention; refuse rather than double-activate. (Alive-but-dormant still
     # wakes: that is the intended ear path below.)
     if _window_alive(cfg) and wake_state.is_awake(cfg):
-        return "wake: already awake on duty -> no-op (one resident)"
+        return f"{prefix}wake: already awake on duty -> no-op (one resident)"
     # Always drive the standard wake pipeline (run_wake -> _window_wake_plan
     # + _window_wake), including the alive-resident ear path: it renders a
     # fresh note, sets the awake marker and starts the watchdog, and falls
@@ -55,7 +62,7 @@ def cmd_wake(cfg: dict) -> str:
             wake_state.set_next_wake_at(
                 cfg, next_floor.isoformat() if next_floor else None)
         rotated = "fresh" if wake_state.load(cfg).get("rotated") else "resume/spawn"
-        return f"wake: {rotated} (mode={result.get('mode')})"
+        return f"{prefix}wake: {rotated} (mode={result.get('mode')})"
     finally:
         conn.close()
 
@@ -102,14 +109,76 @@ def cmd_sleep(cfg: dict, until: str | None, minutes: float | None, rotate: bool)
     return f"sleep: ledger set for {due.strftime('%H:%M')} (rotate={rotate})"
 
 
-def cmd_pause(cfg: dict) -> str:
-    wake_state.set_paused(cfg, True)
-    return "pause: DND on — tick reconcile, watchdog reaps and injections held"
+def _receipt(cfg: dict, message: str) -> None:
+    """Best-effort user-facing receipt for a manual breaker change: one pending
+    outbox note the tg bridge delivers. NO alert row — a manual pause is not an
+    incident (only an auto trip writes one)."""
+    try:
+        conn = db.connect(cfg)
+    except Exception:  # noqa: BLE001
+        return
+    try:
+        conn.execute(
+            "INSERT INTO outbox (from_sid, from_channel, target, body)"
+            " VALUES (?, ?, ?, ?)",
+            (None, "cortex", "tg", message),
+        )
+        conn.commit()
+    except Exception:  # noqa: BLE001 — a missing receipt must not fail the pause
+        pass
+    finally:
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def cmd_pause(cfg: dict, shell: str | None = None) -> str:
+    """Throw the breaker. Default scope "all" (both shells); --shell cli|tg
+    holds one. Persistent: only ct-wake / ctl resume releases it."""
+    scope = (shell or breaker.SCOPE_ALL).strip().lower()
+    state = breaker.pause(cfg, scope)
+    settings = breaker.settings(config.marrow_config_dir(cfg))
+    try:
+        message = str(settings["pause_message"]).format(scope=scope)
+    except (KeyError, IndexError, ValueError):
+        message = str(settings["pause_message"])
+    _receipt(cfg, message)
+    extra = ""
+    # Put the live cli window down through the SAME proxy path the watchdog fuse
+    # uses (lie_down -> clears awake, kills the watchdog, redraws the floor).
+    # The alarm it books cannot fire while the breaker stands.
+    if scope in (breaker.SCOPE_ALL, "cli") and wake_state.load(cfg).get("awake"):
+        from cortex import lie_down as lie_down_mod
+        try:
+            lie_down_mod.lie_down(cfg, force_slept="ct-pause")
+            extra = "; live cli window put down"
+        except Exception as e:  # noqa: BLE001 — the breaker stands regardless
+            extra = f"; live cli window still up ({e})"
+    return (f"pause: breaker ON scope={state['scope']} — cortex autonomous "
+            f"activity held until ct-wake{extra}")
 
 
 def cmd_resume(cfg: dict) -> str:
-    wake_state.set_paused(cfg, False)
-    return "resume: DND off — overdue ledger alarms fire on the next reconcile"
+    released = breaker.release(cfg)
+    if not released:
+        return "resume: breaker already clear — nothing held"
+    settings = breaker.settings(config.marrow_config_dir(cfg))
+    _receipt(cfg, str(settings["clear_message"]))
+    return "resume: breaker OFF — overdue ledger alarms fire on the next reconcile"
+
+
+def cmd_status(cfg: dict) -> str:
+    st = breaker.state(cfg)
+    if st is None:
+        line = "breaker: clear"
+    else:
+        line = (f"breaker: ON scope={st['scope']} reason={st['reason']} "
+                f"since={st['ts']}")
+    d = wake_state.load(cfg)
+    return (f"{line} | awake={bool(d.get('awake'))} "
+            f"next_wake_at={d.get('next_wake_at') or '-'} "
+            f"rotated={bool(d.get('rotated'))}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -121,8 +190,11 @@ def main(argv: list[str] | None = None) -> int:
     sp.add_argument("--min", dest="minutes", type=float, default=None,
                     help="minutes until next wake")
     sp.add_argument("--rotate", action="store_true", help="respawn fresh next wake")
-    sub.add_parser("pause", help="DND on")
-    sub.add_parser("resume", help="DND off")
+    pp = sub.add_parser("pause", help="breaker ON — stop cortex autonomous activity")
+    pp.add_argument("--shell", default=None, choices=["cli", "tg"],
+                    help="hold ONE shell only (default: all)")
+    sub.add_parser("resume", help="breaker OFF (without waking)")
+    sub.add_parser("status", help="breaker + ledger state")
     args = parser.parse_args(argv)
 
     cfg = config.load()
@@ -131,7 +203,9 @@ def main(argv: list[str] | None = None) -> int:
     elif args.cmd == "sleep":
         line = cmd_sleep(cfg, args.until, args.minutes, args.rotate)
     elif args.cmd == "pause":
-        line = cmd_pause(cfg)
+        line = cmd_pause(cfg, args.shell)
+    elif args.cmd == "status":
+        line = cmd_status(cfg)
     else:
         line = cmd_resume(cfg)
     print(line)

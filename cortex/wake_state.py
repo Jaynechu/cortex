@@ -617,21 +617,10 @@ def clear_next_wake_at(cfg: dict) -> None:
     set_next_wake_at(cfg, None)
 
 
-def set_paused(cfg: dict, paused: bool) -> None:
-    """DND flag: reconcile, watchdog and injections all
-    respect it (no reaps, no wakes, no injections while paused). On unpause,
-    overdue ledger alarms fire via the next reconcile."""
-    if paused:
-        update(cfg, paused=True)
-    else:
-        with _flock(cfg):
-            d = load(cfg)
-            if d.pop("paused", None) is not None:
-                _save(cfg, d)
-
-
-def is_paused(cfg: dict) -> bool:
-    return bool(load(cfg).get("paused"))
+# The old per-shell `paused` DND flag lived here. It is gone: the circuit
+# breaker (cortex.breaker, <marrow config dir>/breaker.json) is now the single
+# truth for "cortex autonomous activity is held", shared with the tg shell and
+# surviving restarts. Readers call breaker.holds(cfg, "cli").
 
 
 def set_rotated(cfg: dict) -> None:

@@ -1,8 +1,8 @@
-"""Ledger + reconcile + pause gating (schedule reliability fix).
+"""Ledger + reconcile + circuit-breaker gating (schedule reliability fix).
 
 Covers: next_wake_at write/clear, no night clamp (P8), the reconcile decision
 matrix (alive-never-touch / rotated-vs-resume / accidental-close / future-hold),
-pause gating, per-session _window_alive. No iTerm/claude here — all
+breaker gating, per-session _window_alive. No iTerm/claude here — all
 machine-touching calls are stubbed."""
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from cortex import config, daemon, db, lie_down, reconcile, wake_state
+from cortex import breaker, config, daemon, db, lie_down, reconcile, wake_state
 
 
 @pytest.fixture
@@ -460,23 +460,34 @@ def test_silent_resume_drops_commit_when_a_wake_lands_mid_spawn(cfg, monkeypatch
     assert wake_state.load(cfg).get("session_id") == "iterm-old"
 
 
-def test_reconcile_paused_holds_everything(cfg, monkeypatch):
+def test_reconcile_breaker_holds_everything(cfg, monkeypatch):
     monkeypatch.setattr("cortex.wake._window_alive", lambda c: False)
     calls = _fire_spy(monkeypatch)
-    wake_state.set_paused(cfg, True)
+    breaker.pause(cfg)
     now = datetime.now(_tz(cfg))
-    wake_state.set_next_wake_at(cfg, (now - timedelta(minutes=5)).isoformat())  # overdue
+    overdue = (now - timedelta(minutes=5)).isoformat()
+    wake_state.set_next_wake_at(cfg, overdue)  # overdue
     msg = reconcile._reconcile(None, cfg, {}, now)
-    assert "paused" in msg.lower()
-    assert "why" not in calls  # nothing fires while paused
+    assert "breaker held" in msg.lower()
+    assert "why" not in calls  # nothing fires while held
+    # The alarm survives the hold -> it fires on the first pass after a clear.
+    assert wake_state.get_next_wake_at(cfg) == overdue
 
 
-def test_pause_flag_roundtrip(cfg):
-    assert wake_state.is_paused(cfg) is False
-    wake_state.set_paused(cfg, True)
-    assert wake_state.is_paused(cfg) is True
-    wake_state.set_paused(cfg, False)
-    assert wake_state.is_paused(cfg) is False
+def test_breaker_flag_roundtrip(cfg):
+    assert breaker.holds(cfg, "cli") is False
+    breaker.pause(cfg)
+    assert breaker.holds(cfg, "cli") is True
+    assert breaker.holds(cfg, "tg") is True  # default scope = all
+    assert breaker.release(cfg) is True
+    assert breaker.holds(cfg, "cli") is False
+    assert breaker.release(cfg) is False  # already clear
+
+
+def test_breaker_single_shell_scope(cfg):
+    breaker.pause(cfg, "tg")
+    assert breaker.holds(cfg, "tg") is True
+    assert breaker.holds(cfg, "cli") is False
 
 
 # --- ledger authoritative-hold + consumption (codex review P1-1/P1-2/P1-3) ----
@@ -516,16 +527,16 @@ def test_fire_dead_window_dry_run_consumes_ledger(cfg):
     assert new_due != stale_due.isoformat()
 
 
-def test_pause_short_circuits_before_reconcile(cfg, monkeypatch):
-    """Paused (DND) holds everything: the daemon pass returns before running the
-    reconcile body, so no wake path fires."""
-    wake_state.set_paused(cfg, True)
+def test_breaker_short_circuits_before_reconcile(cfg, monkeypatch):
+    """A held breaker holds everything: the daemon pass returns before running
+    the reconcile body, so no wake path fires."""
+    breaker.pause(cfg)
 
     def _boom(*a, **k):
-        raise AssertionError("_reconcile must not run while paused")
+        raise AssertionError("_reconcile must not run while held")
     monkeypatch.setattr(reconcile, "_reconcile", _boom)
     d = daemon.WakeDaemon(cfg, scheduler=object(), clock=lambda: 0.0)
-    assert "paused" in d.reconcile_once().lower()
+    assert "breaker held" in d.reconcile_once().lower()
 
 
 # --- per-session _window_alive ------------------------------------------------
@@ -552,10 +563,55 @@ def test_window_alive_is_per_session(cfg, monkeypatch):
 def test_ctl_pause_resume(cfg, monkeypatch, capsys):
     from cortex import ctl
     monkeypatch.setattr(ctl.config, "load", lambda: cfg)
+    monkeypatch.setattr(ctl, "_receipt", lambda c, m: None)
     ctl.main(["pause"])
-    assert wake_state.is_paused(cfg) is True
+    assert breaker.holds(cfg, "cli") is True
+    assert breaker.holds(cfg, "tg") is True
     ctl.main(["resume"])
-    assert wake_state.is_paused(cfg) is False
+    assert breaker.holds(cfg, "cli") is False
+
+
+def test_ctl_pause_single_shell(cfg, monkeypatch):
+    from cortex import ctl
+    monkeypatch.setattr(ctl.config, "load", lambda: cfg)
+    monkeypatch.setattr(ctl, "_receipt", lambda c, m: None)
+    ctl.main(["pause", "--shell", "tg"])
+    assert breaker.holds(cfg, "tg") is True
+    assert breaker.holds(cfg, "cli") is False
+
+
+def test_ctl_pause_puts_live_cli_window_down(cfg, monkeypatch):
+    """ct-pause reuses the EXISTING proxy lie_down path (the one the watchdog
+    fuse uses) — no new interrupt mechanism."""
+    from cortex import ctl
+    from cortex import lie_down as lie_down_mod
+    seen = {}
+    monkeypatch.setattr(ctl, "_receipt", lambda c, m: None)
+    monkeypatch.setattr(lie_down_mod, "lie_down",
+                        lambda c, **kw: seen.update(kw) or {})
+    wake_state.set_awake(cfg, 1, None)
+    line = ctl.cmd_pause(cfg)
+    assert seen.get("force_slept") == "ct-pause"
+    assert "put down" in line
+
+
+def test_ctl_wake_clears_the_breaker(cfg, monkeypatch):
+    from cortex import ctl
+    import cortex.wake as wake_mod
+    breaker.pause(cfg)
+    monkeypatch.setattr(wake_mod, "_window_alive", lambda c: True)
+    monkeypatch.setattr(wake_state, "is_awake", lambda c: True)
+    line = ctl.cmd_wake(cfg)
+    assert breaker.holds(cfg, "cli") is False
+    assert line.startswith("breaker cleared; ")
+
+
+def test_ctl_status_reports_the_breaker(cfg):
+    from cortex import ctl
+    assert "breaker: clear" in ctl.cmd_status(cfg)
+    breaker.pause(cfg, "cli")
+    line = ctl.cmd_status(cfg)
+    assert "breaker: ON scope=cli reason=manual" in line
 
 
 def test_ctl_sleep_dead_window_sets_ledger(cfg):

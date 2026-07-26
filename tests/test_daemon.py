@@ -138,7 +138,7 @@ def test_next_business_at_tracks_the_ledger(cfg, clock):
 
 
 def test_next_business_at_retries_a_past_ledger(cfg, clock):
-    """A due-but-unfired ledger (paused / gated) re-arms on the retry interval,
+    """A due-but-unfired ledger (breaker / gated) re-arms on the retry interval,
     never at a past timestamp (that would hot-spin the loop)."""
     d = _daemon(cfg, clock)
     past = datetime.now(_tz(cfg)) - timedelta(minutes=5)
@@ -214,14 +214,17 @@ def test_business_fires_wake_and_redraws_ledger_headless(cfg, clock, monkeypatch
     assert wake_state.get_next_wake_at(cfg) is not None
 
 
-def test_business_paused_holds(cfg, clock, monkeypatch):
+def test_business_breaker_holds(cfg, clock, monkeypatch):
     import cortex.wake as wake_mod
+    from cortex import breaker
     monkeypatch.setattr(wake_mod, "run_wake",
-                        lambda *a, **k: pytest.fail("no wake while paused"))
-    wake_state.set_paused(cfg, True)
-    wake_state.set_next_wake_at(
-        cfg, (datetime.now(_tz(cfg)) - timedelta(minutes=1)).isoformat())
-    assert "paused" in _daemon(cfg, clock).business_once()
+                        lambda *a, **k: pytest.fail("no wake while held"))
+    breaker.pause(cfg)
+    overdue = (datetime.now(_tz(cfg)) - timedelta(minutes=1)).isoformat()
+    wake_state.set_next_wake_at(cfg, overdue)
+    assert "breaker held" in _daemon(cfg, clock).business_once()
+    # The alarm is NOT consumed by the hold — it fires once the breaker clears.
+    assert wake_state.get_next_wake_at(cfg) == overdue
 
 
 def test_business_silence_calls_silence_action(cfg, clock, monkeypatch):
@@ -257,11 +260,12 @@ def test_reconcile_awake_gate_gets_snapshot_gen(cfg, clock, monkeypatch):
     assert seen["gen"] == wake_state.load(cfg)["gen"]
 
 
-def test_reconcile_paused_holds_everything(cfg, clock, monkeypatch):
+def test_reconcile_breaker_holds_everything(cfg, clock, monkeypatch):
+    from cortex import breaker
     monkeypatch.setattr(reconcile, "_reconcile",
-                        lambda *a, **k: pytest.fail("no reconcile while paused"))
-    wake_state.set_paused(cfg, True)
-    assert "paused (DND)" in _daemon(cfg, clock).reconcile_once()
+                        lambda *a, **k: pytest.fail("no reconcile while held"))
+    breaker.pause(cfg)
+    assert "breaker held" in _daemon(cfg, clock).reconcile_once()
 
 
 def test_shell_off_skips(cfg, clock):

@@ -26,7 +26,9 @@ import sys
 import time
 from datetime import datetime, timezone
 
-from cortex import config, db, occupancy, transcript, wake_state, window
+from cortex import (
+    breaker, config, db, occupancy, transcript, wake_state, window,
+)
 
 
 def _pid_alive(pid: int | None) -> bool:
@@ -164,6 +166,57 @@ def _verify_esc_or_hard_interrupt(cfg: dict, grace_sec: float, trigger: str) -> 
     return f"hard-interrupt:{trigger} pid={pid}"
 
 
+def _announce_trip(cfg: dict, message: str) -> None:
+    """A tripped breaker must reach the human: a marrow `alerts` row (surfaced
+    on the monitor page) plus a pending outbox note for the tg bridge to
+    deliver. Both are raw writes into marrow.db — the same shape cortex already
+    uses for its respawn alert; nothing is imported across repos. Best-effort:
+    a failed announcement must never keep the breaker from standing."""
+    try:
+        conn = db.connect(cfg)
+    except Exception:  # noqa: BLE001 — db unreachable: the breaker still holds
+        _log("breaker trip: marrow db unreachable, announcement skipped")
+        return
+    try:
+        conn.execute(
+            "INSERT INTO alerts (severity, type, message, source) VALUES (?, ?, ?, ?)",
+            ("critical", "cortex_breaker_tripped", message, "cortex.watchdog"),
+        )
+        conn.commit()
+    except Exception:  # noqa: BLE001 — table may be absent
+        _log("breaker trip: alert row write failed")
+    try:
+        conn.execute(
+            "INSERT INTO outbox (from_sid, from_channel, target, body)"
+            " VALUES (?, ?, ?, ?)",
+            (None, "cortex", "tg", message),
+        )
+        conn.commit()
+    except Exception:  # noqa: BLE001 — outbox may be absent
+        _log("breaker trip: outbox note write failed")
+    finally:
+        with contextlib.suppress(Exception):
+            conn.close()
+
+
+def _record_fuse(cfg: dict) -> None:
+    """Tally this cli fuse in the shared rolling window and, on a threshold
+    breach, trip the breaker for ALL shells. Never raises — a fuse must still
+    run its handoff/lie_down ladder even if the tally file is unwritable."""
+    try:
+        cfg_dir = config.marrow_config_dir(cfg)
+        count, tripped = breaker.record_fuse_and_maybe_trip(cfg_dir, "cli")
+    except Exception as e:  # noqa: BLE001
+        _log(f"breaker: fuse tally failed ({e})")
+        return
+    _log(f"breaker: fuse recorded (cli), {count} in window")
+    if tripped is None:
+        return
+    message = breaker.trip_message(cfg_dir, count, tripped["scope"])
+    _log(f"breaker TRIPPED scope={tripped['scope']} reason={tripped['reason']}")
+    _announce_trip(cfg, message)
+
+
 def _fuse(cfg: dict, grace: float) -> None:
     """Fuse path: esc the runaway turn, prompt the session to write its handoff
     and lie_down(rotate=True), then give it a bounded grace window to do so
@@ -181,6 +234,10 @@ def _fuse(cfg: dict, grace: float) -> None:
     wcfg = cfg["wake"].get("watchdog", {})
     handoff_grace = float(wcfg.get("fuse_handoff_grace_sec", 300))
     marker_line = str(cfg["wake"].get("fuse_marker") or "⚙️ [FUSE]").strip()
+
+    # Tally at fire time (before the long grace phase), so a fuse that hangs or
+    # crashes mid-ladder still counts towards the breaker.
+    _record_fuse(cfg)
 
     window.send_esc(cfg)
     time.sleep(1.0)  # let esc land before delivering the marker
@@ -520,8 +577,8 @@ def run(cfg: dict) -> int:
             _log("window dead -> no proxy sleep, watchdog retires; "
                  "reconcile owns revival")
             return 0
-        if wake_state.is_paused(cfg):
-            continue  # DND: no reaps / tuck-ins / fuse while paused
+        if breaker.holds(cfg, "cli"):
+            continue  # breaker: no reaps / tuck-ins / fuse while held
 
         # Silence source = minutes since the last REAL user message (assistant
         # turns / system writes / machine injections do NOT reset it). None (no user

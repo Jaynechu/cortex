@@ -985,6 +985,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"\n[{len(text)} chars]", file=sys.stderr)
             return 0
         if args.force:
+            # No silent bypass: an explicit manual wake CLEARS the circuit
+            # breaker first (same contract as `ctl wake`), so the state file
+            # never disagrees with what is actually running.
+            from cortex import breaker
+            if breaker.release(cfg):
+                print("breaker cleared by --force wake", file=sys.stderr)
             decision = {"wake": True, "reasons": [], "gated_by": [],
                         "wake_reasons": "ctl",
                         "explanation": f"{now.strftime('%H:%M')} manual --force wake"}

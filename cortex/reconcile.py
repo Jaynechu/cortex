@@ -212,7 +212,7 @@ def _reconcile(conn, cfg: dict, st: dict, now) -> str | None:
     acts / short-circuits the rest of the pass, else None (let the normal flow
     proceed). HARD RULE: an ALIVE recorded session is never touched here.
 
-      - paused                                   -> hold everything (DND).
+      - breaker held                             -> hold everything.
       - window ALIVE                             -> None (normal flow / awake gate).
       - window dead + next_wake_at in the past   -> fire now (rotated?fresh:resume).
       - window dead + awake + no next_wake_at    -> accidental close -> resume now.
@@ -226,8 +226,9 @@ def _reconcile(conn, cfg: dict, st: dict, now) -> str | None:
         alarm exists (e.g. right after `ctl sleep --min 30`)."""
     from cortex.wake import _window_alive
 
-    if wake_state.is_paused(cfg):
-        return "paused (DND): reconcile + reaps + injections held"
+    from cortex import breaker
+    if breaker.holds(cfg, "cli"):
+        return breaker.held_line(cfg, "reconcile + reaps + injections held")
     if _window_alive(cfg):
         return None  # alive -> never touch; normal flow handles it
     # Before ANY dead-window fire/spawn: adopt a window the user opened herself.
