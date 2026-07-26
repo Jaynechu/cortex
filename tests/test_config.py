@@ -14,14 +14,6 @@ def test_load_missing_file_returns_defaults(tmp_path):
     assert cfg["knowledgec"]["categories"]["default"] == "uncategorized"
 
 
-def test_daily_budget_defaults_are_1m_net(tmp_path):
-    """Gate + note-line daily budget default to 1M (NET-spend semantics); the
-    two must agree with each other."""
-    cfg = config.load(tmp_path / "does_not_exist.toml")
-    assert cfg["gates"]["daily_budget"]["tokens"] == 1_000_000
-    assert cfg["note"]["daily_budget"] == 1_000_000
-
-
 def test_load_merges_overrides(tmp_path):
     toml_path = tmp_path / "cortex.toml"
     toml_path.write_text(

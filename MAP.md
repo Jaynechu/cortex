@@ -1,4 +1,4 @@
-2026-07-26
+2026-07-27
 
 # Cortex — MAP
 
@@ -34,7 +34,7 @@ wake daemon (launchd KeepAlive, always on) ──reconcile (60s cadence)──�
 - Every callback re-arms on entry AND in a `finally` (daemon.py:170-184) so a consumed Scheduler entry or a raised exception never leaves a key unarmed; `kick()` no-ops on a key with no entry, so the business key must always stay armed.
 - Blocking work (reconcile_once/business_once) runs via `asyncio.to_thread` so the kick socket stays responsive; an `asyncio.Lock` serialises the two callback bodies against each other (daemon.py:112,173,181).
 - reconcile.py `_reconcile`/`_handle_awake`: ledger reconcile relocated verbatim from the retired pacemaker_tick entry point (T11 P4) — DND hold (wake_state.is_paused), manual adopt (`[wake].auto_adopt`, under the spawn lock), dead+due fire (rotated?fresh:resume via `_fire_dead_window`), accidental-close resume, SILENT resume of a window closed while ASLEEP (`wake.resume_asleep`: reopen `--resume` under the spawn lock, re-record session_id via an epoch-guarded conditional_mutate, NO bell / NO set_awake / ledger untouched — the window sits idle until the scheduled wake fires), watchdog heal (respawn if pidfile dead), silence backup (delegates to watchdog.silence_action), stale-suspect debounce (`confirm_ticks` consecutive dead verdicts, epoch-guarded against a lie_down/reset mid-pass) (reconcile.py:21-100,227-264).
-- Fire path: synthesize a decision dict (`reasons`/`wake_reasons` kick|next_wake_at|silence|reconcile, ctl.py precedent) → `wake.run_wake`. Both `daemon._fire_wake` and `reconcile._fire_dead_window` gate on `gates.daily_budget.tokens` (hold, ledger un-consumed, retried next pass) and `[pacemaker].dry_run` (log-only floor redraw, no real wake) (daemon.py:230-254, reconcile.py:142-182).
+- Fire path: synthesize a decision dict (`reasons`/`wake_reasons` kick|next_wake_at|silence|reconcile, ctl.py precedent) → `wake.run_wake`. Ungated — no `[gates]` section; sole brake is `[pacemaker].dry_run` on `reconcile._fire_dead_window` (log-only floor redraw, no real wake) (daemon.py:230-254, reconcile.py:142-172).
 - kick.py `_notify_daemon` → `synapse_core.send_kick(socket_path, shell)`: state writes (reason queue / gen bump / floor clear) land first, then the kick makes the daemon re-read instantly instead of waiting for the next reconcile cadence. Unreachable socket → wake_audit row + stderr, wake deferred to reconcile (kick.py:73-100).
 - No more one-shot exact-time process (sentinel.py, deleted): the business deadline itself fires at the exact computed time via the Scheduler; lie_down's `persist_next_wake_at` (lie_down.py:196-207) writes the ledger then kicks the socket instead of spawning/killing a `sleep N` subprocess.
 - `[daemon]` config: enabled, shell, socket_path, kick_timeout_sec, reconcile_interval_sec, safety_horizon_sec, retry_interval_sec, lock_path (config.py:224-241). Singleton lock = `daemon.lock` (daemon.py:229-253).
@@ -71,7 +71,7 @@ wake daemon (launchd KeepAlive, always on) ──reconcile (60s cadence)──�
 ### watchdog (`watchdog.py`)
 - Per-wake detached subprocess spawned at set_awake; pidfile self-guarded (unlinks only own pid, watchdog.py:29-40,169-181). Not started when `[core].shells` omits "cli" (watchdog.py:514).
 - Poll 60s: retires when awake cleared externally; publishes occupancy via store_window_tokens each poll.
-- Fuse: window_tokens>=fuse_tokens (150k) → _fuse then exit; else silence_action (watchdog.py:458-511).
+- Fuse: window_tokens>=fuse_tokens (180k; marrow's 160k soft nudge fires first) → _fuse then exit; else silence_action (watchdog.py:458-511).
 - Silence loop (silence_action, watchdog.py:394-485, shared by watchdog.run + _handle_awake + daemon business): every silent_max_min (20) of user silence → inject one free-round block → re-arm the SAME timer from that instant → repeat forever. The session stays up until it calls lie_down itself.
 - Silence basis (wake_state.silence_basis_min): newest of the transcript read and the hook-stamped `last_user_msg_ts`, else awake_since when the user never spoke this wake. The transcript lags the marrow hook, which drops tuck_pending in the same write — transcript-only re-fires a round on top of the user's own message.
 - tuck_pending (last-fire marker) is stamped under the epoch lock BEFORE delivery, so an esc-interrupted or failed injection is still consumed (no retry, no re-fire inside the window).
@@ -95,20 +95,18 @@ wake daemon (launchd KeepAlive, always on) ──reconcile (60s cadence)──�
 - Handoff: per-shell rolling log `<cortex_home>/handoff-<shell>.md` (cli default config.DEFAULT_HANDOFF, override paths.handoff_file). Read via the session's own CLAUDE.md memory import; page-turn is marrow-side (marrow/MAP.md §6.3). Cortex reads its mtime only — fuse "handoff written?" (watchdog.py:206).
 ## 6. Wakeup note (`note.py`)
 - gather (note.py:311-340): every section behind _safe(), render pure, omit cleanly when absent (386-446).
-- Sections: header Now/Plan Used/Active [+ force_slept] · Pending self-schedule (note.pending_window_min 15).
+- Sections: header = 2 lines only, `Now HH:MM Day | Last active` [+ force_slept] and `Active (Mac)` · Pending self-schedule (note.pending_window_min 15).
 - Replay (note.replay_events 4, marker-stripped, 300ch) · turn_end_text (default "") · title prefix. "Wake:" reason line retired.
 - Replay excludes the rendering shell's OWN channel: `note_render --shell <id>` picks note.shell_replay_exclude[id] (cli→ct, tg→tg); no --shell falls back to note.replay_exclude_channels.
 - `note_render --shell <non-cli>` diffs from that shell's ledger `last_note_row_id` (note.py:_shell_ledger_row_id, plain json read; missing file/key = full window) and prints the rendered subset's max row id on stderr as `cutoff_row_id=N` (nothing rendered = no line). Stays read-only: gather never advances a cursor on a non-cli shell path; the feeder writes the ledger after a successful feed (synapse).
 - Diff mode: replay filters events by `id > wake_state.last_note_row_id` (baseline = wake's initial note; row id is AUTOINCREMENT insert order, so same-second rows are never skipped); every gather() advances it to the newest eligible row id. Legacy `last_note_ts` state migrates once via MAX(id) WHERE timestamp <= ts (note.py:_since_row_id) and is erased at the next wake-open.
-- Budget line (note.py:449-475): `Plan Used: 5h X% | 7d Y% | <label> Today Nk/Mk P% | Net Session Token: Wk`. 5h/7d from ct_rate_limit kv. One line per shell, label-first, note.shell_labels (Cortex-Cli / Cortex-Tg).
-- Cortex Today via note._today_tokens (delegates to integration._today_tokens, parity by construction).
-- Net Session = window_tokens key from ct_pacemaker_state (label kept for marrow parity, not net spend).
+- No budget / Plan-Used / per-shell Today / Net-Session / Window-SID lines; `note.daily_budget` + `note.shell_labels` config gone. `occupancy.store_window_tokens` still writes window occupancy to ct_pacemaker_state; only reader is `occupancy.window_tokens_hint` (no consumer).
 - _last_wake skips rows <90s to avoid self-reporting current wake (note.py:106-127). Handoff injection at marrow SessionStart not note.py; cal/rem lines retired pending global inject (note.py:9-10).
 - _strip_markers = deliberate local copy of marrow strip_media_markers (not importable from cortex venv), byte-identical today (note.py:189-204 vs marrow/transcript.py:97-117) — drift tracked.
 ## 7. transcript.py — token/liveness probe
 - _munge replicates CC cwd→projects dirname; transcript_dir overridable via paths.transcript_dir (transcript.py:14-26). newest() = latest-mtime top-level *.jsonl (subagents/ excluded).
 - window_tokens = LAST usage line input+cache_read+cache_creation+output → occupancy; drives watchdog fuse only; 0 on read error (transcript.py:42-64, watchdog.py:153). mtime() drives rotation + ear polling.
-- net_tokens helper retired; Cortex Today sums per-window final occupancy not per-turn spend.
+- No net_tokens / Cortex-Today accounting; occupancy._finished_window_finals + window_tokens_hint survive unread.
 ## 8. daybrief.md (retired day_log)
 - marrow-owned (marrow/daybrief.py), real file in NY db-pages via marrow paths.daybrief (no cortex symlink); Cortex triggers render via marrow venv `-m marrow.daybrief` at collect_tick._render_daybrief + wake._render_daybrief.
 ## 9. Symlinks, install, deploy
@@ -116,7 +114,7 @@ wake daemon (launchd KeepAlive, always on) ──reconcile (60s cadence)──�
 - install.py: `python -m cortex.install [remove]` — writes 2 plists (collect-tick, wake-daemon) with __TOKEN__ replacements, launchctl bootout+bootstrap gui/<uid>; also boots out the retired com.cortex.pacemaker-tick label (resolved plist left on disk, T11 P4 rollback path); no rollback for the live plists (self-heals on re-run); zero test coverage (install.py:32-38,68-96).
 - pyproject.toml (setuptools, no third-party deps); plists set WorkingDirectory=repo root so `-m` resolves cortex/ without install/PYTHONPATH.
 - Plists: collect-tick = RunAtLoad + StartInterval (tick.collect_interval_sec), no KeepAlive — a crash re-fires next interval. wake-daemon = RunAtLoad + KeepAlive + ThrottleInterval 10s — always on, launchd revives a crash.
-- pacemaker.dry_run=true in example config; live dry_run=false since 07-11 (reconcile.py:171 gates whether a fired ledger wake actually spawns).
+- pacemaker.dry_run=true in example config; live dry_run=false since 07-11 (reconcile.py:161 gates whether a fired ledger wake actually spawns).
 ## 10. Tests
 - Per-module test files under tests/; pure cores (reconcile, daemon, note, geofence cursor) well covered. Gaps: install.py (untested), geofence same-minute-same-text dup.
 ## 11. Status

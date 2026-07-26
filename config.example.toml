@@ -136,7 +136,7 @@ ctl_sleep_marker = "⚙️ [CTL]"
 [wake.watchdog]
 poll_sec = 60
 silent_max_min = 20            # silence cycle (same bar for chat or no-user wake): at this silence, inject one free-round note + marker, then re-arm the same timer
-fuse_tokens = 150000           # window tokens >= this -> esc + proxy lie_down (fuse)
+fuse_tokens = 180000           # window tokens >= this -> esc + proxy lie_down (fuse); marrow's soft nudge (usage.show_tokens, 160k) fires first
 # Process-level hard interrupt (SIGINT), a guaranteed esc-equivalent for when the
 # osascript esc may not land (no window focus). Fires after esc on the fuse
 # path, only if the transcript is still growing past the grace window.
@@ -190,14 +190,6 @@ usage_snapshot = true          # OAuth usage % snapshot (marrow subprocess) each
 [pacemaker]
 dry_run = true                 # log-only; flip to false only once outbound (C5) lands
 
-[gates]
-# Daily wake-token budget: once today's SUM(NET spend — cache-miss rewrite +
-# output, ct_wake_log.net_tokens with a tokens fallback) reaches tokens,
-# self-wakes stop; resets naturally at local midnight.
-# Net semantics — cache reads are near-free, net is the real cost.
-[gates.daily_budget]
-tokens = 1000000
-
 [triggers]
 # Wake-window (minutes) from lie-down. lie_down picks the next wake: an explicit
 # minutes choice (clamped to [min, max]) or a uniform "dice" draw when omitted.
@@ -234,13 +226,7 @@ replay_exclude_channels = ["ct"]  # channels excluded from replay (ct = cortex s
 # renders for (`python -m cortex.note_render --shell tg`); a shell id absent
 # here falls back to replay_exclude_channels.
 shell_replay_exclude = { cli = ["ct"], tg = ["tg"] }
-daily_budget = 1000000       # daily wake-token (NET spend) budget the "today X/Y" line renders against; must match gates.daily_budget.tokens
 pending_window_min = 15      # surface a self-schedule entry only when due within this window
-# One "<label> Today" line per shell, shared daily_budget denominator, same two
-# figures on every line (today's tokens + live occupancy). cli = this repo's own
-# token sum; any other key reads tokens_today_base + occupancy from
-# <paths.shell_state_dir>/<shell>.json and drops its line when unreadable.
-shell_labels = { cli = "Cortex-Cli", tg = "Cortex-Tg" }
 handoff_title = "碎碎念"   # title of the handoff-note section (customisable display name)
 replay_title = "最近对话回放"     # title of the conversation-replay section
 handoff_wake_kinds = ["rotate"]  # wake kinds that get the handoff (fresh window only)

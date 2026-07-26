@@ -347,7 +347,6 @@ def test_fire_dead_window_accidental_close_resumes(cfg, monkeypatch):
     session -> RESUME the same conversation (conversation = identity), not a
     fresh spawn. _spawn_wake is called with resume=True."""
     from cortex import transcript, wake, window
-    cfg["gates"]["night"] = {"start": "23:00", "end": "23:00", "cap": 0}  # disabled
     cfg["pacemaker"]["dry_run"] = False
     cfg["wake"]["mode"] = "window"
     wake_state.set_session_id(cfg, "SID-1")
@@ -503,7 +502,6 @@ def test_fire_dead_window_dry_run_consumes_ledger(cfg):
     """P1-2: a due-ledger fire in dry_run must replace next_wake_at with the
     freshly redrawn floor, not leave the stale due timestamp (else every
     subsequent tick re-fires the same reconcile wake)."""
-    cfg["gates"]["night"] = {"start": "23:00", "end": "23:00", "cap": 0}  # disabled
     cfg["pacemaker"]["dry_run"] = True
     now = datetime.now(_tz(cfg))
     stale_due = now - timedelta(minutes=1)
@@ -516,35 +514,6 @@ def test_fire_dead_window_dry_run_consumes_ledger(cfg):
     new_due = wake_state.get_next_wake_at(cfg)
     assert new_due is not None
     assert new_due != stale_due.isoformat()
-
-
-def test_fire_dead_window_daily_budget_gated_holds_ledger(cfg):
-    """P1-B: a due-ledger fire after daily budget exhaustion must also HOLD."""
-    from zoneinfo import ZoneInfo
-    cfg["gates"]["night"] = {"start": "23:00", "end": "23:00", "cap": 0}  # disabled
-    cfg["gates"]["daily_budget"] = {"tokens": 100}
-    # _fire_dead_window reads the REAL wall clock (occupancy._now) for the gate
-    # check, so the "finished window" row must land in TODAY's local window
-    # (local midnight -> now).
-    from cortex import occupancy
-    now = occupancy._now(cfg)
-    midnight = now.replace(hour=0, minute=1, second=0, microsecond=0)
-    day = midnight.astimezone(ZoneInfo("UTC"))
-    stale_due = now - timedelta(minutes=1)
-    wake_state.set_next_wake_at(cfg, stale_due.isoformat())
-    conn = db.connect(cfg)
-    try:
-        # A FINISHED window (peak over cap, then a lower row closes it) puts
-        # Cortex Today over the cap.
-        conn.executemany(
-            "INSERT INTO ct_wake_log (ts, wake, dry_run, tokens) VALUES (?,1,0,?)",
-            [(day.isoformat(), 200), ((day + timedelta(minutes=5)).isoformat(), 3)])
-        conn.commit()
-        msg = reconcile._fire_dead_window(conn, cfg, "ledger due, window dead")
-    finally:
-        conn.close()
-    assert "gated" in msg.lower()
-    assert wake_state.get_next_wake_at(cfg) == stale_due.isoformat()  # untouched
 
 
 def test_pause_short_circuits_before_reconcile(cfg, monkeypatch):

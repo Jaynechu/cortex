@@ -107,9 +107,9 @@ def load_state(conn: sqlite3.Connection) -> PacemakerState:
 
 def store_window_tokens(conn: sqlite3.Connection, tokens: int | None) -> None:
     """Stash the live window occupancy (statusline total: input + cache_read +
-    cache_creation + output) on the ct_pacemaker_state JSON so the wakeup
-    note's Budget line can read it (note._window_tokens). Merged into the raw
-    JSON (not the dataclass) so it survives independently of tick saves."""
+    cache_creation + output) on the ct_pacemaker_state JSON (window_tokens_hint
+    reads it back). Merged into the raw JSON (not the dataclass) so it survives
+    independently of tick saves."""
     row = conn.execute("SELECT state FROM ct_pacemaker_state WHERE id = 1").fetchone()
     try:
         obj = json.loads(row["state"]) if row else {}
@@ -219,13 +219,6 @@ def _finished_window_finals(conn: sqlite3.Connection, now: datetime) -> int:
             total += prev
         prev = val
     return total
-
-
-def _today_tokens(conn: sqlite3.Connection, now: datetime) -> int:
-    """Cortex Today = today's finished-window finals + the current live window
-    occupancy. Drives the daily budget gate; twin of note._today_tokens (they
-    must agree — same helpers, same figure)."""
-    return _finished_window_finals(conn, now) + window_tokens_hint(conn)
 
 
 # --------------------------------------------------------------------------

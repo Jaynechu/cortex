@@ -84,12 +84,6 @@ def test_render_full_note(cfg):
         "wake_parts": ["wander"],
         "last_wake": {"minutes_ago": 12, "force_slept": None},
         "last_active": {"minutes_ago": 12},
-        "budget": {
-            "five_h_pct": 5.0, "five_h_reset": "04:50",
-            "seven_d_pct": 50.0, "seven_d_countdown": "1d2h",
-            "window_tokens": 50000, "today_tokens": 250000, "daily_budget": 1_000_000,
-            "cli_label": "Cortex-Cli",
-        },
         "active_app": "Google Chrome",
         "pending": [{"hm": "00:18", "intent": "去看看老婆睡了没"}],
         "replay": [
@@ -100,10 +94,13 @@ def test_render_full_note(cfg):
     text = note.render(cfg, NOW, data)
     assert "Wake:" not in text  # reason line retired
     assert text.startswith("Now: 14:30 Wed | Last active: 12min ago")
-    # Plan Used line: USED %, pipe-joined, template口径
-    assert ("Plan Used: 5h 5% (04:50) | 7d 50% (1d2h) | "
-            "Cortex-Cli Today 250k/1M 25% | Net Session Token: 50k") in text
+    assert "Plan Used" not in text  # budget line retired
     assert "Active (Mac): Google Chrome" in text
+    # header = exactly the two lines above, nothing else
+    assert text.split("\n\n---\n\n")[0].split("\n") == [
+        "Now: 14:30 Wed | Last active: 12min ago",
+        "Active (Mac): Google Chrome",
+    ]
     assert "Pending self-schedule: due 00:18 去看看老婆睡了没" in text
     assert "### Replay" in text
     assert "[cli 00:30] N: 笨鸭子" in text
@@ -415,109 +412,6 @@ def test_render_no_wake_line_ever(cfg):
 
 
 # --------------------------------------------------------------------------- #
-# budget render
-# --------------------------------------------------------------------------- #
-
-def test_render_budget_segments_optional(cfg):
-    b = {"five_h_pct": None, "five_h_reset": None, "seven_d_pct": None,
-         "seven_d_countdown": None, "window_tokens": None,
-         "today_tokens": 50000, "daily_budget": 1_000_000}
-    assert note._render_budget(b) == "Plan Used: Today 50k/1M 5%"
-
-
-def _shell_budget(shells):
-    return {"five_h_pct": None, "five_h_reset": None, "seven_d_pct": None,
-            "seven_d_countdown": None, "window_tokens": None,
-            "today_tokens": 250_000, "daily_budget": 1_000_000,
-            "cli_label": "Cortex-Cli", "shells": shells}
-
-
-def test_render_budget_one_line_per_shell():
-    """Hosted shell line carries the same two figures as the cli line: today's
-    tokens over the shared denominator, then the live window occupancy."""
-    b = _shell_budget([{"label": "Cortex-Tg", "today": 194_000, "occupancy": 68_000}])
-    b["window_tokens"] = 50_000
-    assert note._render_budget(b).split("\n") == [
-        "Plan Used: Cortex-Cli Today 250k/1M 25% | Net Session Token: 50k",
-        "Cortex-Tg Today 194k/1M 19% | Net Session Token: 68k",
-    ]
-
-
-def test_render_budget_no_hosted_shell_keeps_cli_line_only():
-    assert note._render_budget(_shell_budget([])) == \
-        "Plan Used: Cortex-Cli Today 250k/1M 25%"
-
-
-def _shell_dir(cfg, tmp_path):
-    cfg["paths"]["shell_state_dir"] = str(tmp_path / "shells")
-    (tmp_path / "shells").mkdir()
-    return tmp_path / "shells"
-
-
-def test_hosted_shells_today_is_base_plus_occupancy(cfg, tmp_path):
-    d = _shell_dir(cfg, tmp_path)
-    (d / "tg.json").write_text(json.dumps(
-        {"session_id": "x", "occupancy": 68_000,
-         "tokens_today_base": 126_000, "tokens_date": "2026-07-08"}))
-    assert note._hosted_shells(cfg, cfg["note"], NOW) == [
-        {"label": "Cortex-Tg", "today": 194_000, "occupancy": 68_000}]
-
-
-@pytest.mark.parametrize("ledger", [
-    {"occupancy": 68_000},  # host has not folded anything yet
-    {"occupancy": 68_000, "tokens_today_base": 126_000, "tokens_date": "2026-07-07"},
-    {"occupancy": 68_000, "tokens_today_base": "oops", "tokens_date": "2026-07-08"},
-])
-def test_hosted_shells_stale_or_bad_base_counts_as_zero(cfg, tmp_path, ledger):
-    d = _shell_dir(cfg, tmp_path)
-    (d / "tg.json").write_text(json.dumps(ledger))
-    assert note._hosted_shells(cfg, cfg["note"], NOW) == [
-        {"label": "Cortex-Tg", "today": 68_000, "occupancy": 68_000}]
-
-
-@pytest.mark.parametrize("body", [None, "{not json", json.dumps({"session_id": "x"})])
-def test_hosted_shells_absent_or_corrupt_drops_the_line(cfg, tmp_path, body):
-    d = _shell_dir(cfg, tmp_path)
-    if body is not None:
-        (d / "tg.json").write_text(body)
-    assert note._hosted_shells(cfg, cfg["note"], NOW) == []
-
-
-def test_hosted_shells_skips_the_cli_shell(cfg, tmp_path):
-    """cli rides today_tokens — its ledger, if any, is never read here."""
-    d = _shell_dir(cfg, tmp_path)
-    (d / "cli.json").write_text(json.dumps({"occupancy": 999}))
-    assert note._hosted_shells(cfg, cfg["note"], NOW) == []
-
-
-def test_render_budget_shows_used_pct():
-    """five_h_pct/seven_d_pct are UTILIZATION (used); the Plan Used line shows
-    the used % verbatim (statusline 口径), reset in parens."""
-    b = {"five_h_pct": 5.0, "five_h_reset": "04:50", "seven_d_pct": 50.0,
-         "seven_d_countdown": "1d2h", "window_tokens": None,
-         "today_tokens": 0, "daily_budget": 1_000_000}
-    line = note._render_budget(b)
-    assert "5h 5% (04:50)" in line
-    assert "7d 50% (1d2h)" in line
-
-
-def test_countdown_compact():
-    now = datetime(2026, 7, 8, 0, 0, tzinfo=MEL)
-    reset = (now + timedelta(days=1, hours=2)).astimezone(ZoneInfo("UTC")).isoformat()
-    assert note._countdown(reset, now) == "1d2h"
-    reset2 = (now + timedelta(hours=5)).astimezone(ZoneInfo("UTC")).isoformat()
-    assert note._countdown(reset2, now) == "5h"
-    past = (now - timedelta(hours=1)).astimezone(ZoneInfo("UTC")).isoformat()
-    assert note._countdown(past, now) is None
-
-
-def test_fmt_budget():
-    assert note._fmt_budget(1_000_000) == "1M"
-    assert note._fmt_budget(2_000_000) == "2M"
-    assert note._fmt_budget(500_000) == "500k"
-
-
-# --------------------------------------------------------------------------- #
 # DB-sourced facts
 # --------------------------------------------------------------------------- #
 
@@ -585,32 +479,6 @@ def test_render_last_active_overrides_wake_minutes(cfg):
     }
     text = note.render(cfg, NOW, data)
     assert "Last active: 3min ago (force-slept mid-task)" in text
-
-
-def test_today_tokens_melbourne_local_boundary(marrow_conn):
-    """Only today's local-date rows enter the per-window metric. Two of today's
-    rows form one window (30k -> 60k); a yesterday and a tomorrow row are
-    excluded by the local-date filter, so they never open a spurious window /
-    drop. The single today-run is the current window -> its final is added via
-    the live hint (60k here)."""
-    from cortex import occupancy
-    # now = 2026-07-08 00:30 AEST (+10) => UTC 2026-07-07T14:30Z
-    now = datetime(2026, 7, 8, 0, 30, tzinfo=MEL)
-    rows = [
-        # 2026-07-07T13:00Z -> 2026-07-07 23:00 AEST = yesterday local -> excluded
-        ("2026-07-07T13:00:00+00:00", 999),
-        # 2026-07-07T20:00Z -> 2026-07-08 06:00 AEST = today local -> counted
-        ("2026-07-07T20:00:00+00:00", 30_000),
-        # 2026-07-07T20:30Z -> today local, same window grows -> final 60k
-        ("2026-07-07T20:30:00+00:00", 60_000),
-        # 2026-07-08T15:00Z -> 2026-07-09 01:00 AEST = tomorrow local -> excluded
-        ("2026-07-08T15:00:00+00:00", 555),
-    ]
-    marrow_conn.executemany(
-        "INSERT INTO ct_wake_log (ts, wake, dry_run, tokens) VALUES (?, 1, 0, ?)", rows)
-    marrow_conn.commit()
-    occupancy.store_window_tokens(marrow_conn, 60_000)  # today's run is the live window
-    assert note._today_tokens(marrow_conn, now) == 60_000
 
 
 def test_replay_events_channel_time_and_truncation(marrow_conn, cfg):
@@ -806,22 +674,6 @@ def test_latest_replay_ts_follows_the_shell_exclude(marrow_conn, cfg):
         marrow_conn, note.for_shell(only_tg, "tg")) == "2026-07-08T03:02:00+00:00"
 
 
-def test_window_tokens_absent_key_is_none(marrow_conn):
-    marrow_conn.execute(
-        "INSERT INTO ct_pacemaker_state (id, state, updated_at) VALUES (1, ?, ?)",
-        (json.dumps({"desire": {}}), "2026-07-08T00:00:00Z"))
-    marrow_conn.commit()
-    assert note._window_tokens(marrow_conn) is None
-
-
-def test_window_tokens_reads_hint(marrow_conn):
-    marrow_conn.execute(
-        "INSERT INTO ct_pacemaker_state (id, state, updated_at) VALUES (1, ?, ?)",
-        (json.dumps({"window_tokens": 84000}), "2026-07-08T00:00:00Z"))
-    marrow_conn.commit()
-    assert note._window_tokens(marrow_conn) == 84000
-
-
 # --------------------------------------------------------------------------- #
 # external best-effort facts (monkeypatched)
 # --------------------------------------------------------------------------- #
@@ -900,12 +752,6 @@ def test_gather_end_to_end(marrow_conn, cfg, tmp_path, monkeypatch):
     marrow_conn.execute(
         "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
         ("s", "2026-07-08T03:00:00+00:00", "user", "hi", "wx"))
-    marrow_conn.execute(
-        "CREATE TABLE ct_rate_limit (key TEXT PRIMARY KEY, value TEXT, updated_at TEXT)")
-    marrow_conn.executemany(
-        "INSERT INTO ct_rate_limit (key, value, updated_at) VALUES (?, ?, '')",
-        [("five_hour_pct", "40"), ("five_hour_reset_at", "2026-07-08T04:30:00+00:00"),
-         ("seven_day_pct", "12")])
     marrow_conn.commit()
 
     monkeypatch.setattr(note, "_frontmost_app", lambda: None)
@@ -913,9 +759,7 @@ def test_gather_end_to_end(marrow_conn, cfg, tmp_path, monkeypatch):
     data = note.gather(marrow_conn, cfg, NOW, decision={
         "reasons": [_FloorReason()]})
     assert "wake_parts" not in data  # Wake reason line retired
-    assert data["budget"]["five_h_pct"] == 40.0
-    assert data["budget"]["five_h_reset"] == "14:30"  # 04:30Z -> AEST
-    assert data["budget"]["seven_d_pct"] == 12.0
+    assert "budget" not in data  # budget line retired
     assert len(data["replay"]) == 1
     assert "handoff" not in data  # handoff moved to SessionStart
     text = note.render(cfg, NOW, data)
@@ -1398,8 +1242,10 @@ def _isolate_wake_state(cfg, tmp_path, state: dict | None):
 
 
 def test_gather_window_sid_override(marrow_conn, cfg, tmp_path, monkeypatch):
-    """Caller-supplied window_sid wins for the Window line even when wake_state
-    carries a stale (or no) transcript — awake_since still comes from wake_state."""
+    """Caller-supplied window_sid wins in the gathered data even when wake_state
+    carries a stale (or no) transcript — awake_since still comes from wake_state.
+    Neither is rendered any more (Window line retired); the data keys stay for
+    callers that pass window_sid (watchdog / note_render --transcript)."""
     make_events_table(marrow_conn)
     marrow_conn.commit()
     monkeypatch.setattr(note, "_frontmost_app", lambda: None)
@@ -1410,8 +1256,7 @@ def test_gather_window_sid_override(marrow_conn, cfg, tmp_path, monkeypatch):
     data = note.gather(marrow_conn, cfg, NOW, window_sid="feed1234")
     assert data["window_sid"] == "feed1234"
     assert data["awake_since_hm"] == (NOW - timedelta(minutes=3)).strftime("%H:%M")
-    text = note.render(cfg, NOW, data)
-    assert "Window: since " in text and "SID feed1234" in text
+    assert "Window:" not in note.render(cfg, NOW, data)
 
 
 def test_gather_window_sid_falls_back_to_wake_state(marrow_conn, cfg, tmp_path, monkeypatch):
@@ -1426,7 +1271,7 @@ def test_gather_window_sid_falls_back_to_wake_state(marrow_conn, cfg, tmp_path, 
 
 
 def test_gather_window_sid_only_when_wake_state_empty(marrow_conn, cfg, tmp_path, monkeypatch):
-    """Override renders the Window SID line even with no awake_since/no state."""
+    """Override lands in the data even with no awake_since/no state."""
     make_events_table(marrow_conn)
     marrow_conn.commit()
     monkeypatch.setattr(note, "_frontmost_app", lambda: None)
@@ -1435,7 +1280,7 @@ def test_gather_window_sid_only_when_wake_state_empty(marrow_conn, cfg, tmp_path
     data = note.gather(marrow_conn, cfg, NOW, window_sid="cafe0001")
     assert data["window_sid"] == "cafe0001"
     assert data["awake_since_hm"] is None
-    assert "Window: SID cafe0001" in note.render(cfg, NOW, data)
+    assert "Window:" not in note.render(cfg, NOW, data)
 
 
 # --------------------------------------------------------------------------- #
@@ -1458,7 +1303,7 @@ def test_note_render_main_prints_fresh_note_no_writes(tmp_path, monkeypatch, cap
     note_render.main()
     out = capsys.readouterr().out
     assert "Now: " in out
-    assert "SID feed1234" in out
+    assert "Window:" not in out  # Window/SID line retired
     # no wake_state written, DB not mutated by a fresh render
     assert not (tmp_path / "ws.json").exists()
 

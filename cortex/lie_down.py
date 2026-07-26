@@ -139,7 +139,7 @@ def lie_down(cfg: dict, force_slept: str | None = None, rotate: bool = False,
         # MCP wrapper surfaces to the session.
         next_floor = occupancy.lie_down(conn, cfg, minutes=next_wake_min)
         # Publish AFTER the floor redraw's save_state (which drops the key), so the
-        # next wake's Plan Used line sees this wake's window occupancy (statusline
+        # window_tokens_hint sees this wake's window occupancy (statusline
         # total: input + cache_read + cache_creation + output — the same metric
         # `tokens` already computed above for rotate/fuse), not the NET spend.
         occupancy.store_window_tokens(conn, tokens)

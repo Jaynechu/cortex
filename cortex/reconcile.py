@@ -139,16 +139,6 @@ def _parse_local(iso: str | None, cfg: dict):
     return dt.replace(tzinfo=tz) if dt.tzinfo is None else dt
 
 
-def _daily_budget_gate(conn, cfg: dict) -> str | None:
-    """The one wake gate: today's context-token spend against the daily budget.
-    Returns the gate name when it BLOCKS, else None. cap <= 0 disables it."""
-    cap = int(cfg.get("gates", {}).get("daily_budget", {}).get("tokens", 1_000_000))
-    if cap <= 0:
-        return None
-    spent = int(occupancy._today_tokens(conn, occupancy._now(cfg)) or 0)
-    return "daily_budget" if spent >= cap else None
-
-
 def _fire_dead_window(conn, cfg: dict, why: str) -> str:
     """A dead resident window whose ledger is due (or an accidental close) needs
     firing NOW. Reuse the tested wake path: run_wake's _window_wake_plan reads the
@@ -158,16 +148,9 @@ def _fire_dead_window(conn, cfg: dict, why: str) -> str:
     Every branch here handled the due ledger entry -> it must be consumed
     (cleared or replaced with the freshly redrawn floor), else the stale
     next_wake_at stays due and reconcile re-fires it again next pass (headless
-    wake every cadence).
-
-    Runs the daily-budget gate, so an alarm due after budget exhaustion does not
-    fire anyway. Gated -> HOLD, ledger left UN-consumed (reconcile retries every
-    pass, firing naturally once the gate opens)."""
+    wake every cadence)."""
     from cortex.wake import run_wake
     now = occupancy._now(cfg)
-    gated = _daily_budget_gate(conn, cfg)
-    if gated:
-        return f"reconcile ({why}) -> gated ({gated}), ledger held for retry"
     if bool(cfg["pacemaker"].get("dry_run", True)):
         next_floor = occupancy.lie_down(conn, cfg)
         wake_state.set_next_wake_at(cfg, next_floor.isoformat() if next_floor else None)

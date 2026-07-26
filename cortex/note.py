@@ -5,7 +5,7 @@ probe. Every external source is wrapped in try/except so a failure omits its
 line rather than crashing the wake. render() is pure — no I/O, no DB — so it
 can be unit-tested with synthetic data.
 
-Layout: a header block (Now / Plan Used / Active), then `---`-separated blocks
+Layout: a header block (Now / Active), then `---`-separated blocks
 for pending self-schedule and Replay. The handoff injects at
 SessionStart (marrow), not here. Cal/Rem lines retired (global inject pending).
 The old "Wake:" reason line is gone — reasons carry no signal (desire engine
@@ -22,15 +22,6 @@ from zoneinfo import ZoneInfo
 
 from cortex import config
 from cortex.occupancy import parse_due_at
-from cortex.occupancy import _today_tokens as _occupancy_today_tokens
-
-# ct_rate_limit is a flat kv table (key, value, updated_at) the marrow-side
-# collector owns (usage_snapshot). Keys read here: five_hour_pct /
-# five_hour_reset_at, seven_day_pct / seven_day_reset_at, today_net_tokens.
-# Any missing key -> that segment is omitted.
-_FIVE_HOUR = ("five_hour_pct", "five_hour_reset_at")
-_SEVEN_DAY = ("seven_day_pct", "seven_day_reset_at")
-_TODAY_NET_KEY = "today_net_tokens"
 
 # A wake row younger than this many seconds is treated as *this* wake (the tick
 # logs it before the note is assembled), so "Last wake" reports the one before.
@@ -358,46 +349,6 @@ def _last_active(conn: sqlite3.Connection, cfg: dict, now: datetime) -> dict | N
     return {"minutes_ago": int(age.total_seconds() // 60), "ts": row["ts"]}
 
 
-def _today_tokens(conn: sqlite3.Connection, now: datetime) -> int:
-    """Cortex Today = sum of today's finished-window final occupancies + the
-    current live window occupancy. Delegates to the daily-budget gate's helper
-    (occupancy._today_tokens) so the note line and the gate always
-    show the same figure (parity by construction, not by two copies)."""
-    return _occupancy_today_tokens(conn, now)
-
-
-def _rate_limit_kv(conn: sqlite3.Connection) -> dict:
-    try:
-        rows = conn.execute("SELECT key, value FROM ct_rate_limit").fetchall()
-    except sqlite3.OperationalError:
-        return {}
-    return {row["key"]: row["value"] for row in rows}
-
-
-def _window_tokens(conn: sqlite3.Connection) -> int | None:
-    """Window occupancy hint (statusline total: input + cache_read +
-    cache_creation + output) published by lie_down / watchdog into
-    ct_pacemaker_state JSON under 'window_tokens'. Absent -> None (segment
-    omitted). Rendered as the Budget 'Net Session Token: Xk' segment."""
-    try:
-        row = conn.execute(
-            "SELECT state FROM ct_pacemaker_state WHERE id = 1"
-        ).fetchone()
-    except sqlite3.OperationalError:
-        return None
-    if not row:
-        return None
-    try:
-        state = json.loads(row["state"])
-    except (ValueError, TypeError):
-        return None
-    val = state.get("window_tokens")
-    try:
-        return int(val) if val is not None else None
-    except (TypeError, ValueError):
-        return None
-
-
 # Media / bridge-marker shaper — deliberate copy of marrow strip_media_markers
 # (marrow/marrow/transcript.py:102; marrow not importable from the cortex env).
 # Keep byte-identical with that pairing. Strips wx [time:]/[sticker:] markers and
@@ -723,8 +674,6 @@ def gather(
 
     from cortex import wake_state
 
-    kv = _safe(_rate_limit_kv, conn, default={})
-    budget = _safe(_build_budget, conn, cfg, now, kv, ncfg)
     last_wake = _safe(_last_wake, conn, now)
     last_active = _safe(_last_active, conn, cfg, now)
 
@@ -858,7 +807,6 @@ def gather(
         "ct_notes": ct_notes,
         "last_wake": last_wake,
         "last_active": last_active,
-        "budget": budget,
         "active_app": _safe(_frontmost_app),
         "pending": _safe(_pending, cfg, now, default=[]),
         "replay": replay,
@@ -871,92 +819,10 @@ def gather(
 CLI_SHELL = "cli"
 
 
-def _shell_labels(ncfg: dict) -> dict:
-    labels = ncfg.get("shell_labels")
-    return labels if isinstance(labels, dict) else {}
-
-
-def _hosted_shells(cfg: dict, ncfg: dict, now: datetime) -> list[dict]:
-    """Today-tokens + occupancy of every non-cli shell that has a readable
-    ledger. Each shell host (e.g. the tg bridge) writes its own
-    <shell_state_dir>/<shell>.json; absent / unreadable / occupancy-less file
-    -> the shell drops its line. Plain read: writers replace the file
-    atomically.
-
-    Today mirrors the cli figure: finished sessions' finals (tokens_today_base,
-    folded by the host) + the live session occupancy. A tokens_date other than
-    today's local date means the host has not rolled over yet -> base 0."""
-    base_dir = config.shell_state_dir(cfg)
-    today = now.astimezone(_tz(cfg)).strftime("%Y-%m-%d")
-    out: list[dict] = []
-    for shell, label in _shell_labels(ncfg).items():
-        if shell == CLI_SHELL:
-            continue
-        try:
-            data = json.loads((base_dir / f"{shell}.json").read_text())
-            occupancy = int(data["occupancy"])
-        except (OSError, ValueError, TypeError, KeyError):
-            continue
-        base = 0
-        if str(data.get("tokens_date") or "") == today:
-            try:
-                base = max(int(data.get("tokens_today_base") or 0), 0)
-            except (TypeError, ValueError):
-                base = 0
-        out.append({"label": str(label or ""), "today": base + occupancy,
-                    "occupancy": occupancy})
-    return out
-
-
-def _build_budget(conn, cfg, now, kv, ncfg) -> dict:
-    five = kv.get(_FIVE_HOUR[0])
-    seven = kv.get(_SEVEN_DAY[0])
-    five_reset = kv.get(_FIVE_HOUR[1])
-    seven_reset = kv.get(_SEVEN_DAY[1])
-    return {
-        "cli_label": str(_shell_labels(ncfg).get(CLI_SHELL, "")),
-        "shells": _safe(_hosted_shells, cfg, ncfg, now) or [],
-        "five_h_pct": _as_float(five),
-        "five_h_reset": _local_hm(five_reset, cfg) if five_reset else None,
-        "seven_d_pct": _as_float(seven),
-        "seven_d_countdown": _countdown(seven_reset, now) if seven_reset else None,
-        "window_tokens": _window_tokens(conn),
-        "today_tokens": _today_tokens(conn, now),
-        "daily_budget": int(ncfg.get("daily_budget", 1_000_000)),
-    }
-
-
-def _countdown(reset_iso: str, now: datetime) -> str | None:
-    """Remaining time until an ISO reset moment as a compact `1d2h`/`5h`/`12m`
-    string. Past/unparseable -> None (segment omitted)."""
-    try:
-        delta = _parse_utc(reset_iso) - now.astimezone(ZoneInfo("UTC"))
-    except (TypeError, ValueError):
-        return None
-    secs = int(delta.total_seconds())
-    if secs <= 0:
-        return None
-    days, rem = divmod(secs, 86400)
-    hours, rem = divmod(rem, 3600)
-    mins = rem // 60
-    if days:
-        return f"{days}d{hours}h" if hours else f"{days}d"
-    if hours:
-        return f"{hours}h{mins}m" if mins else f"{hours}h"
-    return f"{mins}m"
-
-
-def _as_float(raw):
-    try:
-        return float(raw)
-    except (TypeError, ValueError):
-        return None
-
-
 def render(cfg: dict, now: datetime, data: dict) -> str:
     """Pure assembly: data dict -> wakeup note text. No DB / no I/O.
 
-    Layout (plan §一): a header block (Now / Plan Used / Active), then
+    Layout (plan §一): a header block (Now / Active), then
     `---`-separated blocks for pending self-schedule and Replay, then a final
     turn-end reminder line (note.turn_end_text, every render; "" omits it).
     Handoff no longer lives here — it is injected at SessionStart on a
@@ -978,23 +844,9 @@ def render(cfg: dict, now: datetime, data: dict) -> str:
         now_seg += f" | {seg}"
     header.append(now_seg)
 
-    budget_line = _render_budget(data.get("budget"))
-    if budget_line:
-        header.append(budget_line)
-
     app = data.get("active_app")
     if app:
         header.append(f"Active (Mac): {app}")
-
-    w_sid = data.get("window_sid")
-    w_since = data.get("awake_since_hm")
-    if w_sid or w_since:
-        parts = []
-        if w_since:
-            parts.append(f"since {w_since}")
-        if w_sid:
-            parts.append(f"SID {w_sid}")
-        header.append("Window: " + " | ".join(parts))
 
     blocks: list[str] = ["\n".join(header)]
 
@@ -1049,65 +901,6 @@ def render(cfg: dict, now: datetime, data: dict) -> str:
     if machine_tag:
         note_text = machine_tag + "\n\n" + note_text
     return note_text
-
-
-def _render_budget(budget: dict | None) -> str | None:
-    """Plan Used line — shows utilization (USED %, statusline口径), pipe-joined:
-    `Plan Used: 5h 5% (04:50) | 7d 50% (1d2h) | Cortex-Cli Today 250k/1M 25%
-    | Net Session Token: 50k`. Net Session Token is window occupancy (statusline
-    total), not net spend — label kept for cross-system consistency with
-    marrow's threshold line. Any missing datum drops just its segment.
-
-    One `<label> Today` line per shell against the shared daily budget: the cli
-    shell rides the Plan Used line, every other hosted shell (budget["shells"])
-    adds its own line below with the same two figures — today's cumulative
-    tokens and the live window occupancy."""
-    if not budget:
-        return None
-    parts = []
-    five = budget.get("five_h_pct")
-    if five is not None:
-        seg = f"5h {five:.0f}%"
-        if budget.get("five_h_reset"):
-            seg += f" ({budget['five_h_reset']})"
-        parts.append(seg)
-    seven = budget.get("seven_d_pct")
-    if seven is not None:
-        seg = f"7d {seven:.0f}%"
-        if budget.get("seven_d_countdown"):
-            seg += f" ({budget['seven_d_countdown']})"
-        parts.append(seg)
-    daily = int(budget.get("daily_budget", 1_000_000))
-    today = int(budget.get("today_tokens", 0))
-    parts.append(_today_seg(budget.get("cli_label"), today, daily))
-    window = budget.get("window_tokens")
-    if window is not None:
-        parts.append(_net_seg(int(window)))
-    if not parts:
-        return None
-    lines = ["Plan Used: " + " | ".join(parts)]
-    for shell in budget.get("shells") or []:
-        lines.append(" | ".join([
-            _today_seg(shell.get("label"), int(shell.get("today", 0)), daily),
-            _net_seg(int(shell.get("occupancy", 0))),
-        ]))
-    return "\n".join(lines)
-
-
-def _today_seg(label, tokens: int, daily: int) -> str:
-    pct = (tokens / daily * 100) if daily else 0
-    head = f"{label} " if label else ""
-    return f"{head}Today {tokens // 1000}k/{_fmt_budget(daily)} {pct:.0f}%"
-
-
-def _net_seg(tokens: int) -> str:
-    return f"Net Session Token: {tokens // 1000}k"
-
-
-def _fmt_budget(n: int) -> str:
-    if n >= 1_000_000 and n % 1_000_000 == 0:
-        return f"{n // 1_000_000}M"
-    return f"{n // 1000}k"
 
 
 def _truncate(text: str, limit: int) -> str:

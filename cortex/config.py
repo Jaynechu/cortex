@@ -139,12 +139,6 @@ _DEFAULTS: dict[str, Any] = {
     "pacemaker": {
         "dry_run": True,
     },
-    "gates": {
-        # Daily wake-token budget: once Cortex Today (sum of today's finished-
-        # window final context occupancies + the current live window occupancy)
-        # reaches this, self-wakes stop; resets at local midnight.
-        "daily_budget": {"tokens": 1_000_000},
-    },
     "triggers": {
         # Wake-window draw (minutes) from lie-down. lie_down picks the next wake:
         # an explicit choice clamped to [min, max] (max = cache-TTL guard, min =
@@ -187,16 +181,6 @@ _DEFAULTS: dict[str, Any] = {
         "replay_events": 4,
         # Per-event truncation inside the Replay block.
         "replay_event_chars": 300,
-        # Daily wake-token (NET spend) budget the "<label> Today X/Y" segment
-        # renders against — must match gates.daily_budget.tokens (display=gate).
-        "daily_budget": 1_000_000,
-        # Display label leading each "<label> Today" line (one line per shell,
-        # shared daily_budget denominator, same two figures on each: today's
-        # tokens + live occupancy). cli reads this repo's own today-token sum;
-        # every other key reads tokens_today_base + occupancy from
-        # <paths.shell_state_dir>/<shell>.json and drops its line when that
-        # file is absent/unreadable. "" as a label renders the line unlabelled.
-        "shell_labels": {"cli": "Cortex-Cli", "tg": "Cortex-Tg"},
         # Pending self-schedule entries surface only when due within this window.
         "pending_window_min": 15,
         # Reply-receipt line (C11): one per sent note she has replied to since the
@@ -243,7 +227,7 @@ _DEFAULTS: dict[str, Any] = {
 
 _SECTIONS = (
     "core", "paths", "knowledgec", "geofence", "health",
-    "tick", "pacemaker", "gates", "triggers", "marrow",
+    "tick", "pacemaker", "triggers", "marrow",
     "wake", "note", "kick", "outbox", "daemon",
 )
 

@@ -540,20 +540,19 @@ def test_lie_down_records_tokens(cfg):
     assert wake_state.is_awake(cfg) is False  # marker cleared
 
 
-def test_store_window_tokens_reaches_budget_line(cfg):
-    """store_window_tokens publishes to ct_pacemaker_state; note reads it back
-    (Budget line 'net Xk'). Survives lie_down's own floor-redraw save_state."""
-    from cortex import note
+def test_store_window_tokens_survives_floor_redraw(cfg):
+    """store_window_tokens publishes to ct_pacemaker_state and window_tokens_hint
+    reads it back. Survives lie_down's own floor-redraw save_state."""
     from cortex import occupancy
 
     conn = db.connect(cfg)
     try:
         occupancy.store_window_tokens(conn, 88_000)
-        assert note._window_tokens(conn) == 88_000
+        assert occupancy.window_tokens_hint(conn) == 88_000
         # a later floor-redraw save must NOT wipe it out of order
         occupancy.lie_down(conn, cfg)
         occupancy.store_window_tokens(conn, 90_000)
-        assert note._window_tokens(conn) == 90_000
+        assert occupancy.window_tokens_hint(conn) == 90_000
     finally:
         conn.close()
 
@@ -958,9 +957,9 @@ def test_lie_down_no_auto_rotate_over_line(cfg):
 
 def test_lie_down_publishes_occupancy(cfg):
     """lie_down records window occupancy to ct_wake_log.tokens and publishes it
-    for the next wake's Budget 'Net Session Token' line. net_tokens is no longer
+    onto ct_pacemaker_state (window_tokens_hint). net_tokens is no longer
     written (historical column stays NULL)."""
-    from cortex import note
+    from cortex import occupancy
 
     conn = db.connect(cfg)
     conn.execute(
@@ -982,7 +981,7 @@ def test_lie_down_publishes_occupancy(cfg):
     assert r["tokens"] == 91_500  # ct_wake_log records total occupancy
     conn = db.connect(cfg)
     try:
-        assert note._window_tokens(conn) == 91_500  # Budget line = window occupancy
+        assert occupancy.window_tokens_hint(conn) == 91_500  # published occupancy
         row = conn.execute(
             "SELECT tokens, net_tokens FROM ct_wake_log WHERE id=?", (wid,)).fetchone()
         assert row["tokens"] == 91_500 and row["net_tokens"] is None
@@ -1018,7 +1017,7 @@ def test_today_tokens_single_window_counts_final_once(cfg):
     ONCE — its final occupancy — not the sum of every lie-down snapshot. No live
     window occupancy published, so the whole run is the current (open) window and
     contributes only via window_tokens_hint (0 here)."""
-    from cortex import note
+    from cortex import occupancy
     from datetime import datetime as _dt, timezone as _tz
 
     now = _dt.now(_tz.utc)
@@ -1031,7 +1030,8 @@ def test_today_tokens_single_window_counts_final_once(cfg):
         conn.commit()
         # The single monotonic run is the trailing (current) window -> no finished
         # final; live occupancy hint is unset -> 0. Not 5k+20k+50k.
-        assert note._today_tokens(conn, now) == 0
+        assert occupancy._finished_window_finals(conn, now) == 0
+        assert occupancy.window_tokens_hint(conn) == 0
     finally:
         conn.close()
 
@@ -1041,7 +1041,6 @@ def test_today_tokens_two_windows_sum_finals(cfg):
     FIRST window's final (its peak before the drop) is a finished final; the
     second run is the current window (added via the live hint). Finished finals
     sum to the first window's final only."""
-    from cortex import note
     from cortex import occupancy
     from datetime import datetime as _dt, timezone as _tz
 
@@ -1056,9 +1055,8 @@ def test_today_tokens_two_windows_sum_finals(cfg):
         conn.commit()
         # finished finals = window 1 final (40k); window 2 is current -> live hint
         occupancy.store_window_tokens(conn, 30_000)  # live occupancy grew past 25k
-        assert note._today_tokens(conn, now) == 40_000 + 30_000
-        # gate agrees with the note line (same helper)
-        assert occupancy._today_tokens(conn, now) == 40_000 + 30_000
+        assert occupancy._finished_window_finals(conn, now) == 40_000
+        assert occupancy.window_tokens_hint(conn) == 30_000
     finally:
         conn.close()
 
@@ -1066,7 +1064,6 @@ def test_today_tokens_two_windows_sum_finals(cfg):
 def test_today_tokens_current_window_added_from_live_hint(cfg):
     """The current window's contribution comes from the live window_tokens hint
     (fresher than its last ct_wake_log row), added on top of finished finals."""
-    from cortex import note
     from cortex import occupancy
     from datetime import datetime as _dt, timezone as _tz
 
@@ -1074,33 +1071,11 @@ def test_today_tokens_current_window_added_from_live_hint(cfg):
     conn = db.connect(cfg)
     try:
         occupancy.store_window_tokens(conn, 12_345)  # only a live window, no finished rows
-        assert note._today_tokens(conn, now) == 12_345
+        assert occupancy._finished_window_finals(conn, now) == 0
+        assert occupancy.window_tokens_hint(conn) == 12_345
     finally:
         conn.close()
 
-
-def test_today_tokens_note_and_gate_agree(cfg):
-    """note._today_tokens and the gate's occupancy._today_tokens are the same
-    number by construction (note delegates to the gate helper)."""
-    from cortex import note
-    from cortex import occupancy
-    from datetime import datetime as _dt, timezone as _tz
-
-    now = _dt.now(_tz.utc)
-    conn = db.connect(cfg)
-    try:
-        for occ in (8_000, 30_000, 2_000, 15_000):
-            conn.execute(
-                "INSERT INTO ct_wake_log (ts, wake, dry_run, tokens) VALUES (?,1,0,?)",
-                (db.utcnow_iso(), occ))
-        conn.commit()
-        occupancy.store_window_tokens(conn, 18_000)
-        assert note._today_tokens(conn, now) == occupancy._today_tokens(conn, now)
-    finally:
-        conn.close()
-
-
-# --- lie_down next_wake (item 3) ----------------------------------------------
 
 def test_lie_down_returns_next_wake_hm(cfg):
     """lie_down returns next_wake as local HH:MM (the marrow MCP wrapper surfaces
@@ -1108,7 +1083,6 @@ def test_lie_down_returns_next_wake_hm(cfg):
     from datetime import datetime as _dt
     from zoneinfo import ZoneInfo
 
-    cfg["gates"]["night"] = {"start": "23:00", "end": "23:00", "cap": 0}  # disabled
     conn = db.connect(cfg)
     conn.execute(
         "INSERT INTO ct_wake_log (ts, wake, dry_run, explanation) VALUES (?,1,0,?)",
@@ -1135,7 +1109,6 @@ def test_lie_down_clamps_next_wake_min_to_ceiling(cfg):
     from datetime import datetime as _dt
     from zoneinfo import ZoneInfo
 
-    cfg["gates"]["night"] = {"start": "23:00", "end": "23:00", "cap": 0}  # disabled
     conn = db.connect(cfg)
     conn.execute(
         "INSERT INTO ct_wake_log (ts, wake, dry_run, explanation) VALUES (?,1,0,?)",
@@ -1158,7 +1131,6 @@ def test_lie_down_zero_is_immediate_rewake(cfg):
     from datetime import datetime as _dt
     from zoneinfo import ZoneInfo
 
-    cfg["gates"]["night"] = {"start": "23:00", "end": "23:00", "cap": 0}  # disabled
     conn = db.connect(cfg)
     conn.execute(
         "INSERT INTO ct_wake_log (ts, wake, dry_run, explanation) VALUES (?,1,0,?)",
@@ -1180,7 +1152,6 @@ def test_lie_down_negative_clamps_to_zero(cfg):
     from datetime import datetime as _dt
     from zoneinfo import ZoneInfo
 
-    cfg["gates"]["night"] = {"start": "23:00", "end": "23:00", "cap": 0}  # disabled
     conn = db.connect(cfg)
     conn.execute(
         "INSERT INTO ct_wake_log (ts, wake, dry_run, explanation) VALUES (?,1,0,?)",
