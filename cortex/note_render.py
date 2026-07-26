@@ -4,13 +4,20 @@ The wake-time note is assembled once and frozen to disk; a rotated window then
 gets a stale file. This entry re-renders at injection time so "Now:" and the
 Window SID always reflect the caller's current moment and transcript.
 
-Contract: read-only. No ct_wake_log writes, no wake_state writes, no file
-writes. --transcript supplies the Window-line SID (Path(...).stem[:8]) — the
-caller's own transcript, correct even after rotation. Print the note; exit 0.
+Contract: read-only. No ct_wake_log writes, no wake_state writes, no shell
+ledger writes, no file writes. --transcript supplies the Window-line SID
+(Path(...).stem[:8]) — the caller's own transcript, correct even after
+rotation. Print the note; exit 0.
+
+--shell <non-cli> additionally reports which events row the rendered Replay
+covered, out-of-band on stderr as one `cutoff_row_id=N` line (stdout stays the
+note body). The feeder writes that to the shell ledger only after a successful
+feed, so a manual/debug render can never poison a cursor.
 """
 from __future__ import annotations
 
 import argparse
+import sys
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -30,7 +37,9 @@ def main() -> None:
                         help="shell id this note is rendered for; its own "
                              "channel drops out of Replay so the note does not "
                              "replay the shell back at itself "
-                             "([note].shell_replay_exclude). Unset = the "
+                             "([note].shell_replay_exclude). A non-cli shell "
+                             "also diffs from its own ledger cursor and gets a "
+                             "cutoff_row_id line on stderr. Unset = the "
                              "unqualified (cli) set")
     args = parser.parse_args()
 
@@ -46,10 +55,16 @@ def main() -> None:
 
     conn = db.connect(cfg)
     try:
-        data = note.gather(conn, cfg, now, window_sid=window_sid)
+        data = note.gather(conn, cfg, now, window_sid=window_sid,
+                           shell=args.shell)
         if args.no_ct:
             data["ct_notes"] = []
         print(note.render(cfg, now, data))
+        # Out-of-band cutoff for a non-cli shell's feeder. Nothing rendered ->
+        # no line, so the feeder promotes nothing.
+        cutoff = data.get("rendered_cutoff_row_id")
+        if args.shell and args.shell != note.CLI_SHELL and cutoff is not None:
+            print(f"cutoff_row_id={int(cutoff)}", file=sys.stderr)
     finally:
         conn.close()
 

@@ -443,6 +443,22 @@ def _since_row_id(conn: sqlite3.Connection, ws: dict) -> int | None:
     return int(row["id"]) if row and row["id"] is not None else None
 
 
+def _shell_ledger_row_id(cfg: dict, shell: str) -> int | None:
+    """The replay cursor of a NON-cli shell: `last_note_row_id` in that shell's
+    ledger (<shell_state_dir>/<shell>.json), the per-shell counterpart of
+    wake_state.last_note_row_id. Each shell owns its own position, so whichever
+    shell wakes first no longer consumes the batch for the others. Plain read
+    (hosts replace the file atomically); missing file / key -> None = full
+    window, same as a cli first read. This entry never writes the ledger — the
+    feeder promotes the cutoff after a successful feed."""
+    try:
+        raw = (config.shell_state_dir(cfg) / f"{shell}.json").read_text()
+        v = json.loads(raw).get("last_note_row_id")
+    except (OSError, ValueError, TypeError, AttributeError):
+        return None
+    return int(v) if isinstance(v, int) else None
+
+
 def _replay(conn: sqlite3.Connection, cfg: dict, limit: int, per_chars: int,
             since_row_id: int | None = None
             ) -> tuple[list[dict], str | None, int | None]:
@@ -672,6 +688,7 @@ def gather(
     consume_kick: bool = False,
     claim_ct_notes: bool = True,
     settle: bool = False,
+    shell: str | None = None,
 ) -> dict:
     """Assemble the wakeup note data dict. conn must use sqlite3.Row factory.
     `fresh`/`wake_kind` are accepted for caller compatibility; the handoff
@@ -696,7 +713,12 @@ def gather(
     paths (free-round ear write). The wake-assemble path leaves settle=False (its
     frozen note may be discarded — the marrow hook is the real injector). A
     passive re-render (consume_kick=False) PEEKS all three read-only so an
-    un-injected payload surfaces again — never consumes, never settles."""
+    un-injected payload surfaces again — never consumes, never settles.
+
+    `shell` (default None = the unqualified/cli render): the shell this note is
+    rendered for. A non-cli shell takes its replay cursor from its own ledger
+    (_shell_ledger_row_id) instead of wake_state, and never advances a cursor
+    here — the ledger belongs to the feeder that knows the feed outcome."""
     ncfg = _note_cfg(cfg)
 
     from cortex import wake_state
@@ -731,7 +753,15 @@ def gather(
     # wake (last_note_row_id). Absent (wake's initial note, or wake_state load
     # failed) -> full replay, same as before this refactor. `full_replay` forces
     # a full (non-diff) render for the on-disk mirror without touching baseline.
-    note_since_row_id = None if full_replay else _safe(_since_row_id, conn, ws)
+    # A non-cli shell diffs from its OWN ledger cursor, never from wake_state
+    # (which belongs to the cli shell).
+    shell_cursor = bool(shell) and str(shell) != CLI_SHELL
+    if full_replay:
+        note_since_row_id = None
+    elif shell_cursor:
+        note_since_row_id = _safe(_shell_ledger_row_id, cfg, str(shell))
+    else:
+        note_since_row_id = _safe(_since_row_id, conn, ws)
     replay, rendered_cutoff, rendered_cutoff_row_id = _safe(
         _replay, conn, cfg,
         ncfg.get("replay_events", 4),
@@ -783,8 +813,10 @@ def gather(
                             is not None else note_since_row_id)
     # Advance the diff-mode cursor to the cutoff of what was rendered, so the
     # NEXT free-round tuck-in diffs from here. Monotonic: only moves forward.
-    # Gated on advance_baseline: render-only callers never write it.
-    if advance_baseline and rendered_cutoff_row_id is not None and (
+    # Gated on advance_baseline: render-only callers never write it. A non-cli
+    # shell render never writes here either — its cursor is not wake_state's.
+    if advance_baseline and not shell_cursor and (
+            rendered_cutoff_row_id is not None) and (
             note_since_row_id is None
             or rendered_cutoff_row_id > note_since_row_id):
         _safe(wake_state.set_last_note_row_id, cfg, rendered_cutoff_row_id)
@@ -816,6 +848,11 @@ def gather(
 
     return {
         "replay_cutoff_row_id": replay_cutoff_row_id,
+        # Max events row id of the RENDERED replay subset, None when this render
+        # showed no eligible row. Unlike replay_cutoff_row_id it never falls back
+        # to the cursor, so a caller can tell "covered new rows up to N" from
+        # "covered nothing".
+        "rendered_cutoff_row_id": rendered_cutoff_row_id,
         "kick_reasons": kick_reasons,
         "receipts": receipts,
         "ct_notes": ct_notes,
