@@ -300,6 +300,34 @@ def set_session_id(cfg: dict, sid: str) -> None:
     update(cfg, session_id=sid)
 
 
+def get_cortex_claude_sid(cfg: dict) -> str | None:
+    """Claude session UUID of the cli shell's cortex window (`cortex_claude_sid`,
+    stamped by set_awake at registration). NOT `session_id` — that key is the
+    iTerm session id."""
+    sid = load(cfg).get("cortex_claude_sid")
+    return str(sid).strip() or None if sid else None
+
+
+def shell_claude_sid(cfg: dict, shell: str | None = None) -> str | None:
+    """Claude session UUID of the cortex session running in `shell`.
+
+    cli  -> this file's `cortex_claude_sid`.
+    else -> `<shell_state_dir>/<shell>.json` key `session_id`, the ledger that
+            shell's host (e.g. the synapse tg bridge) writes; there `session_id`
+            IS the claude sid (cortex's own file uses that key for iTerm).
+    None when the file/key is missing — callers must degrade, never guess."""
+    shell = (shell or "cli").strip().lower()
+    if shell == "cli":
+        return get_cortex_claude_sid(cfg)
+    p = config.shell_state_dir(cfg) / f"{shell}.json"
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    sid = d.get("session_id") if isinstance(d, dict) else None
+    return str(sid).strip() or None if sid else None
+
+
 def is_awake(cfg: dict) -> bool:
     return bool(load(cfg).get("awake"))
 
