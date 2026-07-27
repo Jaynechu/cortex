@@ -147,8 +147,7 @@ def _fire_dead_window(conn, cfg: dict, why: str) -> str:
 
     Every branch here handled the due ledger entry -> it must be consumed
     (cleared or replaced with the freshly redrawn floor), else the stale
-    next_wake_at stays due and reconcile re-fires it again next pass (headless
-    wake every cadence)."""
+    next_wake_at stays due and reconcile re-fires it again every cadence."""
     from cortex.wake import run_wake
     now = occupancy._now(cfg)
     if bool(cfg["pacemaker"].get("dry_run", True)):

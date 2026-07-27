@@ -499,9 +499,9 @@ def test_window_wake_ear_miss_dead_respawns(cfg, monkeypatch):
     assert calls["typed"] == 1     # first bell only; a dead window is not re-typed
 
 
-def test_window_wake_falls_back_on_window_error(cfg, monkeypatch):
+def test_window_wake_returns_none_on_window_error(cfg, monkeypatch):
     """An osascript/iTerm failure (WindowError) in the respawn path -> None so
-    the caller drops to the headless fallback; awake marker stays off."""
+    the caller alerts and gives up the round; awake marker stays off."""
     from cortex import wake, window
 
     def boom(c, initial_prompt=None, resume_sid=None):

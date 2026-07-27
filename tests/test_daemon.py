@@ -195,13 +195,13 @@ def test_silence_due_in_counts_down_from_awake_since(cfg):
 
 # --- fire path ----------------------------------------------------------
 
-def test_business_fires_wake_and_redraws_ledger_headless(cfg, clock, monkeypatch):
+def test_business_fires_wake_and_redraws_ledger_on_non_window(cfg, clock, monkeypatch):
     import cortex.wake as wake_mod
     seen = {}
 
     def fake_run_wake(conn, c, decision, now=None, **kw):
         seen["decision"] = decision
-        return {"mode": "headless"}
+        return {"mode": "failed"}
 
     monkeypatch.setattr(wake_mod, "run_wake", fake_run_wake)
     wake_state.set_next_wake_at(
@@ -209,8 +209,8 @@ def test_business_fires_wake_and_redraws_ledger_headless(cfg, clock, monkeypatch
     d = _daemon(cfg, clock)
     line = d.business_once()
     assert seen["decision"]["wake_reasons"] == "next_wake_at"
-    assert "mode=headless" in line
-    # headless finished the wake -> a fresh floor is on the ledger again
+    assert "mode=failed" in line
+    # the round ended without a window -> a fresh floor is on the ledger again
     assert wake_state.get_next_wake_at(cfg) is not None
 
 

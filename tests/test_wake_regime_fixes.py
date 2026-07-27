@@ -84,24 +84,17 @@ def test_run_wake_fresh_spawn_failure_preserves_rotate_flag(cfg, monkeypatch):
     wake_state.set_rotated(cfg)
 
     monkeypatch.setattr(symlinks, "ensure_all", lambda c: None)
-    monkeypatch.setattr(wake, "_render_daybrief", lambda c: None)
 
-    # The fresh spawn fails to come up (osascript/iTerm WindowError); the window
-    # path then falls through to the headless marrow caller, which is stubbed so
-    # no real claude subprocess runs.
+    # The fresh spawn fails to come up (osascript/iTerm WindowError) -> the round
+    # is given up (alert + audit), nothing else runs.
     def boom(c, initial_prompt=None, resume_sid=None):
         raise window.WindowError("no iterm")
     monkeypatch.setattr(window, "respawn", boom)
-    monkeypatch.setattr(wake, "call_marrow_cortex",
-                        lambda *a, **k: {"text": None, "session_id": None})
 
     decision = {"wake": True, "reasons": [], "wake_reasons": "ctl"}
     conn = db.connect(cfg)
     try:
-        # run_wake's window branch runs only when `caller is call_marrow_cortex`;
-        # pass the (now-stubbed) default so the interactive path is exercised.
-        wake.run_wake(conn, cfg, decision, now=datetime.now(timezone.utc),
-                      caller=wake.call_marrow_cortex)
+        wake.run_wake(conn, cfg, decision, now=datetime.now(timezone.utc))
     finally:
         conn.close()
 
@@ -117,7 +110,6 @@ def test_run_wake_fresh_spawn_success_consumes_rotate_flag(cfg, monkeypatch):
     wake_state.set_rotated(cfg)
 
     monkeypatch.setattr(symlinks, "ensure_all", lambda c: None)
-    monkeypatch.setattr(wake, "_render_daybrief", lambda c: None)
     monkeypatch.setattr(window, "respawn",
                         lambda c, initial_prompt=None, resume_sid=None: "sid-new")
     monkeypatch.setattr(wake, "_wait_new_transcript", lambda c, preexisting: "/t/new.jsonl")
@@ -126,8 +118,7 @@ def test_run_wake_fresh_spawn_success_consumes_rotate_flag(cfg, monkeypatch):
     decision = {"wake": True, "reasons": [], "wake_reasons": "ctl"}
     conn = db.connect(cfg)
     try:
-        wake.run_wake(conn, cfg, decision, now=datetime.now(timezone.utc),
-                      caller=wake.call_marrow_cortex)
+        wake.run_wake(conn, cfg, decision, now=datetime.now(timezone.utc))
     finally:
         conn.close()
 
@@ -149,7 +140,6 @@ def test_run_wake_concurrent_rotate_second_entrant_skips(cfg, monkeypatch):
     _seed_wake_row(cfg, "rot-concurrent")
 
     monkeypatch.setattr(symlinks, "ensure_all", lambda c: None)
-    monkeypatch.setattr(wake, "_render_daybrief", lambda c: None)
     monkeypatch.setattr(watchdog, "spawn", lambda c: None)
 
     spawns = {"n": 0}
@@ -167,8 +157,7 @@ def test_run_wake_concurrent_rotate_second_entrant_skips(cfg, monkeypatch):
     decision = {"wake": True, "reasons": [], "wake_reasons": "ctl"}
     conn = db.connect(cfg)
     try:
-        res = wake.run_wake(conn, cfg, decision, now=datetime.now(timezone.utc),
-                            caller=wake.call_marrow_cortex)
+        res = wake.run_wake(conn, cfg, decision, now=datetime.now(timezone.utc))
     finally:
         conn.close()
 
@@ -188,7 +177,6 @@ def test_classify_wake_called_exactly_once_per_run_wake(cfg, monkeypatch):
     _seed_wake_row(cfg, "single-classify")
 
     monkeypatch.setattr(symlinks, "ensure_all", lambda c: None)
-    monkeypatch.setattr(wake, "_render_daybrief", lambda c: None)
     monkeypatch.setattr(watchdog, "spawn", lambda c: None)
     monkeypatch.setattr(window, "respawn",
                         lambda c, initial_prompt=None, resume_sid=None: "sid-new")
@@ -205,8 +193,7 @@ def test_classify_wake_called_exactly_once_per_run_wake(cfg, monkeypatch):
     decision = {"wake": True, "reasons": [], "wake_reasons": "ctl"}
     conn = db.connect(cfg)
     try:
-        wake.run_wake(conn, cfg, decision, now=datetime.now(timezone.utc),
-                      caller=wake.call_marrow_cortex)
+        wake.run_wake(conn, cfg, decision, now=datetime.now(timezone.utc))
     finally:
         conn.close()
     assert calls["n"] == 1
@@ -603,7 +590,6 @@ def test_interleave_rotate_sampling_gap_no_double_spawn(cfg, monkeypatch):
     wake_state.set_rotated(cfg)
 
     monkeypatch.setattr(symlinks, "ensure_all", lambda c: None)
-    monkeypatch.setattr(wake, "_render_daybrief", lambda c: None)
     monkeypatch.setattr(watchdog, "spawn", lambda c: None)
 
     spawns = {"n": 0}
@@ -626,8 +612,7 @@ def test_interleave_rotate_sampling_gap_no_double_spawn(cfg, monkeypatch):
     decision = {"wake": True, "reasons": [], "wake_reasons": "ctl"}
     conn = db.connect(cfg)
     try:
-        res = wake.run_wake(conn, cfg, decision, now=datetime.now(timezone.utc),
-                            caller=wake.call_marrow_cortex)
+        res = wake.run_wake(conn, cfg, decision, now=datetime.now(timezone.utc))
     finally:
         conn.close()
 

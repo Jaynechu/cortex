@@ -1,57 +1,27 @@
 """Wake runner (C3): on a wake decision (daemon reconcile, ctl, or CLI
---force), assemble the wakeup note, call marrow's resumed full-env cortex
-session, and persist the session_id.
-Freshness (a fresh marrow session, no resume_sid) comes only from the
-rotate/dead-window detection: a rotated or dead resident window is a new brain
-that reads the previous brain's handoff via SessionStart.
+--force), assemble the wakeup note and deliver it to the resident iTerm window
+(fresh spawn / resume / ear bell).
+Freshness (a brand-new window session) comes only from the rotate/dead-window
+detection: a rotated or dead resident window is a new brain that reads the
+previous brain's handoff via SessionStart.
 
-marrow lives in its own repo/venv (separate deps) — invoked as a subprocess
-against marrow's own venv python rather than imported in-process, so cortex
-stays decoupled (Frame: "own project, sibling of marrow").
+The window is the only delivery path: a failure raises an alert and gives up
+the round, leaving cursor/alarm state for the next tick to retry.
 """
 from __future__ import annotations
 
 import argparse
 import contextlib
 import fcntl
-import json
 import os
-import subprocess
 import sys
 import sqlite3
 import time
-from dataclasses import replace
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from cortex import config, db, note, occupancy, symlinks
 from cortex.timing import WakeTimer
-
-# Seconds added to the inner marrow claude-call budget (marrow.call_timeout_s)
-# to derive the outer subprocess kill deadline. The inner threading.Timer must
-# fire first (clean LLMError) before this outer subprocess.run timeout does;
-# the margin covers nested-python startup + marrow import.
-_OUTER_TIMEOUT_MARGIN_S = 30
-
-_PATH_ENV = (
-    f"{os.path.expanduser('~/.local/bin')}:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
-)
-
-_MARROW_CALL_SCRIPT = (
-    "import sys, json\n"
-    "sys.path.insert(0, sys.argv[1])\n"
-    "from marrow.llm import LLMClient\n"
-    "prompt = sys.stdin.read()\n"
-    "client = LLMClient()\n"
-    "result = client.call_cortex(prompt, cwd=sys.argv[2], "
-    "resume_sid=(sys.argv[3] or None), timeout=int(sys.argv[4]), "
-    "max_tokens=int(sys.argv[5]))\n"
-    "print(json.dumps(result))\n"
-)
-
-
-class WakeError(Exception):
-    pass
 
 
 def _now(cfg: dict) -> datetime:
@@ -60,48 +30,13 @@ def _now(cfg: dict) -> datetime:
 
 def assemble_note(conn: sqlite3.Connection, cfg: dict, now: datetime,
                   decision: dict | None = None, fresh: bool = False,
-                  wake_kind: str | None = None,
-                  replay: bool = False) -> str:
+                  wake_kind: str | None = None) -> str:
     """Thin wrapper: gather() + render(). `fresh`/`wake_kind` gate the handoff
-    section — only a fresh window (rotate) receives it.
-
-    `replay` (default False): include the Replay section. Only the headless
-    caller passes True — a window session gets replay from marrow's turn_inject
-    hook, which the headless path has no equivalent of."""
+    section — only a fresh window (rotate) receives it. The note never carries
+    Replay: a window session gets that from marrow's turn_inject hook."""
     data = note.gather(conn, cfg, now, decision=decision, fresh=fresh,
-                       wake_kind=wake_kind, consume_kick=True, replay=replay)
+                       wake_kind=wake_kind, consume_kick=True)
     return note.render(cfg, now, data)
-
-
-def call_marrow_cortex(prompt: str, cwd: str, resume_sid: str | None, cfg: dict) -> dict:
-    """Spawn marrow's own venv python to run LLMClient.call_cortex. Returns
-    {"text": str, "session_id": str | None}. Raises WakeError on failure."""
-    mcfg = cfg["marrow"]
-    python = os.path.expanduser(mcfg["venv_python"])
-    repo_dir = os.path.expanduser(mcfg["repo_dir"])
-    # Single source of truth: call_timeout_s is the inner claude-call budget,
-    # passed down so marrow enforces exactly this value; the outer subprocess
-    # kill is derived (inner + margin) so it never fires before the inner one.
-    inner_timeout = int(mcfg.get("call_timeout_s", 600))
-    outer_timeout = inner_timeout + _OUTER_TIMEOUT_MARGIN_S
-    token_cap = int(cfg.get("wake", {}).get("token_cap", 150_000))
-    # CORTEX_WAKE_ID / CORTEX_WAKE_TIMING_LOG (set by run_wake) ride os.environ
-    # into the marrow subprocess so its stream-event marks share this wake.
-    env = {**os.environ, "PATH": _PATH_ENV + ":" + os.environ.get("PATH", "")}
-    try:
-        proc = subprocess.run(
-            [python, "-c", _MARROW_CALL_SCRIPT, repo_dir, cwd,
-             resume_sid or "", str(inner_timeout), str(token_cap)],
-            input=prompt, capture_output=True, text=True, timeout=outer_timeout, env=env,
-        )
-    except subprocess.TimeoutExpired as e:
-        raise WakeError(f"marrow call_cortex timed out after {outer_timeout}s") from e
-    if proc.returncode != 0:
-        raise WakeError(f"marrow call_cortex failed: {proc.stderr.strip()[-2000:]}")
-    try:
-        return json.loads(proc.stdout.strip().splitlines()[-1])
-    except (ValueError, IndexError) as e:
-        raise WakeError(f"marrow call_cortex returned unparseable output: {proc.stdout[:500]}") from e
 
 
 def _audit_wake(conn: sqlite3.Connection, wake_id: str, summary: str) -> None:
@@ -117,47 +52,22 @@ def _audit_wake(conn: sqlite3.Connection, wake_id: str, summary: str) -> None:
         pass
 
 
-def _alert_respawn_failed(conn: sqlite3.Connection, wake_id: str, detail: str) -> None:
-    """The SOLE alert point in the wake ladder: a respawn that failed (exception
-    / window did not come up). Writes a marrow `alerts` row (the surfaced alert
-    table), falling back to an audit_log row if that table is absent. Best-effort
-    — never crashes the wake."""
+def _alert(conn: sqlite3.Connection, wake_id: str, alert_type: str,
+           detail: str) -> None:
+    """Raise a marrow `alerts` row (the surfaced alert table), falling back to
+    an audit_log row if that table is absent. Best-effort — never crashes the
+    wake. Two alert points: a respawn that failed (exception / window did not
+    come up) and the window path giving up the round."""
     try:
         conn.execute(
             "INSERT INTO alerts (severity, type, message, source) VALUES (?, ?, ?, ?)",
-            ("warn", "cortex_respawn_failed",
-             f"cortex wake respawn failed: {detail}", f"cortex_wake:{wake_id}"),
+            ("warn", alert_type, detail, f"cortex_wake:{wake_id}"),
         )
         conn.commit()
         return
     except Exception:  # noqa: BLE001 - table may be absent; fall back to audit
         pass
-    _audit_wake(conn, wake_id, f"respawn_failed: {detail}")
-
-
-def _force_fresh_next(conn: sqlite3.Connection, state, today: str) -> None:
-    """Next wake starts a fresh marrow session (drop resume sid).
-    Used on token-cap breach and marrow call failure/timeout so a broken/oversized
-    session is never resumed."""
-    occupancy.save_state(conn, replace(state, cortex_session_id=None))
-
-
-_DAYBRIEF_TIMEOUT_S = 20
-
-
-def _render_daybrief(cfg: dict) -> None:
-    """Re-render marrow's daybrief.md after a wake. marrow owns the renderer
-    (own venv/deps) — invoked as a subprocess against marrow's venv python,
-    same pattern as call_marrow_cortex. Best-effort: never raises, never
-    blocks the wake return."""
-    python = os.path.expanduser(cfg["marrow"]["venv_python"])
-    try:
-        subprocess.run(
-            [python, "-m", "marrow.daybrief"],
-            capture_output=True, text=True, timeout=_DAYBRIEF_TIMEOUT_S,
-        )
-    except Exception:  # noqa: BLE001 - must not kill the wake
-        pass
+    _audit_wake(conn, wake_id, f"{alert_type}: {detail}")
 
 
 def _wake_log_id(conn: sqlite3.Connection, now: datetime,
@@ -446,8 +356,8 @@ def _spawn_wake(conn, cfg, now, resume: bool = False,
     tagged, epoch-token in its receipt) so the resumed window gets its note
     without waiting on anything. Resume with no recorded UUID -> fall back to a
     fresh spawn. Sets the awake marker + lights the watchdog. Returns a dict, or
-    None on window failure (caller -> _resume_or_fresh_dead retries as fresh
-    on a resume failure, _window_wake -> headless on a fresh failure).
+    None on window failure (caller -> _resume_or_fresh_dead retries as fresh on
+    a resume failure; a fresh failure ends the round, alerted by run_wake).
 
     The epoch token is captured before the spawn only to stamp the wake receipt
     (marrow's hook validates it via wake_token_current). The set_awake commit
@@ -506,7 +416,8 @@ def _spawn_wake(conn, cfg, now, resume: bool = False,
     try:
         new_sid = window.respawn(cfg, initial_prompt=initial_prompt, resume_sid=resume_sid)
     except window.WindowError as e:
-        _alert_respawn_failed(conn, wake_id_of(now), str(e)[:180])
+        _alert(conn, wake_id_of(now), "cortex_respawn_failed",
+               f"cortex wake respawn failed: {str(e)[:180]}")
         return None
     if resume_sid:
         # Resume APPENDS to the existing <resume_sid>.jsonl -> no new file, so
@@ -626,11 +537,11 @@ def _window_wake(conn, cfg, note_text, now, respawn: bool = False,
       a. alive claude -> retype the bell line; that typed prompt flows through
          the marrow hook (note injected). Poll again; land -> done.
       b. only a DEAD claude/session -> resume (or fresh on failure).
-      c. respawn failure is the sole alert point (handled by the caller).
+      c. respawn failure is alerted by _spawn_wake.
 
     Sets the awake marker + lights the watchdog. Returns a result dict, or None
-    if the window path failed (caller -> headless). The wake is NOT over here —
-    lie_down (self or watchdog proxy) ends it."""
+    if the window path failed (caller -> alert + give up the round). The wake is
+    NOT over here — lie_down (self or watchdog proxy) ends it."""
     from cortex import transcript, wake_state, watchdog, window
 
     # Note file still written before signalling — the marrow hook reads it to
@@ -724,8 +635,8 @@ def _resume_or_fresh_dead(conn, cfg, now, why: str,
     belt-and-braces guard that survives that.
 
     Contract: after this returns, either the caller has a live awake cortex, or
-    the wake fell all the way through to run_wake's headless fallback — never
-    silently nothing. A resume ATTEMPT that fails to land (the resume spawn
+    the round was given up with an alert (run_wake) — never silently nothing.
+    A resume ATTEMPT that fails to land (the resume spawn
     itself returns None — bad/gone sid, claude errors out, window doesn't come
     up) is NOT the end of the road: it is retried once as a fresh spawn, same
     as the no-UUID case, so resume is preferred but fresh is always the
@@ -806,16 +717,15 @@ def run_wake(
     cfg: dict,
     decision: dict,
     now: datetime | None = None,
-    caller=call_marrow_cortex,
     tick_started: float | None = None,
     gate_done: float | None = None,
 ) -> dict:
-    """Full wake pipeline against real data. `caller` is injectable so tests
-    never spawn a real claude process. Returns the caller's result dict.
-    `tick_started`/`gate_done` are monotonic anchors from the caller so the
+    """Full wake pipeline against real data: assemble the note and deliver it to
+    the resident window (fresh spawn / resume / ear bell). Returns the delivery
+    result dict; a window failure returns mode="failed" (alerted, round given
+    up). `tick_started`/`gate_done` are monotonic anchors from the caller so the
     latency probe covers tick fire -> gate eval -> the wake chain."""
     now = now or _now(cfg)
-    today = now.date().isoformat()
 
     wake_id = f"{now.strftime('%Y%m%dT%H%M%S')}-{os.getpid()}"
     timing_path = config.wake_timing_log_path(cfg)
@@ -831,136 +741,91 @@ def run_wake(
     symlinks.ensure_all(cfg)
     timer.mark("symlinks")
 
-    state = occupancy.load_state(conn)
-    resume_sid = state.cortex_session_id
-    timer.mark("state_loaded")
-
-    # Replay rides the note ONLY on the headless path: a window session gets it
-    # from marrow's turn_inject hook, which headless has no equivalent of.
-    headless = not (cfg["wake"].get("mode", "window") == "window"
-                    and caller is call_marrow_cortex)
-    note_text = assemble_note(conn, cfg, now, decision=decision,
-                              replay=headless)
-    home = str(config.cortex_home(cfg))
+    note_text = assemble_note(conn, cfg, now, decision=decision)
     timer.mark("note")
 
-    # Interactive path (B3v): the resident iTerm window is the cortex body. Only
-    # taken for the real wake (default caller) in window mode; explicit `caller`
-    # (tests / headless callers) always runs the marrow-subprocess path below.
-    if cfg["wake"].get("mode", "window") == "window" and caller is call_marrow_cortex:
-        from cortex import wake_state
-        # Wake-row reasons: a pacemaker-decided wake (scheduled) already has its
-        # decision row from run_tick -> reuse it (None). A non-tick wake (ctl /
-        # reconcile / user) carries an explicit tag in decision["wake_reasons"]
-        # so the chokepoint logs a fresh activation row (BUG A: those wakes wrote
-        # no wake=1 row, so "Last wake" skipped every real wake since noon).
-        wake_reasons = decision.get("wake_reasons")
+    # Interactive path (B3v): the resident iTerm window is the cortex body and
+    # the only delivery channel.
+    from cortex import wake_state
+    # Wake-row reasons: a pacemaker-decided wake (scheduled) already has its
+    # decision row from run_tick -> reuse it (None). A non-tick wake (ctl /
+    # reconcile / user) carries an explicit tag in decision["wake_reasons"]
+    # so the chokepoint logs a fresh activation row (BUG A: those wakes wrote
+    # no wake=1 row, so "Last wake" skipped every real wake since noon).
+    wake_reasons = decision.get("wake_reasons")
 
-        # codex adversarial-review Fix 1: classification (_classify_wake) now
-        # happens EXACTLY ONCE, INSIDE the spawn lock, and its rotate_driven
-        # result is carried straight through -- never re-derived via a second,
-        # later peek_rotated() call. The prior version classified OUTSIDE the
-        # lock, then sampled peek_rotated() a second time for rotate_claim: an
-        # entrant pausing between those two reads while the winner's
-        # take_rotated() landed in between kept plan=="fresh" with rotate_claim
-        # appearing False (the flag already gone) -> bypassed the loser guard
-        # -> a second fresh spawn, two residents. Wrapping classify+dispatch in
-        # ONE lock hold removes the gap entirely: "ear" also moves inside (no
-        # separate un-serialized fast path), since a second classification call
-        # for "ear" was exactly the reintroduced race window.
-        with _spawn_serialized(cfg):
-            plan, rotate_driven = _classify_wake(cfg)
-            window_text = note_text
-            if plan == "fresh":
-                window_text = assemble_note(
-                    conn, cfg, now, decision=decision, fresh=True,
-                    wake_kind="rotate")
-                timer.mark("rotate_note")
-            if plan == "ear":
-                win = _window_wake(conn, cfg, window_text, now, respawn=False,
-                                   wake_reasons=wake_reasons)
-            elif plan == "resume" and _window_alive(cfg):
-                # Re-check liveness under the lock before spawning a RESUME: the
-                # winner's _spawn_wake records the new session (set_awake) before
-                # releasing this lock, so a loser arriving after sees
-                # _window_alive()=True and skips (07-20 live race: pacemaker tick
-                # reconcile and ctl wake both passed the "no resident" check
-                # before either spawned, landing two identical resume windows).
-                win = {"mode": "window", "session_id": None, "text": None,
-                      "skipped": "spawn_race_lost"}
-            elif rotate_driven and not wake_state.peek_rotated(cfg):
-                # Defense-in-depth only (should be unreachable under the
-                # single-classify-under-lock structure above): rotate_driven came
-                # from THIS SAME classification call, so the flag it observed is
-                # still this entrant's to claim -- no other holder of this lock
-                # could have consumed it in between. Kept as a belt-and-braces
-                # guard, never the primary defense.
-                win = {"mode": "window", "session_id": None, "text": None,
-                      "skipped": "spawn_race_lost"}
-            else:
-                win = _window_wake(conn, cfg, window_text, now,
-                                   respawn=(plan == "fresh"),
-                                   wake_reasons=wake_reasons)
-                # Consume the rotate flag ONLY now the fresh successor is live
-                # (rotate-driven fresh, win a real result dict -- not None/skip).
-                # A None (window failure) or skip leaves the flag set for the
-                # retry to own; a /clear-driven fresh has no flag to consume.
-                if (rotate_driven and win is not None
-                        and not win.get("skipped")):
-                    wake_state.take_rotated(cfg)
-        if win is not None and win.get("skipped") == "spawn_race_lost":
-            # The winner already seeded the baseline / marked awake — this
-            # entrant touches nothing further, just reports the outcome.
-            timer.mark("wake_complete")
-            return win
-        if win is not None:
-            timer.mark("window_injected")
-            timer.mark("wake_complete")
-            return win
-        # osascript / iTerm failed -> fall through to headless fallback. The note
-        # was built for a window (no Replay); rebuild it with Replay, since this
-        # path runs no hooks and the note is the only replay channel here.
-        _audit_wake(conn, wake_id, "window path failed -> headless fallback")
-        note_text = assemble_note(conn, cfg, now, decision=decision, replay=True)
-
-    timer.mark("spawn_marrow")
-    try:
-        result = caller(note_text, home, resume_sid, cfg)
-    except WakeError as e:
-        _force_fresh_next(conn, state, today)
-        _audit_wake(conn, wake_id, f"wake_failed: {str(e)[:180]}")
-        timer.mark("marrow_failed")
-        raise
-    timer.mark("marrow_returned")
-
-    # Headless wakes (true headless mode, or the window path failing over to
-    # it) never touch wake_state.set_awake -> the ctl/reconcile/--force chain
-    # that tags decision["wake_reasons"] wrote no row here, so "Last wake"
-    # skipped every one of them too. A pacemaker-decided wake (wake_reasons
-    # None) already has run_tick's decision row -> no second write.
-    if decision.get("wake_reasons"):
-        _wake_log_id(conn, now, decision["wake_reasons"])
-
-    if result.get("capped"):
-        _force_fresh_next(conn, state, today)
-        _audit_wake(conn, wake_id,
-                    f"token_cap breach total={result.get('total_tokens')} -> fresh")
-        timer.mark("capped")
-        _render_daybrief(cfg)
-        timer.mark("daybrief")
+    # codex adversarial-review Fix 1: classification (_classify_wake) now
+    # happens EXACTLY ONCE, INSIDE the spawn lock, and its rotate_driven
+    # result is carried straight through -- never re-derived via a second,
+    # later peek_rotated() call. The prior version classified OUTSIDE the
+    # lock, then sampled peek_rotated() a second time for rotate_claim: an
+    # entrant pausing between those two reads while the winner's
+    # take_rotated() landed in between kept plan=="fresh" with rotate_claim
+    # appearing False (the flag already gone) -> bypassed the loser guard
+    # -> a second fresh spawn, two residents. Wrapping classify+dispatch in
+    # ONE lock hold removes the gap entirely: "ear" also moves inside (no
+    # separate un-serialized fast path), since a second classification call
+    # for "ear" was exactly the reintroduced race window.
+    with _spawn_serialized(cfg):
+        plan, rotate_driven = _classify_wake(cfg)
+        window_text = note_text
+        if plan == "fresh":
+            window_text = assemble_note(
+                conn, cfg, now, decision=decision, fresh=True,
+                wake_kind="rotate")
+            timer.mark("rotate_note")
+        if plan == "ear":
+            win = _window_wake(conn, cfg, window_text, now, respawn=False,
+                               wake_reasons=wake_reasons)
+        elif plan == "resume" and _window_alive(cfg):
+            # Re-check liveness under the lock before spawning a RESUME: the
+            # winner's _spawn_wake records the new session (set_awake) before
+            # releasing this lock, so a loser arriving after sees
+            # _window_alive()=True and skips (07-20 live race: pacemaker tick
+            # reconcile and ctl wake both passed the "no resident" check
+            # before either spawned, landing two identical resume windows).
+            win = {"mode": "window", "session_id": None, "text": None,
+                   "skipped": "spawn_race_lost"}
+        elif rotate_driven and not wake_state.peek_rotated(cfg):
+            # Defense-in-depth only (should be unreachable under the
+            # single-classify-under-lock structure above): rotate_driven came
+            # from THIS SAME classification call, so the flag it observed is
+            # still this entrant's to claim -- no other holder of this lock
+            # could have consumed it in between. Kept as a belt-and-braces
+            # guard, never the primary defense.
+            win = {"mode": "window", "session_id": None, "text": None,
+                   "skipped": "spawn_race_lost"}
+        else:
+            win = _window_wake(conn, cfg, window_text, now,
+                               respawn=(plan == "fresh"),
+                               wake_reasons=wake_reasons)
+            # Consume the rotate flag ONLY now the fresh successor is live
+            # (rotate-driven fresh, win a real result dict -- not None/skip).
+            # A None (window failure) or skip leaves the flag set for the
+            # retry to own; a /clear-driven fresh has no flag to consume.
+            if (rotate_driven and win is not None
+                    and not win.get("skipped")):
+                wake_state.take_rotated(cfg)
+    if win is not None and win.get("skipped") == "spawn_race_lost":
+        # The winner already seeded the baseline / marked awake — this
+        # entrant touches nothing further, just reports the outcome.
         timer.mark("wake_complete")
-        return result
+        return win
+    if win is not None:
+        timer.mark("window_injected")
+        timer.mark("wake_complete")
+        return win
 
-    new_state = replace(
-        state,
-        cortex_session_id=result.get("session_id") or resume_sid,
-    )
-    occupancy.save_state(conn, new_state)
-
-    _render_daybrief(cfg)
-    timer.mark("daybrief")
+    # osascript / iTerm failed -> the round is over. No windowless fallback:
+    # audit + alert and give up, leaving cursor/alarm state untouched so the
+    # daemon's next tick retries naturally. The caller re-arms the floor on any
+    # non-window result (its own alarm was already consumed at fire time).
+    _audit_wake(conn, wake_id, "window path failed -> round given up")
+    _alert(conn, wake_id, "cortex_wake_window_failed",
+           "cortex wake window path failed; round given up")
+    timer.mark("window_failed")
     timer.mark("wake_complete")
-    return result
+    return {"mode": "failed", "session_id": None, "text": None}
 
 
 def main(argv: list[str] | None = None) -> int:

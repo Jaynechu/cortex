@@ -45,8 +45,8 @@ def cmd_wake(cfg: dict) -> str:
         return f"{prefix}wake: already awake on duty -> no-op (one resident)"
     # Always drive the standard wake pipeline (run_wake -> _window_wake_plan
     # + _window_wake), including the alive-resident ear path: it renders a
-    # fresh note, sets the awake marker and starts the watchdog, and falls
-    # back to headless on any AppleScript failure. Do not re-implement any
+    # fresh note, sets the awake marker and starts the watchdog, and alerts +
+    # gives up the round on any AppleScript failure. Do not re-implement any
     # of that here — a hand-rolled signal-only path would skip set_awake and
     # the watchdog, letting the next tick double-wake and the eventual
     # lie_down hit claim_lie_down's "not awake" no-op.

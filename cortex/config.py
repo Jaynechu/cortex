@@ -52,8 +52,6 @@ _DEFAULTS: dict[str, Any] = {
         # <marrow config dir>/state/shells.
         "shell_state_dir": "",
     },
-    # Per-wake safety valve: cap tokens spent in one wake; breach or the marrow
-    # wall-clock timeout (marrow.call_timeout_s) forces a fresh session next wake.
     # ear_timeout_sec = how long a typed wake (alive-resident bell) is given to
     # land before respawning fresh; wake_prompt = the first prompt baked into a
     # freshly spawned window — JUST an emoji so nothing readable shows in the
@@ -62,7 +60,6 @@ _DEFAULTS: dict[str, Any] = {
     # window (the note path itself is read from config, not this prompt);
     # say_sound = the sound say() plays when it fronts the window.
     "wake": {
-        "token_cap": 150_000,
         # Auto-adopt a cortex window the user opened `claude` in herself (in
         # cortex_home) but never registered: the daemon reconcile records it as
         # the resident (under the spawn lock) instead of firing a duplicate window.
@@ -117,13 +114,9 @@ _DEFAULTS: dict[str, Any] = {
         "fuse_marker": "⚙️ [FUSE]",
         "ctl_sleep_marker": "⚙️ [CTL]",
     },
-    # marrow repo invocation for the wake call (separate venv/deps, C3).
+    # marrow repo invocation for subprocess helpers (separate venv/deps, C3).
     "marrow": {
-        "repo_dir": str(DEFAULT_MARROW_REPO),
         "venv_python": str(DEFAULT_MARROW_REPO / ".venv" / "bin" / "python"),
-        # Inner claude-call budget (s), passed down to marrow; the outer
-        # subprocess kill = this + margin. Must match marrow's own default.
-        "call_timeout_s": 600,
     },
     "knowledgec": {"stream_name": "/app/usage"},
     "knowledgec.categories": {"default": "uncategorized"},

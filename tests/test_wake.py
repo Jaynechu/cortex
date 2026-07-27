@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -10,7 +9,6 @@ from cortex import wake
 
 TZ = timezone(timedelta(hours=10))
 DAY1 = datetime(2026, 7, 3, 21, 0, tzinfo=TZ)
-DAY2 = datetime(2026, 7, 4, 9, 0, tzinfo=TZ)
 
 DECISION = {"wake": True, "reasons": [], "gated_by": [], "explanation": "test wake",
             "wake_reasons": "ctl"}
@@ -25,13 +23,6 @@ def events_table(marrow_conn):
     marrow_conn.commit()
 
 
-@pytest.fixture(autouse=True)
-def stub_daybrief(monkeypatch):
-    """daybrief render shells out to marrow's venv (unavailable in tests) —
-    stub it so wake tests exercise only the wake logic."""
-    monkeypatch.setattr(wake, "_render_daybrief", lambda cfg: None)
-
-
 @pytest.fixture
 def wcfg(base_cfg, tmp_path):
     cfg = dict(base_cfg)
@@ -42,19 +33,9 @@ def wcfg(base_cfg, tmp_path):
         "ny_db_pages": str(tmp_path / "ny"),
         "wake_timing_log": str(tmp_path / "wake_timing.log"),
     }
-    cfg["marrow"] = {"repo_dir": "", "venv_python": "", "call_timeout_s": 5}
-    cfg["wake"] = {"token_cap": 150_000}
+    cfg["marrow"] = {"venv_python": ""}
+    cfg["wake"] = {}
     return cfg
-
-
-class FakeCaller:
-    def __init__(self, session_id="sid-abc"):
-        self.session_id = session_id
-        self.calls = []
-
-    def __call__(self, prompt, cwd, resume_sid, cfg):
-        self.calls.append({"prompt": prompt, "cwd": cwd, "resume_sid": resume_sid})
-        return {"text": "hi", "session_id": self.session_id}
 
 
 def test_assemble_note_real_data(marrow_conn, wcfg):
@@ -64,49 +45,12 @@ def test_assemble_note_real_data(marrow_conn, wcfg):
     assert len(text) < 1000
 
 
-def test_first_wake_no_resume_and_persists_session(marrow_conn, wcfg):
-    caller = FakeCaller()
-    result = wake.run_wake(marrow_conn, wcfg, DECISION, now=DAY1, caller=caller)
-
-    assert result["session_id"] == "sid-abc"
-    assert caller.calls[0]["resume_sid"] is None
-    assert caller.calls[0]["cwd"] == str(wcfg["paths"]["cortex_home"])
-
-    from cortex import occupancy
-    state = occupancy.load_state(marrow_conn)
-    assert state.cortex_session_id == "sid-abc"
-
-
-def test_second_wake_same_day_resumes(marrow_conn, wcfg):
-    caller = FakeCaller()
-    wake.run_wake(marrow_conn, wcfg, DECISION, now=DAY1, caller=caller)
-    later = DAY1 + timedelta(hours=1)
-    wake.run_wake(marrow_conn, wcfg, DECISION, now=later, caller=caller)
-
-    assert len(caller.calls) == 2
-    assert caller.calls[1]["resume_sid"] == "sid-abc"
-
-
-def test_new_date_resumes_no_rebirth(marrow_conn, wcfg):
-    """Rebirth retired: a new local date no longer starts a fresh session or
-    archives. The headless path resumes the prior session as any same-day wake
-    would; freshness now comes only from the rotate/night-close path."""
-    caller = FakeCaller(session_id="sid-day1")
-    wake.run_wake(marrow_conn, wcfg, DECISION, now=DAY1, caller=caller)
-
-    caller2 = FakeCaller(session_id="sid-day2")
-    wake.run_wake(marrow_conn, wcfg, DECISION, now=DAY2, caller=caller2)
-
-    assert caller2.calls[0]["resume_sid"] == "sid-day1"  # resumed, not reborn
-
-    from cortex import occupancy
-    state = occupancy.load_state(marrow_conn)
-    assert state.cortex_session_id == "sid-day2"
-
-
-def test_run_wake_creates_ny_symlinks(marrow_conn, wcfg):
-    caller = FakeCaller()
-    wake.run_wake(marrow_conn, wcfg, DECISION, now=DAY1, caller=caller)
+def test_run_wake_creates_ny_symlinks(monkeypatch, marrow_conn, wcfg):
+    monkeypatch.setattr(wake, "_classify_wake", lambda cfg: ("ear", False))
+    monkeypatch.setattr(wake, "_window_wake",
+                        lambda conn, cfg, t, now, respawn=False, **kw:
+                        {"mode": "window", "session_id": None, "text": None})
+    wake.run_wake(marrow_conn, wcfg, DECISION, now=DAY1)
 
     from pathlib import Path
     ny = Path(wcfg["paths"]["ny_db_pages"])
@@ -114,91 +58,27 @@ def test_run_wake_creates_ny_symlinks(marrow_conn, wcfg):
     assert (ny / "wishlist.md").resolve() == Path(wcfg["paths"]["wishlist_file"]).resolve()
 
 
-class FailCaller:
-    def __call__(self, prompt, cwd, resume_sid, cfg):
-        raise wake.WakeError("boom")
+def test_window_failure_alerts_and_gives_up_the_round(monkeypatch, marrow_conn, wcfg):
+    """No windowless fallback: a failed window path raises a marrow alert, audits
+    the give-up and returns mode="failed" — the caller re-arms the floor on any
+    non-window result and the next tick retries."""
+    marrow_conn.execute("CREATE TABLE alerts (id INTEGER PRIMARY KEY, severity TEXT,"
+                        " type TEXT, message TEXT, source TEXT)")
+    marrow_conn.commit()
+    monkeypatch.setattr(wake, "_classify_wake", lambda cfg: ("ear", False))
+    monkeypatch.setattr(wake, "_window_wake",
+                        lambda conn, cfg, t, now, respawn=False, **kw: None)
 
+    res = wake.run_wake(marrow_conn, wcfg, DECISION, now=DAY1)
 
-def test_failed_wake_forces_fresh_next_no_archive(marrow_conn, wcfg):
-    """A failed marrow call drops the resume sid (fresh session next wake).
-    Rebirth/archiving is retired -> no archive dir is created."""
-    from cortex import occupancy
-
-    good = FakeCaller(session_id="sid-day1")
-    wake.run_wake(marrow_conn, wcfg, DECISION, now=DAY1, caller=good)
-
-    with pytest.raises(wake.WakeError):
-        wake.run_wake(marrow_conn, wcfg, DECISION,
-                      now=DAY1 + timedelta(hours=1), caller=FailCaller())
-
-    st = occupancy.load_state(marrow_conn)
-    assert st.cortex_session_id is None            # fresh session next wake
-
-    # Retry resumes fresh (resume None) and persists the new sid.
-    good2 = FakeCaller(session_id="sid-retry")
-    wake.run_wake(marrow_conn, wcfg, DECISION,
-                  now=DAY1 + timedelta(hours=2), caller=good2)
-    assert good2.calls[0]["resume_sid"] is None
-    assert occupancy.load_state(marrow_conn).cortex_session_id == "sid-retry"
-
-
-def test_call_marrow_cortex_outer_timeout_derives_from_inner(monkeypatch, wcfg):
-    """Outer subprocess kill = inner budget + margin; inner budget is passed
-    down to marrow so the two layers share one config value."""
-    cfg = dict(wcfg)
-    cfg["marrow"] = {**wcfg["marrow"], "call_timeout_s": 100,
-                     "repo_dir": "/repo", "venv_python": "/py"}
-    captured = {}
-
-    def fake_run(cmd, **kw):
-        captured["cmd"] = cmd
-        captured["timeout"] = kw["timeout"]
-        raise subprocess.TimeoutExpired(cmd, kw["timeout"])
-
-    monkeypatch.setattr(wake.subprocess, "run", fake_run)
-    with pytest.raises(wake.WakeError, match="130s"):
-        wake.call_marrow_cortex("prompt", "/cwd", None, cfg)
-
-    assert captured["timeout"] == 130
-    assert captured["cmd"][-2] == "100"  # inner budget handed to marrow script
-    assert captured["cmd"][-1] == "150000"  # per-wake token cap handed down
-
-
-class CapCaller:
-    """Simulates a marrow wake that tripped the per-wake token cap mid-stream."""
-    def __init__(self):
-        self.calls = []
-
-    def __call__(self, prompt, cwd, resume_sid, cfg):
-        self.calls.append({"resume_sid": resume_sid})
-        return {"text": "", "session_id": None, "capped": True,
-                "total_tokens": 160000}
-
-
-def test_token_cap_breach_forces_fresh_no_rearchive(marrow_conn, wcfg):
-    """A mid-wake token-cap breach drops the resume sid (fresh session next
-    wake). Rebirth/archiving is retired -> the same day's log is never
-    re-archived."""
-    from cortex import occupancy
-
-    good = FakeCaller(session_id="sid-1")
-    wake.run_wake(marrow_conn, wcfg, DECISION, now=DAY1, caller=good)
-
-    later = DAY1 + timedelta(hours=1)
-    cap = CapCaller()
-    res = wake.run_wake(marrow_conn, wcfg, DECISION, now=later, caller=cap)
-    assert res["capped"] is True
-    assert cap.calls[0]["resume_sid"] == "sid-1"  # resumed before the breach
-
-    st = occupancy.load_state(marrow_conn)
-    assert st.cortex_session_id is None            # fresh session next wake
-
-    # Third wake same day: fresh (resume None), still no archive of day1.
-    good2 = FakeCaller(session_id="sid-3")
-    wake.run_wake(marrow_conn, wcfg, DECISION,
-                  now=later + timedelta(hours=1), caller=good2)
-    assert good2.calls[0]["resume_sid"] is None
-    assert occupancy.load_state(marrow_conn).cortex_session_id == "sid-3"
+    assert res["mode"] == "failed"
+    row = marrow_conn.execute("SELECT severity, type, source FROM alerts").fetchone()
+    assert row["severity"] == "warn" and row["type"] == "cortex_wake_window_failed"
+    assert row["source"].startswith("cortex_wake:")
+    # No wake=1 activation row: nothing was woken.
+    n = marrow_conn.execute(
+        "SELECT COUNT(*) AS n FROM ct_wake_log WHERE wake=1").fetchone()["n"]
+    assert n == 0
 
 
 # --------------------------------------------------------------------------- #
@@ -208,9 +88,8 @@ def test_token_cap_breach_forces_fresh_no_rearchive(marrow_conn, wcfg):
 
 @pytest.fixture
 def rot_cfg(wcfg, tmp_path):
-    """wcfg + handoff note config + a written handoff file, mode=window."""
+    """wcfg + handoff note config + a written handoff file."""
     cfg = dict(wcfg)
-    cfg["wake"] = {**wcfg["wake"], "mode": "window"}
     cfg["paths"] = {**wcfg["paths"], "handoff_file": str(tmp_path / "handoff.md"),
                     "wake_state_file": str(tmp_path / "wake_state.json")}
     cfg["note"] = {"handoff_wake_kinds": ["rotate"],
@@ -438,7 +317,6 @@ def test_wake_log_id_writes_fresh_row_for_non_tick_wake(marrow_conn):
     """Chokepoint: a tagged (user/ctl/reconcile/rotate) wake gets a FRESH row
     even when an older scheduled row exists — so 'Last wake' never reuses a
     stale noon row (the BUG A symptom)."""
-    from cortex import occupancy
     # A stale scheduled row hours ago (the noon row in the incident).
     old_ts = (DAY1 - timedelta(minutes=280)).astimezone(timezone.utc).isoformat()
     marrow_conn.execute(
@@ -500,30 +378,3 @@ def test_main_force_wake_tags_ctl_reasons(monkeypatch, marrow_conn, wcfg):
 
     assert rc == 0
     assert captured["decision"]["wake_reasons"] == "ctl"
-
-
-def test_headless_wake_with_reasons_logs_activation_row(marrow_conn, wcfg):
-    """Codex P2: a non-tick decision (wake_reasons set) that completes via the
-    headless/marrow-subprocess path (true headless mode, or window-path-failed
-    fallback) must still log its own tagged activation row — this path bypasses
-    wake_state.set_awake entirely, so the ear/spawn chokepoint never runs."""
-    caller = FakeCaller()
-    tagged = {**DECISION, "wake_reasons": "ctl"}
-    wake.run_wake(marrow_conn, wcfg, tagged, now=DAY1, caller=caller)
-
-    rows = marrow_conn.execute(
-        "SELECT reasons FROM ct_wake_log WHERE wake=1").fetchall()
-    assert [r["reasons"] for r in rows] == ["ctl"]
-
-
-def test_headless_wake_no_reasons_writes_no_row(marrow_conn, wcfg):
-    """Counterpart: a decision without a wake_reasons tag (defensive case --
-    no live producer omits one) must not write a headless activation row;
-    run_wake never invents a tag on its own."""
-    caller = FakeCaller()
-    untagged = {**DECISION, "wake_reasons": None}
-    wake.run_wake(marrow_conn, wcfg, untagged, now=DAY1, caller=caller)
-
-    n = marrow_conn.execute(
-        "SELECT COUNT(*) AS n FROM ct_wake_log WHERE wake=1").fetchone()["n"]
-    assert n == 0

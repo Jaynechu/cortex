@@ -233,8 +233,9 @@ class WakeDaemon:
 
     def _fire_wake(self, cfg: dict, reason: str, now: datetime) -> str:
         """Synthesized decision -> the standard wake pipeline (ctl precedent).
-        The headless path finishes here, so redraw the floor + ledger as the tick
-        did.
+        A non-window result (mode="failed": the window path could not deliver)
+        finishes here, so redraw the floor + ledger as the tick did — the
+        consumed alarm is re-armed, never silently lost.
 
         Ledger-before-delivery: the alarm is consumed the moment this fire is
         decided, not after set_awake has verified the bell landed. Delivery can be
