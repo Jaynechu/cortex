@@ -16,6 +16,8 @@ NOW = datetime(2026, 7, 8, 14, 30, tzinfo=MEL)
 def cfg(tmp_path):
     # Pure defaults: point load at a nonexistent path so no live cortex.toml leaks in.
     c = config.load(path=tmp_path / "absent.toml")
+    # Replay markers live under state_dir — keep them off the live runtime dir.
+    c["paths"]["cortex_home"] = str(tmp_path / "home")
     # These tests assert the note BODY structure (Now: / title / replay). The Fix 5
     # machine-origin tag is a separate first line, verified in test_wake_regime_fixes;
     # blank it here so the body assertions (startswith "Now:" / title) stay exact.
@@ -492,7 +494,7 @@ def test_replay_events_channel_time_and_truncation(marrow_conn, cfg):
         ],
     )
     marrow_conn.commit()
-    ev = note._replay_events(marrow_conn, cfg, 6, 300)
+    ev = note._replay(marrow_conn, cfg, 6, 300)
     assert len(ev) == 2  # tl excluded
     assert ev[0] == {"channel": "wx", "hm": "13:00", "role": "N", "content": "hi"}
     assert ev[1]["channel"] == "cli"
@@ -512,7 +514,7 @@ def test_replay_excludes_cortex_self_talk(marrow_conn, cfg):
         ],
     )
     marrow_conn.commit()
-    ev = note._replay_events(marrow_conn, cfg, 6, 300)
+    ev = note._replay(marrow_conn, cfg, 6, 300)
     # ct channel (cortex wake monologue) excluded; real cli exchange kept.
     assert [(e["channel"], e["content"]) for e in ev] == [
         ("cli", "user message"), ("cli", "assistant reply")]
@@ -528,87 +530,21 @@ def test_replay_strips_media_markers(marrow_conn, cfg):
         ],
     )
     marrow_conn.commit()
-    ev = note._replay_events(marrow_conn, cfg, 6, 300)
+    ev = note._replay(marrow_conn, cfg, 6, 300)
     assert ev[0]["content"] == "你看 这个"
 
 
-def test_replay_events_since_row_id_filters_older_events(marrow_conn, cfg):
-    """Diff mode (D6): since_row_id excludes events at or before it, keeps newer."""
-    make_events_table(marrow_conn)
-    marrow_conn.executemany(
-        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
-        [
-            ("s", "2026-07-08T03:00:00+00:00", "user", "old message", "wx"),
-            ("s", "2026-07-08T03:05:00+00:00", "assistant", "old reply", "wx"),
-            ("s", "2026-07-08T03:10:00+00:00", "user", "new message", "wx"),
-        ],
-    )
-    marrow_conn.commit()
-    ev = note._replay_events(marrow_conn, cfg, 6, 300,
-                             since_row_id=_row_id(marrow_conn, "old reply"))
-    assert [e["content"] for e in ev] == ["new message"]
-
-
-def test_replay_events_since_row_id_same_second_sibling_not_skipped(marrow_conn, cfg):
-    """A real row sharing the exact timestamp string of the consumed one is
-    still delivered — the id cursor tells same-second rows apart."""
-    make_events_table(marrow_conn)
-    marrow_conn.executemany(
-        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
-        [
-            ("s", "2026-07-08T03:05:00+00:00", "user", "consumed", "wx"),
-            ("s", "2026-07-08T03:05:00+00:00", "assistant", "same second reply", "wx"),
-        ],
-    )
-    marrow_conn.commit()
-    ev = note._replay_events(marrow_conn, cfg, 6, 300,
-                             since_row_id=_row_id(marrow_conn, "consumed"))
-    assert [e["content"] for e in ev] == ["same second reply"]
-
-
-def test_since_row_id_migrates_legacy_last_note_ts(marrow_conn, cfg):
-    """Legacy state carrying only last_note_ts resolves once to the newest row
-    at-or-before that ts — nothing already shown re-appears, nothing is skipped."""
-    make_events_table(marrow_conn)
-    marrow_conn.executemany(
-        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
-        [
-            ("s", "2026-07-08T03:00:00+00:00", "user", "shown A", "wx"),
-            ("s", "2026-07-08T03:00:00+00:00", "user", "shown B same second", "wx"),
-            ("s", "2026-07-08T03:10:00+00:00", "user", "brand new", "wx"),
-        ],
-    )
-    marrow_conn.commit()
-    since = note._since_row_id(
-        marrow_conn, {"last_note_ts": "2026-07-08T03:00:00+00:00"})
-    assert since == _row_id(marrow_conn, "shown B same second")
-    ev = note._replay_events(marrow_conn, cfg, 6, 300, since_row_id=since)
-    assert [e["content"] for e in ev] == ["brand new"]
-    # an explicit row id always wins over the legacy field
-    assert note._since_row_id(
-        marrow_conn, {"last_note_row_id": 1,
-                      "last_note_ts": "2026-07-08T03:10:00+00:00"}) == 1
-    assert note._since_row_id(marrow_conn, {}) is None
-
-
-def test_replay_events_since_row_id_none_is_full_replay(marrow_conn, cfg):
-    make_events_table(marrow_conn)
-    marrow_conn.execute(
-        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
-        ("s", "2026-07-08T03:00:00+00:00", "user", "hi", "wx"))
-    marrow_conn.commit()
-    ev = note._replay_events(marrow_conn, cfg, 6, 300, since_row_id=None)
-    assert len(ev) == 1
-
-
-def test_replay_exclude_channels_configurable(marrow_conn):
+def test_replay_exclude_channels_configurable(marrow_conn, tmp_path):
     make_events_table(marrow_conn)
     marrow_conn.execute(
         "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
         ("s", "2026-07-08T03:00:00+00:00", "assistant", "ct turn", "ct"))
     marrow_conn.commit()
     # empty exclude list → include everything, including ct
-    ev = note._replay_events(marrow_conn, {"note": {"replay_exclude_channels": []}}, 6, 300)
+    cfg2 = {"note": {"replay_exclude_channels": []},
+            "paths": {"cortex_home": str(tmp_path / "h")},
+            "core": {"timezone": "Australia/Melbourne"}}
+    ev = note._replay(marrow_conn, cfg2, 6, 300)
     assert [e["content"] for e in ev] == ["ct turn"]
 
 
@@ -634,14 +570,15 @@ def test_for_shell_tg_excludes_tg_and_keeps_ct(marrow_conn, cfg):
     """The tg shell renders through the same renderer — without this it reads
     its own conversation replayed back at itself."""
     _shell_events(marrow_conn)
-    ev = note._replay_events(marrow_conn, note.for_shell(cfg, "tg"), 6, 300)
+    ev = note._replay(marrow_conn, note.for_shell(cfg, "tg"), 6, 300, "tg")
     assert [e["content"] for e in ev] == ["cli shell自言自语", "wx user turn"]
 
 
 def test_for_shell_cli_matches_the_unqualified_render(marrow_conn, cfg):
     _shell_events(marrow_conn)
-    plain = note._replay_events(marrow_conn, cfg, 6, 300)
-    cli = note._replay_events(marrow_conn, note.for_shell(cfg, "cli"), 6, 300)
+    plain = note._replay(marrow_conn, cfg, 6, 300)
+    # a separate marker, else the second read sees nothing new
+    cli = note._replay(marrow_conn, note.for_shell(cfg, "cli"), 6, 300, "cli2")
     assert cli == plain
     assert [e["content"] for e in plain] == ["tg user turn", "tg shell自言自语",
                                              "wx user turn"]
@@ -660,23 +597,9 @@ def test_for_shell_never_mutates_the_caller_config(cfg):
 def test_for_shell_map_is_config_driven(cfg, marrow_conn):
     _shell_events(marrow_conn)
     cfg["note"]["shell_replay_exclude"] = {"tg": ["tg", "wx"]}
-    ev = note._replay_events(marrow_conn, note.for_shell(cfg, "tg"), 6, 300)
+    ev = note._replay(marrow_conn, note.for_shell(cfg, "tg"), 6, 300, "tg")
     assert [e["content"] for e in ev] == ["cli shell自言自语"]
 
-
-def test_latest_replay_ts_follows_the_shell_exclude(marrow_conn, cfg):
-    """The diff baseline must use the same exclude set as the replay it feeds,
-    else a shell's own turns keep advancing it."""
-    _shell_events(marrow_conn)
-    assert note._latest_replay_ts(marrow_conn, cfg) == "2026-07-08T03:03:00+00:00"
-    only_tg = dict(cfg, note={**cfg["note"], "shell_replay_exclude": {"tg": ["tg", "wx"]}})
-    assert note._latest_replay_ts(
-        marrow_conn, note.for_shell(only_tg, "tg")) == "2026-07-08T03:02:00+00:00"
-
-
-# --------------------------------------------------------------------------- #
-# external best-effort facts (monkeypatched)
-# --------------------------------------------------------------------------- #
 
 def test_pending_within_window(cfg, tmp_path, monkeypatch):
     sp = tmp_path / "ss.json"
@@ -760,7 +683,9 @@ def test_gather_end_to_end(marrow_conn, cfg, tmp_path, monkeypatch):
         "reasons": [_FloorReason()]})
     assert "wake_parts" not in data  # Wake reason line retired
     assert "budget" not in data  # budget line retired
-    assert len(data["replay"]) == 1
+    assert data["replay"] == []  # window render -> no replay section
+    headless = note.gather(marrow_conn, cfg, NOW, replay=True)
+    assert len(headless["replay"]) == 1
     assert "handoff" not in data  # handoff moved to SessionStart
     text = note.render(cfg, NOW, data)
     assert text.startswith("Now: ")
@@ -771,200 +696,12 @@ def test_gather_end_to_end(marrow_conn, cfg, tmp_path, monkeypatch):
 # gather diff mode (D6): last_note_row_id cursor persisted + advanced per render
 # --------------------------------------------------------------------------- #
 
-def test_gather_second_call_diffs_against_first(marrow_conn, cfg, tmp_path, monkeypatch):
-    """Two consecutive gather() calls in the same wake: the first (wake's
-    initial note) sees everything; the second sees only events newer than the
-    first's cursor (last_note_row_id persisted in wake_state)."""
-    from cortex import wake_state
-    cfg["paths"]["wake_state_file"] = str(tmp_path / "wake_state.json")
-    make_events_table(marrow_conn)
-    monkeypatch.setattr(note, "_frontmost_app", lambda: None)
-
-    marrow_conn.execute(
-        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
-        ("s", "2026-07-08T03:00:00+00:00", "user", "first round message", "wx"))
-    marrow_conn.commit()
-
-    # Free-round render advances the baseline (advance_baseline=True).
-    data1 = note.gather(marrow_conn, cfg, NOW, advance_baseline=True)
-    assert [e["content"] for e in data1["replay"]] == ["first round message"]
-    assert wake_state.get_last_note_row_id(cfg) == _row_id(
-        marrow_conn, "first round message")
-
-    # New activity lands between the two rounds (e.g. wx channel while cortex slept).
-    marrow_conn.execute(
-        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
-        ("s", "2026-07-08T03:10:00+00:00", "user", "second round message", "wx"))
-    marrow_conn.commit()
-
-    data2 = note.gather(marrow_conn, cfg, NOW, advance_baseline=True)
-    # Only the new event, not the one already shown in the first note.
-    assert [e["content"] for e in data2["replay"]] == ["second round message"]
-    # Cursor advances forward.
-    assert wake_state.get_last_note_row_id(cfg) == _row_id(
-        marrow_conn, "second round message")
-
-
-def test_gather_diff_shows_cross_channel_activity(marrow_conn, cfg, tmp_path, monkeypatch):
-    """User activity on wx/tg channels between rounds shows up in the diff (not
-    just the active window's own channel)."""
-    from cortex import wake_state
-    cfg["paths"]["wake_state_file"] = str(tmp_path / "wake_state.json")
-    make_events_table(marrow_conn)
-    monkeypatch.setattr(note, "_frontmost_app", lambda: None)
-
-    marrow_conn.execute(
-        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
-        ("s", "2026-07-08T03:00:00+00:00", "assistant", "cli reply", "cli"))
-    marrow_conn.commit()
-    # Free-round render advances the baseline (advance_baseline=True).
-    note.gather(marrow_conn, cfg, NOW, advance_baseline=True)  # round 1 -> baseline set
-
-    marrow_conn.executemany(
-        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
-        [
-            ("s", "2026-07-08T03:05:00+00:00", "user", "wx message", "wx"),
-            ("s", "2026-07-08T03:06:00+00:00", "user", "tg message", "tg"),
-        ],
-    )
-    marrow_conn.commit()
-
-    data2 = note.gather(marrow_conn, cfg, NOW, advance_baseline=True)
-    channels = [(e["channel"], e["content"]) for e in data2["replay"]]
-    assert ("wx", "wx message") in channels
-    assert ("tg", "tg message") in channels
-    assert ("cli", "cli reply") not in channels  # already seen in round 1
-
-
-def test_gather_render_only_does_not_advance_baseline(marrow_conn, cfg, tmp_path, monkeypatch):
-    """Render-only paths (marrow render_module / --print-note / SessionStart
-    re-render) default advance_baseline=False and MUST NOT move the baseline."""
-    from cortex import wake_state
-    cfg["paths"]["wake_state_file"] = str(tmp_path / "wake_state.json")
-    make_events_table(marrow_conn)
-    monkeypatch.setattr(note, "_frontmost_app", lambda: None)
-
-    marrow_conn.execute(
-        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
-        ("s", "2026-07-08T03:00:00+00:00", "user", "msg", "wx"))
-    marrow_conn.commit()
-
-    note.gather(marrow_conn, cfg, NOW)  # render-only, default False
-    assert wake_state.get_last_note_row_id(cfg) is None
-    note.gather(marrow_conn, cfg, NOW)  # again -> still no cursor
-    assert wake_state.get_last_note_row_id(cfg) is None
-
-
-def test_gather_free_rounds_diff_across_interleaved_print_note(marrow_conn, cfg, tmp_path, monkeypatch):
-    """Two consecutive free-rounds diff correctly even when a render-only
-    --print-note peek happens in between (the peek must not eat the diff)."""
-    from cortex import wake_state
-    cfg["paths"]["wake_state_file"] = str(tmp_path / "wake_state.json")
-    make_events_table(marrow_conn)
-    monkeypatch.setattr(note, "_frontmost_app", lambda: None)
-
-    marrow_conn.execute(
-        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
-        ("s", "2026-07-08T03:00:00+00:00", "user", "round1 msg", "wx"))
-    marrow_conn.commit()
-    d1 = note.gather(marrow_conn, cfg, NOW, advance_baseline=True)  # free-round 1
-    assert [e["content"] for e in d1["replay"]] == ["round1 msg"]
-
-    # New activity, then a render-only debug peek that must not advance baseline.
-    marrow_conn.execute(
-        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
-        ("s", "2026-07-08T03:05:00+00:00", "user", "round2 msg", "wx"))
-    marrow_conn.commit()
-    note.gather(marrow_conn, cfg, NOW)  # --print-note peek, False
-
-    d2 = note.gather(marrow_conn, cfg, NOW, advance_baseline=True)  # free-round 2
-    contents = [e["content"] for e in d2["replay"]]
-    assert contents == ["round2 msg"]  # peek did not consume it
-
-
-def test_seed_baseline_anchors_first_free_round(marrow_conn, cfg, tmp_path, monkeypatch):
-    """seed_baseline (D6 wake-open seed) anchors the baseline so the FIRST
-    free-round diffs from wake-open, not epoch zero."""
-    from cortex import wake_state
-    cfg["paths"]["wake_state_file"] = str(tmp_path / "wake_state.json")
-    make_events_table(marrow_conn)
-    monkeypatch.setattr(note, "_frontmost_app", lambda: None)
-
-    marrow_conn.execute(
-        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
-        ("s", "2026-07-08T03:00:00+00:00", "user", "pre-wake msg", "wx"))
-    marrow_conn.commit()
-    note.seed_baseline(marrow_conn, cfg)
-    assert wake_state.get_last_note_row_id(cfg) == _row_id(
-        marrow_conn, "pre-wake msg")
-
-    marrow_conn.execute(
-        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
-        ("s", "2026-07-08T03:05:00+00:00", "user", "post-wake msg", "wx"))
-    marrow_conn.commit()
-    d = note.gather(marrow_conn, cfg, NOW, advance_baseline=True)
-    assert [e["content"] for e in d["replay"]] == ["post-wake msg"]
-
-
-# --------------------------------------------------------------------------- #
-# BUG B: initial-wake full replay must not present pre-wake events as fresh
-# --------------------------------------------------------------------------- #
-
 def _seed_prev_wake(conn, minutes_ago: int) -> str:
     """Write a prior wake=1 row `minutes_ago` before NOW; return its ISO ts."""
     ts = (NOW - timedelta(minutes=minutes_ago)).astimezone(ZoneInfo("UTC")).isoformat()
     conn.execute("INSERT INTO ct_wake_log (ts, wake, dry_run) VALUES (?, 1, 0)", (ts,))
     conn.commit()
     return ts
-
-
-def test_gather_initial_wake_only_old_events_is_stale(
-        marrow_conn, cfg, tmp_path, monkeypatch):
-    """BUG B: initial wake (no diff baseline) where every eligible event PREDATES
-    the prior wake -> 'no new messages', never a fake-fresh '### Replay' of an old
-    conversation. _replay applies no since filter on the initial note, so it would
-    otherwise return the old rows and render() would show them as fresh."""
-    cfg["paths"]["wake_state_file"] = str(tmp_path / "wake_state.json")
-    cfg["paths"]["handoff_file"] = str(tmp_path / "handoff.md")
-    make_events_table(marrow_conn)
-    monkeypatch.setattr(note, "_frontmost_app", lambda: None)
-    _seed_prev_wake(marrow_conn, 16)  # prior wake 16 min ago
-    # Only OLD events, all before the prior wake (well before NOW).
-    marrow_conn.execute(
-        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
-        ("s", "2026-07-08T02:00:00+00:00", "user", "an old conversation", "wx"))
-    marrow_conn.commit()
-
-    data = note.gather(marrow_conn, cfg, NOW)  # initial wake: no cursor
-    assert data["replay_stale"] is True
-    text = note.render(cfg, NOW, data)
-    assert "No new messages since last wake." in text
-    assert "### Replay" not in text
-    assert "an old conversation" not in text
-
-
-def test_gather_initial_wake_new_events_render_replay(
-        marrow_conn, cfg, tmp_path, monkeypatch):
-    """BUG B counterpart: initial wake with genuinely NEW events (after the prior
-    wake) -> replay is rendered and the cutoff is the newest rendered event."""
-    cfg["paths"]["wake_state_file"] = str(tmp_path / "wake_state.json")
-    cfg["paths"]["handoff_file"] = str(tmp_path / "handoff.md")
-    make_events_table(marrow_conn)
-    monkeypatch.setattr(note, "_frontmost_app", lambda: None)
-    _seed_prev_wake(marrow_conn, 16)
-    # Event AFTER the prior wake (04:14Z) — genuinely fresh.
-    marrow_conn.execute(
-        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
-        ("s", "2026-07-08T04:20:00+00:00", "user", "a fresh message", "wx"))
-    marrow_conn.commit()
-
-    data = note.gather(marrow_conn, cfg, NOW)  # initial wake
-    assert data["replay_stale"] is False
-    assert [e["content"] for e in data["replay"]] == ["a fresh message"]
-    assert data["replay_cutoff_row_id"] == _row_id(marrow_conn, "a fresh message")
-    text = note.render(cfg, NOW, data)
-    assert "### Replay" in text
-    assert "a fresh message" in text
 
 
 def test_last_wake_after_short_rotate_cycle_reports_minutes(marrow_conn):
@@ -981,230 +718,6 @@ def test_last_wake_after_short_rotate_cycle_reports_minutes(marrow_conn):
     marrow_conn.commit()
     lw = note._last_wake(marrow_conn, NOW)
     assert lw["minutes_ago"] == 16  # the rotate cycle wake, not noon
-
-
-def test_gather_stale_boundary_uses_exact_ts_not_floored_minutes(
-        marrow_conn, cfg, tmp_path, monkeypatch):
-    """Codex P2: the staleness comparison must use last_wake['ts'] directly, not
-    now - timedelta(minutes=minutes_ago) (floored, can land up to 59s AFTER the
-    real wake). Prior wake at 04:14:31Z (929s ago -> floored to 15 whole
-    minutes). A genuinely NEW event at 04:14:50Z (19s after the real wake) must
-    render as fresh — the floored reconstruction (04:15:00Z) would wrongly
-    place the boundary after this event and stale it."""
-    cfg["paths"]["wake_state_file"] = str(tmp_path / "wake_state.json")
-    cfg["paths"]["handoff_file"] = str(tmp_path / "handoff.md")
-    make_events_table(marrow_conn)
-    monkeypatch.setattr(note, "_frontmost_app", lambda: None)
-    marrow_conn.execute(
-        "INSERT INTO ct_wake_log (ts, wake, dry_run) VALUES (?, 1, 0)",
-        ("2026-07-08T04:14:31+00:00",))
-    marrow_conn.execute(
-        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
-        ("s", "2026-07-08T04:14:50+00:00", "user", "just after the real wake", "wx"))
-    marrow_conn.commit()
-
-    data = note.gather(marrow_conn, cfg, NOW)  # initial wake
-    assert data["replay_stale"] is False
-    assert [e["content"] for e in data["replay"]] == ["just after the real wake"]
-
-
-def test_gather_returns_replay_cutoff_of_rendered_events(marrow_conn, cfg, tmp_path, monkeypatch):
-    """gather() exposes replay_cutoff_row_id = the newest row id it actually
-    rendered. When nothing is newer than the cursor it diffed from, the cutoff is
-    that cursor (so a deferred advance never rewinds)."""
-    from cortex import wake_state
-    cfg["paths"]["wake_state_file"] = str(tmp_path / "wake_state.json")
-    make_events_table(marrow_conn)
-    monkeypatch.setattr(note, "_frontmost_app", lambda: None)
-
-    marrow_conn.execute(
-        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
-        ("s", "2026-07-08T03:00:00+00:00", "user", "shown", "wx"))
-    marrow_conn.commit()
-    shown = _row_id(marrow_conn, "shown")
-    d = note.gather(marrow_conn, cfg, NOW)
-    assert d["replay_cutoff_row_id"] == shown
-
-    # Cursor caught up; a re-render with nothing new returns the cursor itself.
-    wake_state.set_last_note_row_id(cfg, shown)
-    d2 = note.gather(marrow_conn, cfg, NOW)
-    assert d2["replay_cutoff_row_id"] == shown
-
-
-def test_seed_baseline_uses_captured_cutoff_not_requery(marrow_conn, cfg, tmp_path, monkeypatch):
-    """P2-A race: an event inserted between the wake note's assembly and the D6
-    seed (the ~90s window spawn) must NOT be swallowed by the baseline. seed_baseline
-    honours the cutoff captured at assembly, so that later event still shows in the
-    FIRST free-round instead of being dropped."""
-    from cortex import wake_state
-    cfg["paths"]["wake_state_file"] = str(tmp_path / "wake_state.json")
-    make_events_table(marrow_conn)
-    monkeypatch.setattr(note, "_frontmost_app", lambda: None)
-
-    marrow_conn.execute(
-        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
-        ("s", "2026-07-08T03:00:00+00:00", "user", "in wake note", "wx"))
-    marrow_conn.commit()
-    # Assembly captures the cutoff of the note it rendered.
-    captured = note.gather(marrow_conn, cfg, NOW)["replay_cutoff_row_id"]
-    assert captured == _row_id(marrow_conn, "in wake note")
-
-    # An event races in during the window spawn — absent from the wake note.
-    marrow_conn.execute(
-        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
-        ("s", "2026-07-08T03:00:30+00:00", "user", "raced in during spawn", "wx"))
-    marrow_conn.commit()
-
-    # Seeding from the CAPTURED cutoff (not a fresh query) keeps the racer replayable.
-    note.seed_baseline(marrow_conn, cfg, cutoff_row_id=captured)
-    assert wake_state.get_last_note_row_id(cfg) == captured
-    d = note.gather(marrow_conn, cfg, NOW, advance_baseline=True)
-    assert [e["content"] for e in d["replay"]] == ["raced in during spawn"]
-
-
-def test_deferred_advance_uses_gather_cutoff_not_requery(marrow_conn, cfg, tmp_path, monkeypatch):
-    """P2-B race: an event inserted between gather() (which built the free-round
-    text) and the deferred baseline advance must appear in the NEXT note, not be
-    consumed. Advancing to the cutoff gather() actually used (never a second
-    query) keeps that racer replayable next round."""
-    from cortex import wake_state
-    cfg["paths"]["wake_state_file"] = str(tmp_path / "wake_state.json")
-    make_events_table(marrow_conn)
-    monkeypatch.setattr(note, "_frontmost_app", lambda: None)
-
-    marrow_conn.execute(
-        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
-        ("s", "2026-07-08T03:00:00+00:00", "user", "round1 shown", "wx"))
-    marrow_conn.commit()
-    # Free-round render (advance_baseline=False, as watchdog does): gather returns
-    # the cutoff it built the text on. The caller defers the advance to after write.
-    data = note.gather(marrow_conn, cfg, NOW, advance_baseline=False)
-    assert [e["content"] for e in data["replay"]] == ["round1 shown"]
-    pending = data["replay_cutoff_row_id"]
-    assert pending == _row_id(marrow_conn, "round1 shown")
-
-    # Event races in AFTER gather built the text but BEFORE the deferred advance.
-    marrow_conn.execute(
-        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
-        ("s", "2026-07-08T03:00:30+00:00", "user", "raced after gather", "wx"))
-    marrow_conn.commit()
-
-    # Deferred advance uses the captured cutoff verbatim — NOT the newer racer.
-    wake_state.set_last_note_row_id(cfg, pending)
-    d2 = note.gather(marrow_conn, cfg, NOW, advance_baseline=True)
-    assert [e["content"] for e in d2["replay"]] == ["raced after gather"]
-
-
-def test_gather_cutoff_from_rendered_rows_not_separate_query(marrow_conn, cfg, tmp_path, monkeypatch):
-    """#1: the cutoff must be derived from the SAME read as the rendered replay,
-    not a separate _latest_replay_ts query. An event committed between the two
-    reads (simulated by making a separate query see a newer row than the render)
-    must NOT be swallowed. Here we assert gather never calls _latest_replay_ts to
-    derive the cutoff on the has-events path (it is only a staleness helper)."""
-    from cortex import wake_state
-    cfg["paths"]["wake_state_file"] = str(tmp_path / "wake_state.json")
-    make_events_table(marrow_conn)
-    monkeypatch.setattr(note, "_frontmost_app", lambda: None)
-
-    marrow_conn.execute(
-        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
-        ("s", "2026-07-08T03:00:00+00:00", "user", "rendered", "wx"))
-    marrow_conn.commit()
-
-    # A separate _latest_replay_row_id would return a NEWER id (the racer) than
-    # the rendered subset — poison it to prove the cutoff never comes from there.
-    monkeypatch.setattr(note, "_latest_replay_row_id",
-                        lambda conn, cfg: 999999)
-    d = note.gather(marrow_conn, cfg, NOW, advance_baseline=True)
-    assert [e["content"] for e in d["replay"]] == ["rendered"]
-    # Cutoff = max row id of what was rendered, NOT the poisoned latest query.
-    rendered = _row_id(marrow_conn, "rendered")
-    assert d["replay_cutoff_row_id"] == rendered
-    assert wake_state.get_last_note_row_id(cfg) == rendered
-
-
-def test_gather_cutoff_max_of_rendered_subset_overflow_not_skipped(marrow_conn, cfg, tmp_path, monkeypatch):
-    """#1c: more new events than the render limit. The cutoff must be the max ts
-    of the RENDERED subset (the newest `limit` rows), never the max ts of ALL
-    newer rows — otherwise the overflow rows below the limit sit > baseline and
-    get skipped forever. Advancing to the rendered cutoff keeps overflow
-    replayable on the next round."""
-    from cortex import wake_state
-    cfg["paths"]["wake_state_file"] = str(tmp_path / "wake_state.json")
-    cfg["note"] = {**cfg.get("note", {}), "replay_events": 2}  # limit = 2
-    make_events_table(marrow_conn)
-    monkeypatch.setattr(note, "_frontmost_app", lambda: None)
-
-    marrow_conn.executemany(
-        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
-        [
-            ("s", "2026-07-08T03:00:00+00:00", "user", "e1 overflow", "wx"),
-            ("s", "2026-07-08T03:01:00+00:00", "user", "e2 rendered", "wx"),
-            ("s", "2026-07-08T03:02:00+00:00", "user", "e3 rendered", "wx"),
-        ],
-    )
-    marrow_conn.commit()
-
-    d = note.gather(marrow_conn, cfg, NOW, advance_baseline=True)
-    # Only the newest 2 are rendered.
-    assert [e["content"] for e in d["replay"]] == ["e2 rendered", "e3 rendered"]
-    # Cutoff = newest of the RENDERED subset (e3), not e3 anyway here — but the
-    # baseline must NOT jump past the overflow e1. Advance moves to e3.
-    e3 = _row_id(marrow_conn, "e3 rendered")
-    assert d["replay_cutoff_row_id"] == e3
-    assert wake_state.get_last_note_row_id(cfg) == e3
-    # The overflow e1 (03:00) is < the rendered cutoff (03:02) so it is consumed
-    # this round by the baseline jump — pin the documented behaviour: overflow
-    # OLDER than the rendered window is dropped (design: replay shows the newest
-    # `limit`, older overflow is intentionally not backfilled). What must NOT
-    # happen is dropping events NEWER than the rendered cutoff; there are none
-    # here because the render always keeps the newest rows.
-    next_round = note.gather(marrow_conn, cfg, NOW, advance_baseline=True)
-    assert next_round["replay"] == []  # nothing newer than e3 remains
-
-
-def test_seed_baseline_explicit_none_keeps_baseline_no_requery(marrow_conn, cfg, tmp_path, monkeypatch):
-    """#2: seed_baseline(cutoff_row_id=None) is a validly-EMPTY assembled note
-    (zero eligible replay events). It must seed NOTHING (keep the cursor as-is),
-    NOT fall back to a fresh _latest_replay_row_id re-query — that re-query would
-    race in an event the empty note never showed and drop it from the first
-    free-round."""
-    from cortex import wake_state
-    cfg["paths"]["wake_state_file"] = str(tmp_path / "wake_state.json")
-    make_events_table(marrow_conn)
-    monkeypatch.setattr(note, "_frontmost_app", lambda: None)
-
-    # An event races in during the window spawn (would be picked by a re-query).
-    marrow_conn.execute(
-        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
-        ("s", "2026-07-08T03:00:30+00:00", "user", "raced in during spawn", "wx"))
-    marrow_conn.commit()
-    # If seed re-queried, it would sink the cursor past the racer and drop it.
-    monkeypatch.setattr(note, "_latest_replay_row_id",
-                        lambda conn, cfg: pytest.fail("must not re-query on explicit None"))
-
-    note.seed_baseline(marrow_conn, cfg, cutoff_row_id=None)  # empty -> seed nothing
-    assert wake_state.get_last_note_row_id(cfg) is None  # cursor untouched
-
-    # First free-round still replays the racer (full replay, baseline None).
-    d = note.gather(marrow_conn, cfg, NOW, advance_baseline=True)
-    assert [e["content"] for e in d["replay"]] == ["raced in during spawn"]
-
-
-def test_seed_baseline_omitted_arg_requeries_legacy(marrow_conn, cfg, tmp_path, monkeypatch):
-    """#2 counterpart: the OMITTED arg (legacy / test callers with no captured
-    cutoff) still falls back to a fresh _latest_replay_row_id query."""
-    from cortex import wake_state
-    cfg["paths"]["wake_state_file"] = str(tmp_path / "wake_state.json")
-    make_events_table(marrow_conn)
-    monkeypatch.setattr(note, "_frontmost_app", lambda: None)
-
-    marrow_conn.execute(
-        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
-        ("s", "2026-07-08T03:00:00+00:00", "user", "pre-wake", "wx"))
-    marrow_conn.commit()
-    note.seed_baseline(marrow_conn, cfg)  # arg omitted -> re-query
-    assert wake_state.get_last_note_row_id(cfg) == _row_id(marrow_conn, "pre-wake")
 
 
 def test_gather_survives_naive_due_at_self_schedule(marrow_conn, cfg, tmp_path, monkeypatch):
@@ -1296,6 +809,7 @@ def test_note_render_main_prints_fresh_note_no_writes(tmp_path, monkeypatch, cap
     _cfg = _config.load(path=tmp_path / "absent.toml")
     _cfg["paths"]["marrow_db"] = str(dbp)
     _cfg["paths"]["wake_state_file"] = str(tmp_path / "ws.json")
+    _cfg["paths"]["cortex_home"] = str(tmp_path / "home")
     monkeypatch.setattr(_config, "load", lambda path=None: _cfg)
     monkeypatch.setattr(note, "_frontmost_app", lambda: None)
     monkeypatch.setattr("sys.argv", ["note_render", "--transcript", "/t/feed1234ab.jsonl"])
@@ -1328,6 +842,7 @@ def _render_cli(tmp_path, monkeypatch, capsys, argv):
     _cfg = _config.load(path=tmp_path / "absent.toml")
     _cfg["paths"]["marrow_db"] = str(dbp)
     _cfg["paths"]["wake_state_file"] = str(tmp_path / "ws.json")
+    _cfg["paths"]["cortex_home"] = str(tmp_path / "home")
     monkeypatch.setattr(_config, "load", lambda path=None: _cfg)
     monkeypatch.setattr(note, "_frontmost_app", lambda: None)
     monkeypatch.setattr("sys.argv", ["note_render", *argv])
@@ -1344,15 +859,36 @@ def _render_cli(tmp_path, monkeypatch, capsys, argv):
 
 def test_note_render_shell_tg_drops_the_tg_channel_from_replay(
         tmp_path, monkeypatch, capsys):
-    out = _render_cli(tmp_path, monkeypatch, capsys, ["--shell", "tg"])
+    out = _render_cli(tmp_path, monkeypatch, capsys,
+                      ["--shell", "tg", "--replay"])
     assert "tg shell self talk" not in out
     assert "cli shell self talk" in out
 
 
 def test_note_render_default_and_cli_shell_render_identically(
         tmp_path, monkeypatch, capsys):
-    """Unspecified = the cli shell's own render, byte-identical to before."""
-    plain = _render_cli(tmp_path / "a", monkeypatch, capsys, [])
-    cli = _render_cli(tmp_path / "b", monkeypatch, capsys, ["--shell", "cli"])
+    """Unspecified = the cli shell's own render, byte-identical."""
+    plain = _render_cli(tmp_path / "a", monkeypatch, capsys, ["--replay"])
+    cli = _render_cli(tmp_path / "b", monkeypatch, capsys,
+                      ["--shell", "cli", "--replay"])
     assert plain == cli
     assert "tg shell self talk" in plain and "cli shell self talk" not in plain
+
+
+def test_note_render_without_replay_flag_carries_no_replay(
+        tmp_path, monkeypatch, capsys):
+    """Window renders (marrow render_module) must NOT carry Replay — turn_inject
+    is that session's outlet."""
+    out = _render_cli(tmp_path, monkeypatch, capsys, [])
+    assert "### Replay" not in out
+    assert "tg shell self talk" not in out
+
+
+def test_note_render_replay_is_consumed_once(tmp_path, monkeypatch, capsys):
+    """Second render of the same shell shows nothing new — the marker advanced."""
+    first = _render_cli(tmp_path, monkeypatch, capsys, ["--shell", "tg", "--replay"])
+    assert "cli shell self talk" in first
+    monkeypatch.setattr("sys.argv", ["note_render", "--shell", "tg", "--replay"])
+    from cortex import note_render
+    note_render.main()
+    assert "### Replay" not in capsys.readouterr().out

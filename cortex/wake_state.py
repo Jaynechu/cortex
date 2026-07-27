@@ -17,8 +17,7 @@ from pathlib import Path
 from cortex import config
 
 _AWAKE_KEYS = ("awake", "awake_since", "wake_log_id", "transcript",
-               "user_replied_this_wake", "tuck_pending", "last_note_row_id",
-               "kick_round")
+               "user_replied_this_wake", "tuck_pending", "kick_round")
 
 _LOCK_TIMEOUT_SEC = 5.0
 
@@ -353,12 +352,7 @@ def set_awake(cfg: dict, wake_log_id: int | None, transcript: str | None,
             d.update(awake=True, next_wake_at=None,
                      awake_since=datetime.now(timezone.utc).isoformat(),
                      wake_log_id=wake_log_id, transcript=transcript,
-                     user_replied_this_wake=False,
-                     tuck_pending=None, last_note_row_id=None)
-            # One-time migration eraser: a state file still carrying the legacy
-            # ts cursor must not shadow the fresh (None) row-id cursor on the
-            # wake's first render. Gone for good after the first wake-open.
-            d.pop("last_note_ts", None)
+                     user_replied_this_wake=False, tuck_pending=None)
             if session_id is not None:
                 d["session_id"] = session_id
             if cortex_claude_sid is not None:
@@ -497,49 +491,6 @@ def stamp_silence_basis(cfg: dict) -> bool:
         d["tuck_pending"] = datetime.now(timezone.utc).isoformat()
         _save(cfg, d)
         return True
-
-
-def get_last_note_row_id(cfg: dict) -> int | None:
-    """events.id cursor for the diff-mode Replay section: the newest replayed
-    event's row id as of the last rendered note (wake's initial note or any
-    free-round tuck-in). None = no note rendered yet this wake -> full
-    (epoch-zero) replay."""
-    v = load(cfg).get("last_note_row_id")
-    return int(v) if isinstance(v, int) else None
-
-
-def set_last_note_row_id(cfg: dict, row_id: int) -> None:
-    update(cfg, last_note_row_id=int(row_id))
-
-
-def deliver_then_advance(cfg: dict, deliver, pending_row_id: int | None) -> None:
-    """Atomic ear-delivery + cursor-advance under ONE advisory _flock section,
-    the same lock the marrow replay hook (cortex_bridge._wake_state_lock, byte-
-    coupled via lock_path) takes to read last_note_row_id. Closes the dup-replay
-    gap: the old two-step (write ear line, THEN a separate cursor-write lock) left
-    a window where the ear delivery already triggered a cortex turn whose replay
-    hook read the STALE watermark and re-injected the just-delivered rows.
-
-    Order inside the lock: run deliver() (the ear write) -> only if it returns a
-    truthy value and does not raise, monotonic-advance last_note_row_id to
-    pending_row_id. A failed/raising deliver never advances, so its events stay
-    replayable next round (FIX 6 preserved). While the lock is held no concurrent
-    watermark reader can observe the ear line without also seeing the advanced
-    cursor. Best-effort — never raises."""
-    with _flock(cfg):
-        try:
-            ok = deliver()
-        except Exception:
-            return  # ear write failed -> do NOT advance (no lost events)
-        if ok is False:
-            return  # deliver signalled failure -> keep events replayable
-        if pending_row_id is None:
-            return
-        d = load(cfg)
-        cur = d.get("last_note_row_id")
-        if not isinstance(cur, int) or int(pending_row_id) > cur:
-            d["last_note_row_id"] = int(pending_row_id)
-            _save(cfg, d)
 
 
 def mark_kick_round(cfg: dict) -> bool:

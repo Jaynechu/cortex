@@ -4,21 +4,17 @@ The wake-time note is assembled once and frozen to disk; a rotated window then
 gets a stale file. This entry re-renders at injection time so "Now:" and the
 Window SID always reflect the caller's current moment and transcript.
 
-Contract: read-only. No ct_wake_log writes, no wake_state writes, no shell
-ledger writes, no file writes. --transcript supplies the Window-line SID
-(Path(...).stem[:8]) — the caller's own transcript, correct even after
-rotation. Print the note; exit 0.
+Contract: no ct_wake_log writes, no wake_state writes, no shell ledger writes.
+--transcript supplies the Window-line SID (Path(...).stem[:8]) — the caller's
+own transcript, correct even after rotation. Print the note; exit 0.
 
-A render that showed Replay rows reports the events row it covered, out-of-band
-on stderr as one `cutoff_row_id=N` line (stdout stays the note body). Every
-shell — the unqualified/cli render included — emits it. The feeder writes that
-to its cursor only after a successful feed, so a manual/debug render can never
-poison one.
+--replay is the one exception to read-only: a headless consumer has no
+UserPromptSubmit hook, so the note is its only replay channel and this render
+consumes that shell's private replay marker.
 """
 from __future__ import annotations
 
 import argparse
-import sys
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -38,10 +34,13 @@ def main() -> None:
                         help="shell id this note is rendered for; its own "
                              "channel drops out of Replay so the note does not "
                              "replay the shell back at itself "
-                             "([note].shell_replay_exclude). A non-cli shell "
-                             "also diffs from its own ledger cursor and gets a "
-                             "cutoff_row_id line on stderr. Unset = the "
-                             "unqualified (cli) set")
+                             "([note].shell_replay_exclude) and it uses its own "
+                             "replay marker. Unset = the unqualified (cli) set")
+    parser.add_argument("--replay", action="store_true",
+                        help="include the Replay section — headless consumers "
+                             "only (no UserPromptSubmit hook, so the note is "
+                             "their only replay outlet). Consumes this shell's "
+                             "replay marker; a window render must never pass it")
     args = parser.parse_args()
 
     cfg = config.load()
@@ -57,16 +56,10 @@ def main() -> None:
     conn = db.connect(cfg)
     try:
         data = note.gather(conn, cfg, now, window_sid=window_sid,
-                           shell=args.shell)
+                           shell=args.shell, replay=args.replay)
         if args.no_ct:
             data["ct_notes"] = []
         print(note.render(cfg, now, data))
-        # Out-of-band cutoff for the caller that feeds this note (tg bridge
-        # ledger, marrow wake hook wake_state). Nothing rendered -> no line, so
-        # the feeder promotes nothing.
-        cutoff = data.get("rendered_cutoff_row_id")
-        if cutoff is not None:
-            print(f"cutoff_row_id={int(cutoff)}", file=sys.stderr)
     finally:
         conn.close()
 

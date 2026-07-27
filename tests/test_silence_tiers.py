@@ -214,7 +214,7 @@ def test_kick_round_fires_once_then_falls_through(awake_window):
 def test_free_round_line_carries_configured_copy(cfg):
     """Default free-round line renders the configured tuck_in_text (T2
     user-approved copy) with the [NEW ROUND] marker."""
-    line, _note, _pending = watchdog._build_tuck_in_line(cfg, mins=17.0)
+    line, _note = watchdog._build_tuck_in_line(cfg, mins=17.0)
     assert "[NEW ROUND]" in line
     for stray in ("{mins}", "{user}", "{n}", "{cap}"):
         assert stray not in line
@@ -224,7 +224,7 @@ def test_free_round_template_still_substitutes_placeholders(cfg):
     """The substitution mechanism survives for a custom template: {mins}/{user}
     still fill."""
     cfg["wake"]["tuck_in_text"] = "⏳ [NEW ROUND] {mins} min since {user}"
-    line, _note, _pending = watchdog._build_tuck_in_line(cfg, mins=17.0)
+    line, _note = watchdog._build_tuck_in_line(cfg, mins=17.0)
     assert "17 min" in line
     assert "the user" in line  # no marrow config -> fallback
 
@@ -296,161 +296,36 @@ def test_free_round_mirrors_full_note_to_file(awake_window):
     assert body != "stale" and "Now:" in body
 
 
-def test_free_round_mirror_uses_full_replay(awake_window, monkeypatch):
-    """The mirror render must pass full_replay=True (non-diff), while the injected
-    note stays diff-mode (full_replay defaults False)."""
+def test_free_round_note_carries_no_replay_section(awake_window):
+    """The free-round note reaches a WINDOW: the marker line is typed as a user
+    prompt, so marrow's turn_inject is that window's replay outlet and the note
+    must carry none."""
+    cfg = awake_window
+    conn = db.connect(cfg)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "session_id TEXT, timestamp TEXT, role TEXT, content TEXT, channel TEXT)")
+    conn.execute(
+        "INSERT INTO events (session_id, timestamp, role, content, channel) "
+        "VALUES ('s', '2026-07-08T03:00:00+00:00', 'user', 'chatter elsewhere', 'wx')")
+    conn.commit()
+    conn.close()
+    wake_state.update(cfg, user_replied_this_wake=True)
+    assert watchdog.silence_action(cfg, silent_min=21.0) == "free-round appended"
+    staged = _staged(cfg)
+    assert "Now:" in staged                    # the note did land
+    assert "### Replay" not in staged
+    assert "chatter elsewhere" not in staged
+
+
+def test_free_round_leaves_the_replay_marker_untouched(awake_window):
+    """A window free-round consumes no replay marker — nothing to consume."""
     from cortex import note as _note
-    seen = []
-    real_gather = _note.gather
-
-    def _spy(conn, cfg, now, **kw):
-        seen.append(kw.get("full_replay", False))
-        return real_gather(conn, cfg, now, **kw)
-
-    monkeypatch.setattr(_note, "gather", _spy)
-    wake_state.update(awake_window, user_replied_this_wake=True)
-    watchdog.silence_action(awake_window, silent_min=21.0)
-    assert False in seen  # injected diff note
-    assert True in seen   # full mirror render
-
-
-def test_two_consecutive_injections_second_diffs_against_first(awake_window):
-    """Two consecutive free-round injections in the same wake: the second note
-    replays only events newer than the first note's ts — user activity on
-    another channel between rounds shows up, the already-seen event does not."""
     cfg = awake_window
     wake_state.update(cfg, user_replied_this_wake=True)
-    conn = db.connect(cfg)
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, "
-        "session_id TEXT, timestamp TEXT, role TEXT, content TEXT, channel TEXT)")
-    conn.execute(
-        "INSERT INTO events (session_id, timestamp, role, content, channel) "
-        "VALUES ('s', '2026-07-08T03:00:00+00:00', 'user', 'round one message', 'wx')")
-    conn.commit()
-    conn.close()
+    watchdog.silence_action(cfg, silent_min=21.0)
+    assert not _note._marker_path(cfg, None).exists()
 
-    # Round 1: kick-carrier free-round injection (fresh baseline note).
-    wake_state.mark_kick_round(cfg)
-    a1 = watchdog.silence_action(cfg, silent_min=0.0)
-    assert a1 == "kick free-round appended"
-    staged1 = _staged(cfg)
-    assert "round one message" in staged1
-
-    # Activity on another channel lands between rounds.
-    conn = db.connect(cfg)
-    conn.execute(
-        "INSERT INTO events (session_id, timestamp, role, content, channel) "
-        "VALUES ('s', '2026-07-08T03:05:00+00:00', 'user', 'round two message', 'tg')")
-    conn.commit()
-    conn.close()
-
-    # Round 2: another kick fires a second free-round injection.
-    wake_state.mark_kick_round(cfg)
-    a2 = watchdog.silence_action(cfg, silent_min=0.0)
-    assert a2 == "kick free-round appended"
-    # Staging appends, so everything past round 1's payload is round 2's note.
-    text2_only = _staged(cfg)[len(staged1):]
-    assert "round two message" in text2_only
-    assert "round one message" not in text2_only
-
-
-def test_stale_epoch_kick_round_does_not_advance_baseline(awake_window, monkeypatch):
-    """FIX 6: the diff cursor (last_note_row_id) must advance ONLY after the
-    injection commit + write succeed. If conditional_mutate raises (user
-    returned = stale epoch) the injection is dropped, so its replay events must
-    stay replayable next round — cursor unchanged, nothing written to
-    wake_signal.log."""
-    cfg = awake_window
-    wake_state.update(cfg, user_replied_this_wake=True)
-    conn = db.connect(cfg)
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, "
-        "session_id TEXT, timestamp TEXT, role TEXT, content TEXT, channel TEXT)")
-    conn.execute(
-        "INSERT INTO events (session_id, timestamp, role, content, channel) "
-        "VALUES ('s', '2026-07-08T03:00:00+00:00', 'user', 'unseen event', 'wx')")
-    conn.commit()
-    conn.close()
-    before = wake_state.get_last_note_row_id(cfg)  # None (no note rendered yet)
-    wake_state.mark_kick_round(cfg)
-    # Simulate a user return between render and commit: conditional_mutate raises.
-    def _stale(*a, **k):
-        raise wake_state.StateValidationError("epoch token stale")
-    monkeypatch.setattr(wake_state, "conditional_mutate", _stale)
-    assert watchdog.silence_action(cfg, silent_min=0.0) is None  # dropped
-    assert _signal_lines(cfg) == []  # nothing injected
-    assert wake_state.get_last_note_row_id(cfg) == before  # baseline NOT advanced
-
-
-def test_ear_delivery_and_baseline_advance_are_atomic_under_shared_lock(
-        awake_window, monkeypatch):
-    """Dup-replay bug: the ear delivery and the cursor advance must commit
-    together under the ONE advisory lock the marrow replay hook reads under
-    (lock_path / _flock, byte-coupled with cortex_bridge._wake_state_lock).
-
-    Old split code wrote the ear line with NO lock held, then took a SEPARATE
-    lock to advance the baseline. In that gap the ear line already triggered a
-    cortex turn whose replay hook read the STALE watermark and re-injected the
-    just-delivered rows.
-
-    This models the production split: at the instant the ear line is written, a
-    concurrent watermark reader (the hook) tries to grab the shared lock. If
-    delivery+advance are atomic the lock is HELD during the write, so a
-    non-blocking acquire from inside the ear write MUST fail — proving no reader
-    can observe the ear line while the baseline is still stale. Under the old
-    two-step code the probe would succeed (write happened lock-free)."""
-    import fcntl
-    import os
-
-    cfg = awake_window
-    wake_state.update(cfg, user_replied_this_wake=True)
-    conn = db.connect(cfg)
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, "
-        "session_id TEXT, timestamp TEXT, role TEXT, content TEXT, channel TEXT)")
-    conn.execute(
-        "INSERT INTO events (session_id, timestamp, role, content, channel) "
-        "VALUES ('s', '2026-07-08T03:00:00+00:00', 'user', 'delivered row', 'wx')")
-    conn.commit()
-    conn.close()
-
-    lock_file = str(wake_state.lock_path(cfg))
-    probe = {"lock_held_during_ear_write": None}
-    real_write = watchdog._type_tuck_in_line
-
-    def _instrumented_write(cfg_, line):
-        # Emulate the replay hook racing in the moment the ear line lands: try to
-        # take the shared lock non-blockingly from a foreign fd. Success == the
-        # ear write ran with no lock held (the bug); failure == atomic (fixed).
-        fd = os.open(lock_file, os.O_CREAT | os.O_RDWR, 0o644)
-        try:
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                fcntl.flock(fd, fcntl.LOCK_UN)
-                probe["lock_held_during_ear_write"] = False
-            except OSError:
-                probe["lock_held_during_ear_write"] = True
-        finally:
-            os.close(fd)
-        return real_write(cfg_, line)
-
-    monkeypatch.setattr(watchdog, "_type_tuck_in_line", _instrumented_write)
-
-    wake_state.mark_kick_round(cfg)
-    assert watchdog.silence_action(cfg, silent_min=0.0) == \
-        "kick free-round appended"
-
-    # Round landed (marker typed, note staged) AND the shared lock was held
-    # while it was written.
-    assert "[NEW ROUND]" in "\n".join(_signal_lines(cfg))
-    assert "delivered row" in _staged(cfg)
-    assert probe["lock_held_during_ear_write"] is True
-    # Cursor advanced in the same section -> no stale window for the reader.
-    assert wake_state.get_last_note_row_id(cfg) == 1
-
-
-# --- F9: ct-note claim tied to a VISIBLE round (death replay) ----------------
 
 def _make_outbox(cfg, body="睡了吗", note_id=9):
     conn = db.connect(cfg)
@@ -483,7 +358,7 @@ def test_free_round_render_does_not_claim_ct_note(awake_window):
     surface) must NOT claim a ct note. Only the post-commit ear delivery claims."""
     cfg = awake_window
     _make_outbox(cfg)
-    text, _pending = watchdog._free_round_note(cfg)
+    watchdog._free_round_note(cfg)
     # render ran, but the ct note is untouched — still pending, no audit stamp.
     row = _outbox_row(cfg)
     assert row["status"] == "pending"
@@ -530,7 +405,7 @@ def test_free_round_stale_epoch_does_not_claim_ct_note(awake_window, monkeypatch
 def test_free_round_typed_line_is_the_marker_only(cfg):
     """The typed line is the SHORT marker alone (one line, machine-tagged); the
     rendered note is returned separately for invisible delivery."""
-    line, note_text, _pending = watchdog._build_tuck_in_line(cfg, mins=17.0)
+    line, note_text = watchdog._build_tuck_in_line(cfg, mins=17.0)
     assert line.strip().splitlines() == [line.strip()]      # single line
     assert line.lstrip().startswith("⏳ [NEW ROUND]")
     assert "Now:" not in line
@@ -539,14 +414,12 @@ def test_free_round_typed_line_is_the_marker_only(cfg):
 
 def test_failed_type_unstages_the_invisible_note(awake_window, monkeypatch):
     """No orphan payload: if the marker never lands, the staged note is dropped
-    (a later marker turn must not pick up an undelivered round) and the diff
-    baseline does not advance (FIX 6)."""
+    (a later marker turn must not pick up an undelivered round)."""
     cfg = awake_window
     wake_state.update(cfg, user_replied_this_wake=True)
     monkeypatch.setattr(watchdog, "_type_tuck_in_line", lambda c, line: False)
     assert watchdog.silence_action(cfg, silent_min=21.0) == "free-round appended"
     assert _staged(cfg) == ""
-    assert wake_state.get_last_note_row_id(cfg) is None
 
 
 def _fresh_transcript(cfg):
@@ -739,43 +612,3 @@ def test_lie_down_double_fire_single_effect(awake_window, monkeypatch):
     assert row["force_slept"] == "auto"
 
 
-def test_failed_typing_does_not_advance_baseline(awake_window, monkeypatch):
-    """T11 P3: delivery is typed now, so 'written' no longer means 'delivered'.
-    A typing failure (no resident window) must keep the round's events
-    replayable — the cursor stays where it was."""
-    cfg = awake_window
-    wake_state.update(cfg, user_replied_this_wake=True)
-    conn = db.connect(cfg)
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS events (id INTEGER PRIMARY KEY AUTOINCREMENT, "
-        "session_id TEXT, timestamp TEXT, role TEXT, content TEXT, channel TEXT)")
-    conn.execute(
-        "INSERT INTO events (session_id, timestamp, role, content, channel) "
-        "VALUES ('s', '2026-07-08T03:00:00+00:00', 'user', 'unseen event', 'wx')")
-    conn.commit()
-    conn.close()
-    before = wake_state.get_last_note_row_id(cfg)
-
-    from cortex import window
-    monkeypatch.setattr(window, "inject_prompt", lambda cfg_, text: False)
-
-    assert watchdog.silence_action(cfg, silent_min=999.0) == "free-round appended"
-    assert wake_state.get_last_note_row_id(cfg) == before  # nothing landed -> no advance
-
-
-def test_typing_raising_window_error_does_not_advance_baseline(
-        awake_window, monkeypatch):
-    """A WindowError from the typing boundary is swallowed as a failed delivery
-    (not an exception out of the watchdog), and the baseline still holds."""
-    cfg = awake_window
-    wake_state.update(cfg, user_replied_this_wake=True)
-    before = wake_state.get_last_note_row_id(cfg)
-
-    from cortex import window
-
-    def _boom(cfg_, text):
-        raise window.WindowError("no session")
-    monkeypatch.setattr(window, "inject_prompt", _boom)
-
-    assert watchdog.silence_action(cfg, silent_min=999.0) == "free-round appended"
-    assert wake_state.get_last_note_row_id(cfg) == before

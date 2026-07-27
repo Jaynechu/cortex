@@ -61,20 +61,16 @@ def _now(cfg: dict) -> datetime:
 def assemble_note(conn: sqlite3.Connection, cfg: dict, now: datetime,
                   decision: dict | None = None, fresh: bool = False,
                   wake_kind: str | None = None,
-                  return_cutoff: bool = False):
+                  replay: bool = False) -> str:
     """Thin wrapper: gather() + render(). `fresh`/`wake_kind` gate the handoff
     section — only a fresh window (rotate) receives it.
 
-    `return_cutoff` (default False): return (text, replay_cutoff_row_id) instead
-    of just text. The cutoff is the replay row id this note was built on, captured at
-    assembly so the D6 wake-open seed anchors to exactly what was rendered — not
-    a later re-query that could race in an event this note never showed."""
-    data = note.gather(conn, cfg, now, decision=decision,
-                       fresh=fresh, wake_kind=wake_kind, consume_kick=True)
-    text = note.render(cfg, now, data)
-    if return_cutoff:
-        return text, data.get("replay_cutoff_row_id")
-    return text
+    `replay` (default False): include the Replay section. Only the headless
+    caller passes True — a window session gets replay from marrow's turn_inject
+    hook, which the headless path has no equivalent of."""
+    data = note.gather(conn, cfg, now, decision=decision, fresh=fresh,
+                       wake_kind=wake_kind, consume_kick=True, replay=replay)
+    return note.render(cfg, now, data)
 
 
 def call_marrow_cortex(prompt: str, cwd: str, resume_sid: str | None, cfg: dict) -> dict:
@@ -839,8 +835,12 @@ def run_wake(
     resume_sid = state.cortex_session_id
     timer.mark("state_loaded")
 
-    note_text, note_cutoff = assemble_note(
-        conn, cfg, now, decision=decision, return_cutoff=True)
+    # Replay rides the note ONLY on the headless path: a window session gets it
+    # from marrow's turn_inject hook, which headless has no equivalent of.
+    headless = not (cfg["wake"].get("mode", "window") == "window"
+                    and caller is call_marrow_cortex)
+    note_text = assemble_note(conn, cfg, now, decision=decision,
+                              replay=headless)
     home = str(config.cortex_home(cfg))
     timer.mark("note")
 
@@ -871,11 +871,10 @@ def run_wake(
         with _spawn_serialized(cfg):
             plan, rotate_driven = _classify_wake(cfg)
             window_text = note_text
-            window_cutoff = note_cutoff
             if plan == "fresh":
-                window_text, window_cutoff = assemble_note(
+                window_text = assemble_note(
                     conn, cfg, now, decision=decision, fresh=True,
-                    wake_kind="rotate", return_cutoff=True)
+                    wake_kind="rotate")
                 timer.mark("rotate_note")
             if plan == "ear":
                 win = _window_wake(conn, cfg, window_text, now, respawn=False,
@@ -915,18 +914,14 @@ def run_wake(
             timer.mark("wake_complete")
             return win
         if win is not None:
-            # D6 seed: set_awake (inside _window_wake) just reset last_note_row_id to
-            # None. Anchor the diff-mode baseline to the cutoff captured when the
-            # DELIVERED note was assembled (P2-A) — not a fresh query after the
-            # ~90s window spawn, which would race in an event absent from the note
-            # and drop it from the first free-round.
-            seed_cutoff = window_cutoff
-            note.seed_baseline(conn, cfg, cutoff_row_id=seed_cutoff)
             timer.mark("window_injected")
             timer.mark("wake_complete")
             return win
-        # osascript / iTerm failed -> fall through to headless fallback.
+        # osascript / iTerm failed -> fall through to headless fallback. The note
+        # was built for a window (no Replay); rebuild it with Replay, since this
+        # path runs no hooks and the note is the only replay channel here.
         _audit_wake(conn, wake_id, "window path failed -> headless fallback")
+        note_text = assemble_note(conn, cfg, now, decision=decision, replay=True)
 
     timer.mark("spawn_marrow")
     try:

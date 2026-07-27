@@ -78,13 +78,12 @@ def test_run_wake_fresh_spawn_failure_preserves_rotate_flag(cfg, monkeypatch):
     and never reactivates the retired conversation. Before the fix the flag was
     cleared during classification, before the spawn, so a failed spawn dropped
     it and the retired window got resumed on the next tick."""
-    from cortex import note, symlinks, wake, window
+    from cortex import symlinks, wake, window
 
     _seed_wake_row(cfg, "rot-fail")
     wake_state.set_rotated(cfg)
 
     monkeypatch.setattr(symlinks, "ensure_all", lambda c: None)
-    monkeypatch.setattr(note, "seed_baseline", lambda *a, **k: None)
     monkeypatch.setattr(wake, "_render_daybrief", lambda c: None)
 
     # The fresh spawn fails to come up (osascript/iTerm WindowError); the window
@@ -112,13 +111,12 @@ def test_run_wake_fresh_spawn_failure_preserves_rotate_flag(cfg, monkeypatch):
 def test_run_wake_fresh_spawn_success_consumes_rotate_flag(cfg, monkeypatch):
     """Fix 1: once the fresh successor is verified live, the one-shot rotate flag
     IS consumed (so the wake after it is not another needless respawn)."""
-    from cortex import note, symlinks, transcript, wake, watchdog, window
+    from cortex import symlinks, wake, watchdog, window
 
     _seed_wake_row(cfg, "rot-ok")
     wake_state.set_rotated(cfg)
 
     monkeypatch.setattr(symlinks, "ensure_all", lambda c: None)
-    monkeypatch.setattr(note, "seed_baseline", lambda *a, **k: None)
     monkeypatch.setattr(wake, "_render_daybrief", lambda c: None)
     monkeypatch.setattr(window, "respawn",
                         lambda c, initial_prompt=None, resume_sid=None: "sid-new")
@@ -146,12 +144,11 @@ def test_run_wake_concurrent_rotate_second_entrant_skips(cfg, monkeypatch):
     belt-and-braces in-lock guard checks peek_rotated() -> this entrant still
     must skip rather than double-spawn (the guard is defense-in-depth even
     though the single-classify structure makes the gap unreachable in practice)."""
-    from cortex import note, symlinks, wake, watchdog, window
+    from cortex import symlinks, wake, watchdog, window
 
     _seed_wake_row(cfg, "rot-concurrent")
 
     monkeypatch.setattr(symlinks, "ensure_all", lambda c: None)
-    monkeypatch.setattr(note, "seed_baseline", lambda *a, **k: None)
     monkeypatch.setattr(wake, "_render_daybrief", lambda c: None)
     monkeypatch.setattr(watchdog, "spawn", lambda c: None)
 
@@ -185,13 +182,12 @@ def test_classify_wake_called_exactly_once_per_run_wake(cfg, monkeypatch):
     two-read design (classify, then a second later peek_rotated() for
     rotate_claim) is what let a rotate loser observe a different answer than its
     own classification."""
-    from cortex import note, symlinks, wake, watchdog, window
+    from cortex import symlinks, wake, watchdog, window
 
     wake_state.set_rotated(cfg)
     _seed_wake_row(cfg, "single-classify")
 
     monkeypatch.setattr(symlinks, "ensure_all", lambda c: None)
-    monkeypatch.setattr(note, "seed_baseline", lambda *a, **k: None)
     monkeypatch.setattr(wake, "_render_daybrief", lambda c: None)
     monkeypatch.setattr(watchdog, "spawn", lambda c: None)
     monkeypatch.setattr(window, "respawn",
@@ -601,13 +597,12 @@ def test_interleave_rotate_sampling_gap_no_double_spawn(cfg, monkeypatch):
     braces re-check -- A must see the flag gone and skip, never double-spawning.
     (The single-classify structure makes this gap structurally unreachable in
     production; this test exercises the surviving guard directly.)"""
-    from cortex import note, symlinks, wake, watchdog, window
+    from cortex import symlinks, wake, watchdog, window
 
     _seed_wake_row(cfg, "interleave-rotate")
     wake_state.set_rotated(cfg)
 
     monkeypatch.setattr(symlinks, "ensure_all", lambda c: None)
-    monkeypatch.setattr(note, "seed_baseline", lambda *a, **k: None)
     monkeypatch.setattr(wake, "_render_daybrief", lambda c: None)
     monkeypatch.setattr(watchdog, "spawn", lambda c: None)
 

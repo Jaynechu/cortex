@@ -275,18 +275,14 @@ def _handoff_written(handoff, before_mtime: float | None) -> bool:
         return False
 
 
-def _free_round_note(cfg: dict) -> tuple[str, str | None]:
+def _free_round_note(cfg: dict) -> str:
     """Freshly rendered wakeup note for a free-round injection (silence-cycle OR
-    kick carrier — every free-round injection carries one). Returns
-    (text, pending_baseline_ts): text is "" when the toggle is off / render
-    fails; pending_baseline_ts is the newest eligible replay ts that the caller
-    must persist as the new diff baseline ONLY AFTER the line write + epoch
-    commit succeed (FIX 6 — advancing it during render lost replay events forever
-    when a stale-epoch / failed write dropped the injection). Diff mode: gather
-    replays only events newer than the wake's last rendered note. Never raises —
-    the injection must land regardless."""
+    kick carrier — every free-round injection carries one). "" when the toggle is
+    off or the render fails. Carries no Replay section: the marker line lands as
+    a user-prompt turn, so marrow's turn_inject is that window's replay outlet.
+    Never raises — the injection must land regardless."""
     if not cfg["wake"].get("free_round_note", True):
-        return "", None
+        return ""
     try:
         from datetime import datetime
         from pathlib import Path
@@ -301,64 +297,47 @@ def _free_round_note(cfg: dict) -> tuple[str, str | None]:
             sid = Path(str(raw)).stem[:8]
         conn = db.connect(cfg)
         try:
-            # advance_baseline=False: render must NOT persist the baseline. The
-            # caller advances it only after the injection is committed.
             # claim_ct_notes=False (F9): a ct note must NOT be claimed at render
             # time — the render can run on a tick whose delivery is later dropped
             # (stale epoch) and would silently swallow the note. The caller claims
             # ct notes separately AFTER the delivery commits.
             # settle=True: this free-round render clears kick reasons / stamps
-            # receipts (restoring the prior clear-at-render behavior — the line is
-            # about to be typed into the window). ct notes stay deferred
-            # (claim_ct_notes=False) and settle in _deliver_ct_notes AFTER the
-            # delivery commits, so a dropped delivery never swallows a ct note.
-            data = note.gather(conn, cfg, now, window_sid=sid,
-                               advance_baseline=False, consume_kick=True,
+            # receipts — the line is about to be typed into the window.
+            data = note.gather(conn, cfg, now, window_sid=sid, consume_kick=True,
                                claim_ct_notes=False, settle=True)
             text = note.render(cfg, now, data).strip()
-            # FIX 6 + P2-B: the deferred advance must use the SAME cutoff this
-            # note was built on, captured inside gather() — not a second query
-            # here, which could race in an event this note never rendered and
-            # then drop it when the baseline advances past it.
-            pending = data.get("replay_cutoff_row_id")
-            # Mirror the FULL (non-diff) note to disk so a human reading the file
-            # sees complete state — the injected note above stays diff-mode.
+            # Mirror to disk so a human reading the file sees the same state.
             # Best-effort: a mirror failure must not affect the tuck-in.
             try:
                 from cortex import window
-                full = note.gather(conn, cfg, now, window_sid=sid,
-                                   advance_baseline=False, full_replay=True)
-                window.write_note(cfg, note.render(cfg, now, full).strip())
+                window.write_note(cfg, text)
             except Exception:
                 pass
         finally:
             conn.close()
-        return text, pending
+        return text
     except Exception:
-        return "", None
+        return ""
 
 
-def _build_tuck_in_line(cfg: dict, mins: float) -> tuple[str, str, int | None]:
+def _build_tuck_in_line(cfg: dict, mins: float) -> tuple[str, str]:
     """Render the free-round round OUTSIDE any lock (BUG B: the slow note render
     + template fill must not run inside the strict section). {mins} = real
     minutes since the user's last message, {user} = marrow user_name.
 
-    Returns (line, note_text, pending_row_id):
-      line       — the SHORT marker line, the only thing typed on screen.
-      note_text  — the freshly rendered (diff-mode) note, delivered INVISIBLY:
-                   staged to free_round_note_path and injected by the marrow
-                   hook on the marker turn (same pattern as the wake bell), so
-                   the note never shows in the window.
-      pending_row_id — the caller advances the diff cursor to it ONLY AFTER
-                   the marker line is committed + typed (FIX 6).
-    ("", "", None) when the marker template is empty (disabled)."""
+    Returns (line, note_text):
+      line      — the SHORT marker line, the only thing typed on screen.
+      note_text — the freshly rendered note, delivered INVISIBLY: staged to
+                  free_round_note_path and injected by the marrow hook on the
+                  marker turn (same pattern as the wake bell), so the note never
+                  shows in the window.
+    ("", "") when the marker template is empty (disabled)."""
     tmpl = str(cfg["wake"].get("tuck_in_text") or "").strip()
     if not tmpl:
-        return "", "", None
+        return "", ""
     line = tmpl.replace("{mins}", str(int(round(mins)))) \
                .replace("{user}", config.user_name(cfg))
-    fresh, pending = _free_round_note(cfg)
-    return line, fresh, pending
+    return line, _free_round_note(cfg)
 
 
 def _stage_free_round_note(cfg: dict, text: str) -> None:
@@ -391,9 +370,8 @@ def _clear_free_round_note(cfg: dict) -> None:
 
 def _deliver_free_round(cfg: dict, line: str, note_text: str) -> bool:
     """Stage the invisible note, then type ONLY the short marker line. Returns
-    what the typing returned, so deliver_then_advance skips the baseline advance
-    on a failed delivery (FIX 6: no lost events). A failed type also un-stages
-    the note (no turn will consume it)."""
+    what the typing returned. A failed type un-stages the note (no turn will
+    consume it)."""
     _stage_free_round_note(cfg, note_text)
     ok = _type_tuck_in_line(cfg, line)
     if not ok:
@@ -474,9 +452,9 @@ def silence_action(cfg: dict, silent_min: float, *, allow_tuck: bool = True) -> 
     # silent_min. Consume it (read-and-clear) before deciding anything else so a
     # kick always gets exactly one carrier fire.
     if wake_state.peek_kick_round(cfg):
-        line, note_text, pending_row_id = ("", "", None)
+        line, note_text = ("", "")
         if allow_tuck:
-            line, note_text, pending_row_id = _build_tuck_in_line(cfg, silent_min)
+            line, note_text = _build_tuck_in_line(cfg, silent_min)
         try:
             committed = wake_state.conditional_mutate(
                 cfg, token0, _stamp_free_round())
@@ -486,8 +464,7 @@ def silence_action(cfg: dict, silent_min: float, *, allow_tuck: bool = True) -> 
             return None  # not awake -> no injection
         wake_state.take_kick_round(cfg)  # consume: exactly one carrier fire
         if allow_tuck:
-            wake_state.deliver_then_advance(
-                cfg, lambda: _deliver_free_round(cfg, line, note_text), pending_row_id)
+            _deliver_free_round(cfg, line, note_text)
             _deliver_ct_notes(cfg, line)  # F9: claim ct notes now the round surfaces
         return "kick free-round appended"
 
@@ -524,9 +501,9 @@ def silence_action(cfg: dict, silent_min: float, *, allow_tuck: bool = True) -> 
     # re-check awake + epoch under the strict lock and stamp the injection
     # marker in the same section (TOCTOU-safe). Only a committed stamp appends
     # the line.
-    line, note_text, pending_row_id = ("", "", None)
+    line, note_text = ("", "")
     if allow_tuck:
-        line, note_text, pending_row_id = _build_tuck_in_line(cfg, silent_min)
+        line, note_text = _build_tuck_in_line(cfg, silent_min)
     try:
         committed = wake_state.conditional_mutate(
             cfg, token0, _stamp_free_round())
@@ -535,8 +512,7 @@ def silence_action(cfg: dict, silent_min: float, *, allow_tuck: bool = True) -> 
     if not committed:
         return None  # awake cleared under us -> no injection
     if allow_tuck:
-        wake_state.deliver_then_advance(
-            cfg, lambda: _deliver_free_round(cfg, line, note_text), pending_row_id)
+        _deliver_free_round(cfg, line, note_text)
         _deliver_ct_notes(cfg, line)  # F9: claim ct notes now the round surfaces
     return "free-round appended"
 

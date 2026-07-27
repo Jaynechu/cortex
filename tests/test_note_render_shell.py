@@ -1,24 +1,20 @@
-"""note_render --shell <non-cli>: per-shell replay cursor + out-of-band cutoff.
+"""note_render --shell/--replay: private per-shell replay marker.
 
-The cli render is the regression baseline — it must stay byte-identical (cursor
-from wake_state, stdout only). A non-cli shell diffs from its own ledger and
-reports the rendered cutoff on stderr; it writes nothing anywhere.
+The tg shell is a headless consumer — no UserPromptSubmit hook, so the note is
+its only replay outlet and this render consumes its marker. Every window render
+(no --replay) carries no Replay section and touches no marker.
 """
 from __future__ import annotations
 
-import json
+import fcntl
+import os
 
 import pytest
 
-from cortex import config, db, note, note_render, wake_state
-from tests.test_note import _row_id, make_events_table
+from cortex import config, db, note, note_render
+from tests.test_note import make_events_table
 
 SHELL = "tg"
-
-
-def _snapshot(*paths):
-    """bytes-or-None per path, so 'no write' covers 'file never created' too."""
-    return [p.read_bytes() if p.exists() else None for p in paths]
 
 
 @pytest.fixture
@@ -30,8 +26,6 @@ def env(tmp_path, monkeypatch):
     cfg["paths"]["marrow_db"] = str(tmp_path / "marrow.db")
     cfg["paths"]["cortex_home"] = str(tmp_path / "home")
     cfg["paths"]["wake_state_file"] = str(tmp_path / "wake_state.json")
-    cfg["paths"]["shell_state_dir"] = str(tmp_path / "shells")
-    (tmp_path / "shells").mkdir()
     monkeypatch.setattr(config, "load", lambda *a, **kw: cfg)
     monkeypatch.setattr(note, "_frontmost_app", lambda: None)
 
@@ -43,14 +37,8 @@ def env(tmp_path, monkeypatch):
             " VALUES (?,?,?,?,?)",
             ("s", f"2026-07-08T03:0{i}:00+00:00", "user", content, "wx"))
     conn.commit()
-    ids = {c: _row_id(conn, c) for c in ("first", "second", "third")}
     conn.close()
-    return {
-        "cfg": cfg,
-        "ids": ids,
-        "ledger": tmp_path / "shells" / f"{SHELL}.json",
-        "wake_state": tmp_path / "wake_state.json",
-    }
+    return cfg
 
 
 def _run(monkeypatch, *argv):
@@ -58,90 +46,92 @@ def _run(monkeypatch, *argv):
     note_render.main()
 
 
-def test_shell_render_uses_ledger_cursor_and_reports_cutoff(env, monkeypatch, capsys):
-    """--shell tg diffs from the tg ledger's last_note_row_id, prints only the
-    newer rows on stdout, and reports the rendered cutoff on stderr — writing
-    neither the ledger nor wake_state."""
-    env["ledger"].write_text(json.dumps({"last_note_row_id": env["ids"]["first"]}))
-    before = _snapshot(env["ledger"], env["wake_state"])
-
-    _run(monkeypatch, "--shell", SHELL)
-    out, err = capsys.readouterr()
-
-    assert "first" not in out
-    assert "second" in out and "third" in out
-    assert err.strip() == f"cutoff_row_id={env['ids']['third']}"
-    assert _snapshot(env["ledger"], env["wake_state"]) == before
+def _marker(cfg, shell):
+    p = note._marker_path(cfg, shell)
+    return int(p.read_text()) if p.exists() else None
 
 
-def test_shell_render_no_eligible_rows_emits_no_cutoff(env, monkeypatch, capsys):
-    """Cursor already at the newest row: nothing to replay -> no cutoff line at
-    all (the feeder must promote nothing), and still no writes."""
-    env["ledger"].write_text(json.dumps({"last_note_row_id": env["ids"]["third"]}))
-    before = _snapshot(env["ledger"], env["wake_state"])
-
-    _run(monkeypatch, "--shell", SHELL)
-    out, err = capsys.readouterr()
-
-    assert "cutoff_row_id" not in err
-    assert "third" not in out
-    assert _snapshot(env["ledger"], env["wake_state"]) == before
-
-
-def test_shell_render_missing_ledger_is_full_window(env, monkeypatch, capsys):
-    """No ledger file yet (first tg render): full window, same as a cli first
-    read — and the render still creates nothing."""
-    assert not env["ledger"].exists()
-    before = _snapshot(env["ledger"], env["wake_state"])
-
-    _run(monkeypatch, "--shell", SHELL)
-    out, err = capsys.readouterr()
-
+def test_first_shell_render_seeds_and_shows_the_window(env, monkeypatch, capsys):
+    """No marker yet: the latest window renders and the marker records it."""
+    _run(monkeypatch, "--shell", SHELL, "--replay")
+    out = capsys.readouterr().out
     assert "first" in out and "second" in out and "third" in out
-    assert err.strip() == f"cutoff_row_id={env['ids']['third']}"
-    assert _snapshot(env["ledger"], env["wake_state"]) == before
+    assert _marker(env, SHELL) == 3
 
 
-def test_shell_render_ignores_wake_state_cursor(env, monkeypatch, capsys):
-    """wake_state belongs to the cli shell: a tg render must not consume it, so a
-    caught-up cli cursor never hides rows from tg."""
-    wake_state.set_last_note_row_id(env["cfg"], env["ids"]["third"])
-    env["ledger"].write_text(json.dumps({"last_note_row_id": env["ids"]["second"]}))
-
-    _run(monkeypatch, "--shell", SHELL)
-    out, err = capsys.readouterr()
-
-    assert "third" in out and "second" not in out
-    assert err.strip() == f"cutoff_row_id={env['ids']['third']}"
+def test_second_render_with_no_new_rows_shows_nothing(env, monkeypatch, capsys):
+    _run(monkeypatch, "--shell", SHELL, "--replay")
+    capsys.readouterr()
+    _run(monkeypatch, "--shell", SHELL, "--replay")
+    out = capsys.readouterr().out
+    assert "### Replay" not in out
+    assert _marker(env, SHELL) == 3
 
 
-def test_unqualified_render_unchanged(env, monkeypatch, capsys):
-    """Baseline: no --shell -> cursor from wake_state, ledger ignored, still no
-    writes. The cutoff IS reported (the marrow wake hook advances wake_state
-    with it after injecting), the render itself just never writes one."""
-    wake_state.set_last_note_row_id(env["cfg"], env["ids"]["second"])
-    env["ledger"].write_text(json.dumps({"last_note_row_id": env["ids"]["first"]}))
-    before = _snapshot(env["ledger"], env["wake_state"])
+def test_only_rows_newer_than_the_marker_render(env, monkeypatch, capsys):
+    _run(monkeypatch, "--shell", SHELL, "--replay")
+    capsys.readouterr()
+    conn = db.connect(env)
+    conn.execute(
+        "INSERT INTO events (session_id, timestamp, role, content, channel)"
+        " VALUES ('s','2026-07-08T03:09:00+00:00','user','fourth','wx')")
+    conn.commit()
+    conn.close()
+    _run(monkeypatch, "--shell", SHELL, "--replay")
+    out = capsys.readouterr().out
+    assert "fourth" in out
+    assert "third" not in out and "first" not in out
 
-    _run(monkeypatch)
-    out, err = capsys.readouterr()
 
+def test_shell_render_advances_only_its_own_marker(env, monkeypatch, capsys):
+    """The tg render must not consume the cli shell's window, or vice versa."""
+    _run(monkeypatch, "--shell", SHELL, "--replay")
+    capsys.readouterr()
+    assert _marker(env, SHELL) == 3
+    assert _marker(env, note.CLI_SHELL) is None
+
+    _run(monkeypatch, "--shell", note.CLI_SHELL, "--replay")
+    out = capsys.readouterr().out
+    assert "third" in out          # cli has its own, untouched position
+    assert _marker(env, note.CLI_SHELL) == 3
+
+
+def test_shell_render_drops_its_own_channel(env, monkeypatch, capsys):
+    conn = db.connect(env)
+    conn.execute(
+        "INSERT INTO events (session_id, timestamp, role, content, channel)"
+        " VALUES ('s','2026-07-08T03:09:00+00:00','assistant','tg self talk','tg')")
+    conn.commit()
+    conn.close()
+    _run(monkeypatch, "--shell", SHELL, "--replay")
+    out = capsys.readouterr().out
+    assert "tg self talk" not in out
     assert "third" in out
-    assert "second" not in out and "first" not in out
-    assert err.strip() == f"cutoff_row_id={env['ids']['third']}"
-    assert _snapshot(env["ledger"], env["wake_state"]) == before
 
 
-def test_cli_shell_render_reports_cutoff_without_writing(env, monkeypatch, capsys):
-    """--shell cli is the unqualified path: wake_state cursor, cutoff on stderr,
-    no cursor write of its own."""
-    wake_state.set_last_note_row_id(env["cfg"], env["ids"]["second"])
-    env["ledger"].write_text(json.dumps({"last_note_row_id": env["ids"]["first"]}))
-    before = _snapshot(env["ledger"], env["wake_state"])
+def test_window_render_carries_no_replay_and_no_marker(env, monkeypatch, capsys):
+    """No --replay (the marrow render_module window path): no Replay section and
+    no marker write, so a window render can never poison a headless consumer."""
+    _run(monkeypatch)
+    out = capsys.readouterr().out
+    assert "### Replay" not in out
+    assert "third" not in out
+    assert _marker(env, note.CLI_SHELL) is None
 
-    _run(monkeypatch, "--shell", note.CLI_SHELL)
-    out, err = capsys.readouterr()
 
-    assert "third" in out and "second" not in out
-    assert err.strip() == f"cutoff_row_id={env['ids']['third']}"
-    assert _snapshot(env["ledger"], env["wake_state"]) == before
+def test_busy_marker_lock_skips_the_round_without_writing(env, monkeypatch, capsys):
+    p = note._marker_path(env, SHELL)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(p) + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    try:
+        _run(monkeypatch, "--shell", SHELL, "--replay")
+        out = capsys.readouterr().out
+        assert "### Replay" not in out
+        assert _marker(env, SHELL) is None
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+    # released -> the same window is still there to show
+    _run(monkeypatch, "--shell", SHELL, "--replay")
+    assert "third" in capsys.readouterr().out

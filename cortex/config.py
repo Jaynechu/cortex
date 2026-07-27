@@ -166,13 +166,10 @@ _DEFAULTS: dict[str, Any] = {
         # Machine-origin tag prepended as the VERY FIRST line of every wakeup
         # note (before title), so the model treats the ☀️ bell/wake-prompt turn
         # that carried this note as an automated scheduler signal, NOT a message
-        # the user personally typed (live-observed: cortex replied to the bell as
-        # if the user spoke it, Fix 5). Note-copy only -- does NOT change the bell
+        # the user personally typed. Note-copy only -- does NOT change the bell
         # text or receipt matching. "" omits it.
         "wake_machine_tag":
-            "[AUTOMATED WAKE SIGNAL — this note and the ☀️ line that delivered it "
-            "come from the scheduler, not from the user. The user has NOT spoken; "
-            "do not reply as if answering them.]",
+            "[AUTOMATED WAKE SIGNAL — Note delivered by the scheduler]",
         # Optional first line of the wakeup note (e.g. a nickname for the
         # note), followed by a blank line then the usual content. "" omits it.
         "title": "",
