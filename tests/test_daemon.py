@@ -269,7 +269,8 @@ def test_reconcile_breaker_holds_everything(cfg, clock, monkeypatch):
 
 
 def test_shell_off_skips(cfg, clock):
-    cfg["core"]["shells"] = ["tg"]
+    marrow_dir = Path(cfg["paths"]["marrow_db"]).parent
+    (marrow_dir / "config.toml").write_text('[cortex]\nshells = ["tg"]\n')
     d = _daemon(cfg, clock)
     assert "shell off" in d.reconcile_once()
     assert "shell off" in d.business_once()

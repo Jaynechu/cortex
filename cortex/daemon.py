@@ -196,7 +196,7 @@ class WakeDaemon:
         (the floor/trigger decision engine is retired)."""
         cfg = self.cfg
         if not config.shell_enabled(cfg, self.shell):
-            return f"{self.shell} shell off ([core].shells): reconcile skipped"
+            return f"{self.shell} shell off (marrow [cortex].shells): reconcile skipped"
         conn = db.connect(cfg)
         try:
             st = wake_state.load(cfg)
@@ -215,7 +215,7 @@ class WakeDaemon:
     def business_once(self) -> str:
         cfg = self.cfg
         if not config.shell_enabled(cfg, self.shell):
-            return f"{self.shell} shell off ([core].shells): business skipped"
+            return f"{self.shell} shell off (marrow [cortex].shells): business skipped"
         if breaker.holds(cfg, self.shell):
             # Held BEFORE _fire_wake consumes the alarm, so next_wake_at stands
             # and fires on the first pass after the breaker clears.
@@ -306,7 +306,7 @@ def main(argv: list[str] | None = None) -> int:
         print("daemon disabled ([daemon].enabled)", flush=True)
         return 0
     if not config.shell_enabled(cfg, shell):
-        print(f"{shell} shell off ([core].shells): daemon not started", flush=True)
+        print(f"{shell} shell off (marrow [cortex].shells): daemon not started", flush=True)
         return 0
     with singleton(cfg) as owned:
         if not owned:

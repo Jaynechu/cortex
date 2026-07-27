@@ -99,30 +99,46 @@ def test_user_name_defaults_when_marrow_config_absent(tmp_path):
     assert config.user_name(cfg) == "the user"
 
 
-# ── T8: per-shell switch ([core].shells) ──────────────────────────────────────
+# ── T6: shells single source (marrow [cortex].shells) ─────────────────────────
 
-def test_shells_defaults_to_cli(tmp_path):
+def _cfg_with_marrow_dir(tmp_path):
     cfg = config.load(tmp_path / "cortex.toml")
-    assert cfg["core"]["shells"] == ["cli"]
+    cfg["paths"]["marrow_db"] = str(tmp_path / "marrow.db")
+    return cfg
+
+
+def test_shells_defaults_to_cli_when_marrow_config_absent(tmp_path):
+    cfg = _cfg_with_marrow_dir(tmp_path)
     assert config.shell_enabled(cfg) is True
     assert config.shell_enabled(cfg, "tg") is False
 
 
-def test_shells_override_switches_cli_off(tmp_path):
-    toml_path = tmp_path / "cortex.toml"
-    toml_path.write_text('[core]\nshells = ["tg"]\n')
-    cfg = config.load(toml_path)
+def test_shells_reads_from_marrow_config(tmp_path):
+    (tmp_path / "config.toml").write_text('[cortex]\nshells = ["tg"]\n')
+    cfg = _cfg_with_marrow_dir(tmp_path)
     assert config.shell_enabled(cfg) is False
     assert config.shell_enabled(cfg, "TG") is True
 
 
+def test_leftover_core_shells_key_warns_not_fatal(tmp_path, caplog):
+    """cortex.toml [core].shells is no longer read; presence just warns once."""
+    toml_path = tmp_path / "cortex.toml"
+    toml_path.write_text('[core]\nshells = ["tg"]\n')
+    with caplog.at_level("WARNING"):
+        cfg = config.load(toml_path)
+    assert any("[core].shells" in r.message for r in caplog.records)
+    cfg["paths"]["marrow_db"] = str(tmp_path / "marrow.db")
+    # behaviour driven by marrow config only — the leftover key has no effect
+    assert config.shell_enabled(cfg) is True
+
+
 def test_wake_daemon_noops_when_cli_shell_off(tmp_path, monkeypatch, capsys):
     """Heartbeat entry exits before touching the DB or the lock when cli is not
-    a shell."""
+    a shell in marrow's [cortex].shells."""
     from cortex import daemon
 
-    cfg = config.load(tmp_path / "cortex.toml")
-    cfg["core"]["shells"] = []
+    (tmp_path / "config.toml").write_text('[cortex]\nshells = []\n')
+    cfg = _cfg_with_marrow_dir(tmp_path)
     monkeypatch.setattr(daemon.config, "load", lambda: cfg)
 
     def _boom(*a, **kw):
@@ -134,11 +150,12 @@ def test_wake_daemon_noops_when_cli_shell_off(tmp_path, monkeypatch, capsys):
 
 
 def test_watchdog_noops_when_cli_shell_off(tmp_path, monkeypatch):
-    """Watchdog entry never writes its pidfile with the cli shell off."""
+    """Watchdog entry never writes its pidfile with the cli shell off in
+    marrow's [cortex].shells."""
     from cortex import watchdog
 
-    cfg = config.load(tmp_path / "cortex.toml")
-    cfg["core"]["shells"] = []
+    (tmp_path / "config.toml").write_text('[cortex]\nshells = []\n')
+    cfg = _cfg_with_marrow_dir(tmp_path)
     monkeypatch.setattr(watchdog.config, "load", lambda: cfg)
 
     def _boom(*a, **kw):

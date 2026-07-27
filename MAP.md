@@ -83,7 +83,7 @@ wake daemon (launchd KeepAlive, always on) ──reconcile (60s cadence)──�
 - Guards watchdog poll vs tick awake-branch racing silence_action same window (lie_down.py:98-106).
 - lock_path (wake_state.py:40-47): sibling `.lock` of wake_state_file. COUPLED with marrow's `_wake_state_lock` (marrow/MAP.md §6.3) — each resolves from own config; overriding one without the other silently splits the lock.
 ### watchdog (`watchdog.py`)
-- Per-wake detached subprocess spawned at set_awake; pidfile self-guarded (unlinks only own pid, watchdog.py:29-40,169-181). Not started when `[core].shells` omits "cli" (watchdog.py:514).
+- Per-wake detached subprocess spawned at set_awake; pidfile self-guarded (unlinks only own pid, watchdog.py:29-40,169-181). Not started when marrow's `[cortex].shells` omits "cli" (watchdog.py:588-589, config.shell_enabled).
 - Poll 60s: retires when awake cleared externally; publishes occupancy via store_window_tokens each poll.
 - Fuse: window_tokens>=fuse_tokens (180k; marrow's 160k soft nudge fires first) → _fuse then exit; else silence_action (watchdog.py:458-511).
 - Silence loop (silence_action, watchdog.py:394-485, shared by watchdog.run + _handle_awake + daemon business): every silent_max_min (20) of user silence → inject one free-round block → re-arm the SAME timer from that instant → repeat forever. The session stays up until it calls lie_down itself.
@@ -133,13 +133,13 @@ wake daemon (launchd KeepAlive, always on) ──reconcile (60s cadence)──�
 - Per-module test files under tests/; pure cores (reconcile, daemon, note, geofence cursor) well covered. Gaps: install.py (untested), geofence same-minute-same-text dup.
 ## 11. Status
 - Live: collectors (knowledgec) · wake daemon (reconcile, dry_run=false) · wake window + watchdog + fuse · circuit breaker (§3.1) · note · daybrief render (real file in NY) · MCP lie_down/say · wishlist symlink · shells cli+tg.
-- Layering of the switches: `[cortex.breaker]` (marrow config) = the OPERATIONAL switch, driven by ct-pause / ct-wake / auto trip. `[core].shells` here, `[cortex].shells` in marrow and `shell_enabled` in the tg bridge are DEVELOPER-LAYER wiring only ("is this shell installed at all") — not the way to pause or disable cortex.
+- Layering of the switches: `[cortex.breaker]` (marrow config) = the OPERATIONAL switch, driven by ct-pause / ct-wake / auto trip. `[cortex].shells` in marrow config (T6: single source — cortex's `shell_enabled()` reads it directly, no cortex.toml copy) and the tg bridge's own membership check (T7) are DEVELOPER-LAYER wiring only ("is this shell installed at all") — not the way to pause or disable cortex.
 - Unwired: health/geofence collectors (flagged off, no producer).
 ## 12. Marrow-side organs
 > Marrow's half of the bridge — ONE module marrow/cortex_bridge.py, behind [cortex].enabled. Details marrow/MAP.md §6; index only.
 - MCP tools via cortex_bridge.register(): wish (append → wishlist.md) · first (tick/untick → ct_first_tick) · goal (set/list/delete → goals table) — all sessions when enabled.
 - lie_down (every shell in marrow [cortex].shells) · say (cli shell only) — shells `-m cortex.<mod>`.
-- Shell id rides `MARROW_CORTEX` (cli/tg; legacy "1" = cli); a channel absent from [cortex].shells runs plain (no cortex tools, no heartbeat). Mirror in this repo: `[core].shells`.
+- Shell id rides `MARROW_CORTEX` (cli/tg; legacy "1" = cli); a channel absent from [cortex].shells runs plain (no cortex tools, no heartbeat). Single source (T6): cortex's `config.shell_enabled()` reads this same marrow key directly, no cortex.toml copy.
 - Hook organs (bodies in cortex_bridge, gated call sites in marrow hooks.py): SessionStart handoff page-turn, line-count (fresh cortex window only) · lie_down deny (rotate/fuse-line blocked until handoff written) · lie_down nudge (non-blocking additionalContext, rotate arg picks its copy) · FUSE/CTL covert bodies.
 - Non-cli shell host = the synapse tg bridge (synapse/MAP.md): owns the scheduler loop, feed turns, token ledger → `<shell_state_dir>/tg.json`, directed kick.
 - turn_inject 100k 亮牌 ([cortex_rotate].show_tokens) · kickout immunity (is_cortex_session(), env-only, not behind enabled).

@@ -6,10 +6,13 @@ on a missing config file.
 from __future__ import annotations
 
 import copy
+import logging
 import os
 import tomllib
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_CONFIG_PATH = Path.home() / ".config" / "marrow" / "cortex.toml"
 DEFAULT_MARROW_DB = Path.home() / ".config" / "marrow" / "marrow.db"
@@ -30,9 +33,7 @@ DEFAULT_WAKE_TIMING_LOG = Path.home() / ".config" / "marrow" / "logs" / "wake_ti
 DEFAULT_MACHINE_LINE_MARKERS = ["[NEW ROUND]", "[FUSE]", "[CTL]", "[CMD"]
 
 _DEFAULTS: dict[str, Any] = {
-    # shells = the shell ids running as cortex shells (mirror of marrow
-    # [cortex].shells). "cli" absent = this repo's heartbeat stays down.
-    "core": {"timezone": "Australia/Melbourne", "shells": ["cli"]},
+    "core": {"timezone": "Australia/Melbourne"},
     "paths": {
         "marrow_db": "",
         "knowledgec_db": "",
@@ -230,11 +231,21 @@ _SECTIONS = (
 
 
 def shell_enabled(cfg: dict, shell: str = "cli") -> bool:
-    """Is `shell` listed in [core].shells? The cli heartbeat entries exit early
-    when its own shell is switched off."""
-    raw = cfg.get("core", {}).get("shells")
-    if not isinstance(raw, list):
-        raw = ["cli"]
+    """Is `shell` listed in marrow's [cortex].shells (T6: single source, no
+    cortex.toml copy)? Missing/unreadable marrow config or missing key falls
+    back to ["cli"] — the cli heartbeat entries exit early when their own
+    shell is switched off there."""
+    raw = ["cli"]
+    p = marrow_config_dir(cfg) / "config.toml"
+    try:
+        if p.is_file():
+            with p.open("rb") as f:
+                data = tomllib.load(f)
+            shells = (data.get("cortex") or {}).get("shells")
+            if isinstance(shells, list):
+                raw = shells
+    except (OSError, ValueError, TypeError) as e:
+        logger.warning("shell_enabled: marrow config read failed (%s) — using default ['cli']", e)
     return shell.strip().lower() in [str(s).strip().lower() for s in raw]
 
 
@@ -283,6 +294,13 @@ def load(path: Path | None = None) -> dict[str, Any]:
     # [bulletin] section (renamed to [note]) — merge it in if present.
     if "bulletin" in loaded:
         cfg["note"] = _merge(cfg["note"], loaded["bulletin"])
+
+    # T6: [core].shells moved to marrow's [cortex].shells (single source) —
+    # a leftover key here is ignored, never fatal, just noted once.
+    if "shells" in loaded.get("core", {}):
+        logger.warning(
+            "cortex.toml [core].shells is ignored — shells are now driven by "
+            "marrow's [cortex].shells only")
 
     categories = dict(_DEFAULTS["knowledgec.categories"])
     loaded_categories = loaded.get("knowledgec", {}).get("categories", {})

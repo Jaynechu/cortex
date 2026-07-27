@@ -16,7 +16,7 @@ Assumes [marrow](../marrow) + synapse already installed and a Claude Code max pl
    cp config.example.toml ~/.config/marrow/cortex.toml
    ```
    Override the path with the `CORTEX_CONFIG` env var if needed.
-3. Enable the marrow-side bridge: set `[cortex] enabled = true` in marrow's config.toml and list the shells that run as cortex shells in `[cortex] shells` (default `["cli"]`; mirror it in this repo's `[core] shells`), then restart the marrow watcher. This installs the MCP tools (`lie_down` for every shell, `say` for the cli shell; `wish` / `first` / `goal` everywhere) and the wake hooks.
+3. Enable the marrow-side bridge: set `[cortex] enabled = true` in marrow's config.toml and list the shells that run as cortex shells in `[cortex] shells` (default `["cli"]`) — this repo reads that same key directly, no cortex.toml copy needed — then restart the marrow watcher. This installs the MCP tools (`lie_down` for every shell, `say` for the cli shell; `wish` / `first` / `goal` everywhere) and the wake hooks.
 4. Seed the cortex home dir `~/.config/marrow/cortex/` (configurable via `[paths] cortex_home`) — this is the resident session's cwd and inner world. Copy [templates/](templates/) there and customise names/paths:
    ```
    cp templates/*.md ~/.config/marrow/cortex/
