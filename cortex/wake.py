@@ -734,8 +734,6 @@ def run_wake(
         timer.mark("tick_fire", at=tick_started)
     if gate_done is not None:
         timer.mark("gate_eval", at=gate_done)
-    os.environ["CORTEX_WAKE_ID"] = wake_id
-    os.environ["CORTEX_WAKE_TIMING_LOG"] = str(timing_path)
 
     symlinks.ensure_all(cfg)
     timer.mark("symlinks")

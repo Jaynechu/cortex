@@ -146,13 +146,6 @@ fuse_handoff_grace_sec = 300
 # ⚙️ [FUSE] marker; the marrow hook injects the body covertly. The old cortex-side
 # fuse_handoff_prompt override is retired.
 
-# Context-window rotation: lie_down (and the tick fallback) flag a rotate when the
-# window grows past this, so the NEXT wake respawns a fresh window (SIGTERM claude
-# + fresh spawn — no /clear typing). Cooldown guards the tick fallback from repeats.
-[wake.rotate]
-threshold_tokens = 100000
-cooldown_sec = 600
-
 # Stale-wake guard: tick sees the awake marker but the transcript has been idle
 # this long -> presume the watchdog died, proxy lie_down (force_slept=stale).
 [wake.stale]

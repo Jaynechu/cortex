@@ -56,7 +56,7 @@ wake daemon (launchd KeepAlive, always on) ──reconcile (60s cadence)──�
 - Cortex exposes NO MCP tool to set or clear the breaker: human + auto-trip only.
 ## 4. Wake runner (`wake.py`)
 - run_wake: symlinks.ensure_all → assemble_note → window path (the only path). Freshness from rotate flag, no date compare; next-morning first wake = rebirth.
-- WakeTimer latency probe always-on: wake_id + CORTEX_WAKE_ID/CORTEX_WAKE_TIMING_LOG env; marks tick_fire→gate_eval→symlinks→note→injected/failed/complete (timing.py).
+- WakeTimer latency probe always-on: wake_id + timing_path passed as constructor args (no env vars); marks tick_fire→gate_eval→symlinks→note→injected/failed/complete (timing.py).
 - _window_wake_plan classifier: fresh (rotate flag | newest transcript ≠ recorded = deliberate /clear) | resume (sid dead/gone, no flag) | ear (alive+unrotated; None recorded hint stays ear). Consumes rotate flag once/wake.
 - _window_wake path: fresh → _spawn_wake(resume=False) emoji; dead+no-flag → _resume_or_fresh_dead (sid → --resume same convo; absent → fresh, plain).
 - Alive → type bell (type_wake_signal) → _signal_landed polls mtime 3s up to ear_timeout 90s.
