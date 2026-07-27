@@ -6,7 +6,7 @@ awake marker. Rotate is an explicit session decision, no auto token judgement.
 
 The interactive window returns control the moment a note is injected, so the
 wake is NOT over when the wake runner returns — this command (or a proxy) is
-what actually ends a wake. force_slept marks a proxy lie-down (timeout/fuse/stale).
+what actually ends a wake. force_slept marks a proxy lie-down (ct-pause/stale/fuse).
 """
 from __future__ import annotations
 
@@ -111,10 +111,10 @@ def lie_down(cfg: dict, force_slept: str | None = None, rotate: bool = False,
              human_override: bool = False) -> dict:
     """End the current wake. `next_wake_min` picks the next internal wake: an
     explicit minutes-from-now, clamped to [0, next_wake_max] regardless of hour
-    (0 = immediate re-wake) — or None = a uniform "dice" draw within the floor
-    window (proxy paths: watchdog auto, stale reap, fuse — session-facing dice
-    retired, N required at the MCP/CLI layer). `rotate` respawns a fresh window
-    next wake. `human_override` (explicit ctl minutes) passes next_wake_min
+    (0 = immediate re-wake) — or None = the fixed [triggers].floor_min interval
+    (proxy paths: ct-pause, stale, fuse — session-facing dice retired, N
+    required at the MCP/CLI layer). `rotate` respawns a fresh window next
+    wake. `human_override` (explicit ctl minutes) passes next_wake_min
     unclamped."""
     if next_wake_min is not None:
         next_wake_min = clamp_next_wake_minutes(

@@ -64,7 +64,7 @@ def test_epoch_initialised_on_first_touch(cfg):
 def test_claim_lie_down_bumps_gen_and_returns_token(cfg):
     _seed_awake(cfg)
     g0, _ = wake_state.current_epoch(cfg)
-    snap = wake_state.claim_lie_down(cfg, force_slept="auto")
+    snap = wake_state.claim_lie_down(cfg, force_slept="stale")
     assert snap is not None
     tok = snap["claim_token"]
     g1, _ = wake_state.current_epoch(cfg)
@@ -127,7 +127,7 @@ def test_bug_a_user_reset_right_after_claim_suppresses_all(cfg, monkeypatch):
                         lambda cfg_: killed_wd.append(True))
 
     def run_lie_down():
-        lie_down.lie_down(cfg, force_slept="auto", rotate=True, next_wake_min=20)
+        lie_down.lie_down(cfg, force_slept="stale", rotate=True, next_wake_min=20)
 
     t = threading.Thread(target=run_lie_down)
     t.start()
@@ -187,7 +187,7 @@ def test_bug_b_tuck_in_suppressed_after_claim(cfg, monkeypatch, typed):
     t.start()
     assert reached.wait(2.0)
     # The session lies down (claim bumps gen) while silence_action is mid-build.
-    snap = wake_state.claim_lie_down(cfg, force_slept="auto")
+    snap = wake_state.claim_lie_down(cfg, force_slept="stale")
     assert snap is not None
     released.set()
     t.join(3.0)

@@ -583,8 +583,8 @@ def test_lie_down_double_fire_single_effect(awake_window, monkeypatch):
         lambda conn, cfg, minutes=None: redraws.append(1) or real_floor(conn, cfg, minutes=minutes))
 
     wid = wake_state.load(cfg)["wake_log_id"]
-    r1 = lie_down_mod.lie_down(cfg, force_slept="auto")
-    r2 = lie_down_mod.lie_down(cfg, force_slept="auto")
+    r1 = lie_down_mod.lie_down(cfg, force_slept="stale")
+    r2 = lie_down_mod.lie_down(cfg, force_slept="stale")
 
     # One winner (has next_wake / tokens), one no-op (skipped).
     winners = [r for r in (r1, r2) if "skipped" not in r]
@@ -600,6 +600,6 @@ def test_lie_down_double_fire_single_effect(awake_window, monkeypatch):
             "SELECT force_slept FROM ct_wake_log WHERE id=?", (wid,)).fetchone()
     finally:
         conn.close()
-    assert row["force_slept"] == "auto"
+    assert row["force_slept"] == "stale"
 
 

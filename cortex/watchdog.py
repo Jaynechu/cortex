@@ -575,7 +575,7 @@ def run(cfg: dict) -> int:
             _fuse(cfg, grace)
             return 0
         # Idle gate (free-round cycle), same bar regardless of user presence.
-        # A proxy sleep here is force_slept="auto" (routine, not an incident).
+        # silence_action only injects a free-round note here — no proxy sleep.
         action = silence_action(cfg, silent_min)
         if action:
             _log(f"silence_action: {action} (silent={silent_min:.0f}min)")

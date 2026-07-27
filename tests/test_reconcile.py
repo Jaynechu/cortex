@@ -45,7 +45,7 @@ def test_ledger_write_and_clear(cfg):
 
 def test_lie_down_persists_ledger(cfg):
     wake_state.set_awake(cfg, 1, None)  # a wake in progress
-    lie_down.lie_down(cfg, force_slept="auto", next_wake_min=30)
+    lie_down.lie_down(cfg, force_slept="stale", next_wake_min=30)
     assert wake_state.get_next_wake_at(cfg) is not None  # ledger written by lie_down
 
 
