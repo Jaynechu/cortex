@@ -431,29 +431,45 @@ def test_last_wake_none_when_only_current(marrow_conn):
     assert note._last_wake(marrow_conn, NOW) is None
 
 
-def test_last_active_newest_cortex_row(marrow_conn, cfg):
-    """Newest ct_activity row for the cortex channel gives the minutes; rows on
-    other channels are ignored even when they are more recent."""
-    ct = (NOW - timedelta(minutes=7)).astimezone(ZoneInfo("UTC")).isoformat()
-    cli = (NOW - timedelta(minutes=1)).astimezone(ZoneInfo("UTC")).isoformat()
+def test_last_active_newest_row_for_this_shell(marrow_conn, cfg):
+    """Newest ct_activity row for THIS shell's channel gives the minutes; other
+    shells' rows are ignored even when they are more recent. The dead 'ct'
+    channel (cortex as a standalone channel) is never consulted."""
+    ct = (NOW - timedelta(minutes=900)).astimezone(ZoneInfo("UTC")).isoformat()
+    tg = (NOW - timedelta(minutes=1)).astimezone(ZoneInfo("UTC")).isoformat()
+    cli = (NOW - timedelta(minutes=7)).astimezone(ZoneInfo("UTC")).isoformat()
     marrow_conn.executemany(
         "INSERT INTO ct_activity (ts, sid, channel) VALUES (?, ?, ?)",
-        [(ct, "s1", "ct"), (cli, "s2", "cli")],
+        [(ct, "s0", "ct"), (tg, "s1", "tg"), (cli, "s2", "cli")],
     )
     marrow_conn.commit()
-    la = note._last_active(marrow_conn, cfg, NOW)
+    la = note._last_active(marrow_conn, cfg, NOW, "cli")
     assert la["minutes_ago"] == 7
-    assert la["ts"] == ct
+    assert la["ts"] == cli
+    la_tg = note._last_active(marrow_conn, cfg, NOW, "tg")
+    assert la_tg["minutes_ago"] == 1
+    assert la_tg["ts"] == tg
 
 
-def test_last_active_none_without_cortex_row(marrow_conn, cfg):
-    """No cortex-channel row -> None (render falls back to the wake row)."""
+def test_last_active_defaults_to_cli_shell(marrow_conn, cfg):
+    """No shell argument -> the cli shell (the unqualified render)."""
+    cli = (NOW - timedelta(minutes=3)).astimezone(ZoneInfo("UTC")).isoformat()
+    marrow_conn.execute(
+        "INSERT INTO ct_activity (ts, sid, channel) VALUES (?, ?, ?)",
+        (cli, "s2", "cli"))
+    marrow_conn.commit()
+    assert note._last_active(marrow_conn, cfg, NOW)["minutes_ago"] == 3
+
+
+def test_last_active_none_without_row_for_this_shell(marrow_conn, cfg):
+    """No row on this shell's channel -> None (render falls back to the wake
+    row) — another shell's activity must never fill the gap."""
     cli = (NOW - timedelta(minutes=2)).astimezone(ZoneInfo("UTC")).isoformat()
     marrow_conn.execute(
         "INSERT INTO ct_activity (ts, sid, channel) VALUES (?, ?, ?)",
         (cli, "s2", "cli"))
     marrow_conn.commit()
-    assert note._last_active(marrow_conn, cfg, NOW) is None
+    assert note._last_active(marrow_conn, cfg, NOW, "tg") is None
 
 
 def test_render_last_active_falls_back_to_wake_minutes(cfg):

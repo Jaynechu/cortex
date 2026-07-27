@@ -288,22 +288,18 @@ def _last_wake(conn: sqlite3.Connection, now: datetime,
     return None
 
 
-def _cortex_channel(cfg: dict) -> str:
-    """Channel tag marrow's Stop hook stamps on cortex self-talk turns
-    (MARROW_CHANNEL=ct). Newest ct_activity row with this channel = the cortex
-    session's last reply."""
-    return str(_note_cfg(cfg).get("cortex_channel") or "ct")
-
-
-def _last_active(conn: sqlite3.Connection, cfg: dict, now: datetime) -> dict | None:
-    """Age of the cortex session's last reply, from the newest ct_activity row
-    (channel = cortex_channel). At inject time the current turn's Stop has not
-    fired, so the newest row is the previous reply — no epsilon skip needed.
-    None when the table is absent or has no cortex row."""
+def _last_active(conn: sqlite3.Connection, cfg: dict, now: datetime,
+                 shell: str | None = None) -> dict | None:
+    """Age of THIS shell's last reply, from the newest ct_activity row whose
+    channel is the shell id (cli / tg / wx). Cortex stopped being a standalone
+    channel when it moved inside the tg/cli shells, so the activity rows now
+    carry the host shell's channel. At inject time the current turn's Stop has
+    not fired, so the newest row is the previous reply — no epsilon skip needed.
+    None when the table is absent or has no row for this shell."""
     try:
         row = conn.execute(
             "SELECT MAX(ts) AS ts FROM ct_activity WHERE channel = ?",
-            (_cortex_channel(cfg),),
+            (shell or CLI_SHELL,),
         ).fetchone()
     except sqlite3.OperationalError:
         return None
@@ -419,12 +415,13 @@ def gather(
     un-injected payload surfaces again — never consumes, never settles.
 
     `shell` (default None = the unqualified/cli render): the shell this note is
-    rendered for. It scopes the wake ledger read (ct_wake_log.shell), so one
-    shell's page never shows another shell's rows."""
+    rendered for. It scopes the wake ledger read (ct_wake_log.shell) AND the
+    last-active read (ct_activity.channel), so one shell's page never shows
+    another shell's rows."""
     from cortex import wake_state
 
     last_wake = _safe(_last_wake, conn, now, shell)
-    last_active = _safe(_last_active, conn, cfg, now)
+    last_active = _safe(_last_active, conn, cfg, now, shell)
 
     ws = {}
     try:

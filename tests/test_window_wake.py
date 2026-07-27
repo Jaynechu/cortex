@@ -169,8 +169,8 @@ def test_window_wake_alive_types_bell(cfg, monkeypatch):
     assert "respawn" not in calls               # live window is not respawned
     assert calls["signal"] is True              # bell typed once
     assert calls["watchdog"] is True
-    # note file written with the note body
-    assert wake_state.wakeup_note_path(cfg).read_text() == "NOTE-BODY"
+    # note body written into this shell's (cli) section of the note file
+    assert wake_state.wakeup_note_path(cfg).read_text() == "## cli\nNOTE-BODY\n"
     d = wake_state.load(cfg)
     assert d["awake"] is True
     assert d["wake_log_id"] is not None and d["wake_log_id"] != old_wid

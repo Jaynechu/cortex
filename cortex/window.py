@@ -482,12 +482,16 @@ def _submit_prompt(sid: str, text: str) -> None:
     _enter(sid)
 
 
-def write_note(cfg: dict, text: str):
-    """Persist the wakeup note to its file and return the path. The marrow hook
-    reads it to inject the full note when it sees the bell line."""
+def write_note(cfg: dict, text: str, shell: str | None = None,
+               sid: str | None = None):
+    """Persist the wakeup note into THIS shell's section of the note file and
+    return the path. The marrow hook reads its own section to inject the full
+    note when it sees the bell line. Other shells' sections are left intact
+    (note_file.write_section: flock + read-modify-write)."""
+    from cortex import note, note_file
+
     note_path = wake_state.wakeup_note_path(cfg)
-    note_path.parent.mkdir(parents=True, exist_ok=True)
-    note_path.write_text(text)
+    note_file.write_section(note_path, shell or note.CLI_SHELL, text, sid)
     return note_path
 
 

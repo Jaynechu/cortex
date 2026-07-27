@@ -310,7 +310,7 @@ def _free_round_note(cfg: dict) -> str:
             # Best-effort: a mirror failure must not affect the tuck-in.
             try:
                 from cortex import window
-                window.write_note(cfg, text)
+                window.write_note(cfg, text, sid=sid)
             except Exception:
                 pass
         finally:
