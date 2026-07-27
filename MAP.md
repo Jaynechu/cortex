@@ -10,7 +10,7 @@ collectors (launchd 1800s) ──▶ ct_ tables (marrow.db)
                                     │
 wake daemon (launchd KeepAlive, always on) ──reconcile (60s cadence)──▶ decision ──▶ wake.run_wake
      Scheduler-hosted (synapse_core); 2 deadlines:       ct_pacemaker_state       │
-     <shell>.reconcile (fixed) / <shell> (business)      ct_wake_log        note → iTerm window (resident claude) | marrow subprocess fallback
+     <shell>.reconcile (fixed) / <shell> (business)      ct_wake_log        note → iTerm window (resident claude); failure → alert, round given up
      socket kick (lie_down/kick.py) fires early                                 │
                                                 daybrief.md (marrow render, real file in NY) · watchdog (per-wake)
 ```
@@ -52,18 +52,18 @@ wake daemon (launchd KeepAlive, always on) ──reconcile (60s cadence)──�
 - **ctl** (`ctl.py`): `pause [--shell cli|tg]` → breaker on (default scope all) + a tg receipt via outbox, NO alert row (a manual pause is not an incident); a live cli window is put down through the EXISTING proxy `lie_down(force_slept="ct-pause")` — the same path the watchdog fuse uses, no new interrupt mechanism. `wake` → clear the whole file, then the normal wake. `resume` → clear without waking. `status` → breaker + ledger state.
 - Cortex exposes NO MCP tool to set or clear the breaker: human + auto-trip only.
 ## 4. Wake runner (`wake.py`)
-- run_wake: symlinks.ensure_all → assemble_note → window path (mode='window' AND real caller) else marrow subprocess. Freshness from rotate flag, no date compare; next-morning first wake = rebirth.
-- WakeTimer latency probe always-on: wake_id + CORTEX_WAKE_ID/CORTEX_WAKE_TIMING_LOG env; marks tick_fire→gate_eval→symlinks→note→injected/complete; marrow subprocess shares origin via env (timing.py).
+- run_wake: symlinks.ensure_all → assemble_note → window path (the only path). Freshness from rotate flag, no date compare; next-morning first wake = rebirth.
+- WakeTimer latency probe always-on: wake_id + CORTEX_WAKE_ID/CORTEX_WAKE_TIMING_LOG env; marks tick_fire→gate_eval→symlinks→note→injected/failed/complete (timing.py).
 - _window_wake_plan classifier: fresh (rotate flag | newest transcript ≠ recorded = deliberate /clear) | resume (sid dead/gone, no flag) | ear (alive+unrotated; None recorded hint stays ear). Consumes rotate flag once/wake.
 - _window_wake path: fresh → _spawn_wake(resume=False) emoji; dead+no-flag → _resume_or_fresh_dead (sid → --resume same convo; absent → fresh, plain).
 - Alive → type bell (type_wake_signal) → _signal_landed polls mtime 3s up to ear_timeout 90s.
 - _ear_miss_ladder (alive): type_wake_signal rearm → poll → land=ear; claude dead → _resume_or_fresh_dead; rearmed-unconfirmed → set_awake anyway.
-- Respawn failure (WindowError) = SOLE alert point → _alert_respawn_failed → marrow alerts row (audit_log fallback).
+- Two alert points, both via `_alert` → marrow `alerts` row (audit_log fallback): respawn failure (WindowError, `cortex_respawn_failed`) and the window path giving up a round (`cortex_wake_window_failed`).
 - Two visible wake lines, two config keys: `[wake].spawn_opener_template` = the first prompt baked into a FRESH spawn (fresh_initial_prompt, also transcript.lineage_marker for finding resumable sessions); `[wake].wake_bell_template` = the line TYPED into a live resident (type_wake_signal, resume bell). Each path writes its OWN template into the wake_state receipt (write_wake_receipt(opener=…)); machine data (gen/state_id/rearm) stays in the receipt sidecar; the marrow hook matches the on-screen line against the receipt (shape fallback tries BOTH templates) → injects the full note. Both prefixes feed transcript._line_markers so neither counts as user speech.
 - _spawn_wake P0 timing: record NEW transcript only after _wait_new_transcript (~8s poll for jsonl newer than pre-spawn or mtime≥spawn_ts); timeout → record None never stale (stale drove endless respawn loop).
 - None hint + alive + no flag → ear.
-- Headless fallback: window path None → call_marrow_cortex (marrow venv, inner marrow.call_timeout_s 600s, outer +30s); bad rc/JSON tail → WakeError (wake.py:71-99,349-350).
-- Token-cap breach (result.capped) → _force_fresh_next (clear sid keep date) + audit + _render_daybrief. _audit_wake best-effort inserts audit_log, swallows all (wake.py:102-112). CLI: --force (bypass gates) | --print-note.
+- No headless path: window path None → _audit_wake + _alert → `{"mode": "failed"}`, round given up, cursor/alarm state untouched (wake.py:run_wake tail). Every caller (daemon._fire_wake / ctl.cmd_wake / reconcile._fire_dead_window) redraws the floor + next_wake_at on any non-window result, so an alarm consumed at fire time is re-armed, never lost.
+- _audit_wake best-effort inserts audit_log, swallows all. CLI: --force (bypass gates) | --print-note.
 ### window.py — iTerm control
 - Focus discipline: say() sole allowed focus-taker (window.py:476-483). Typing paths wrap _frontmost_bid/_guard_focus (restore only if iTerm stole front, 67-73).
 - _spawn internal save/restore (167-185). _relaunch (210-216) reachable only via inject_note's guarded frame, unreached in production.
@@ -111,8 +111,8 @@ wake daemon (launchd KeepAlive, always on) ──reconcile (60s cadence)──�
 - gather (note.py:311-340): every section behind _safe(), render pure, omit cleanly when absent (386-446).
 - Sections: header = 2 lines only, `Now HH:MM Day | Last active` [+ force_slept] and `Active (Mac)` · Pending self-schedule (note.pending_window_min 15).
 - Visible note = 3 lines: note.wake_machine_tag, `Now … | Last active …`, `Active (Mac)`. turn_end_text + title default "" (omitted). "Wake:" reason line retired.
-- Replay is HEADLESS-ONLY: `gather(replay=True)` / `note_render --replay`, taken by the tg shell and the windowless wake fallback. Window deliveries carry none — those sessions have UserPromptSubmit hooks, so marrow turn_inject is their outlet (marrow/MAP.md §replay).
-- Replay excludes the rendering shell's OWN channel: `note_render --shell <id>` picks note.shell_replay_exclude[id] (cli→ct, tg→tg); no --shell falls back to note.replay_exclude_channels.
+- No note ever carries Replay: marrow turn_inject is the single replay channel for every session, window and shell alike (marrow/MAP.md §replay). `gather(replay=True)` still implements the section but has no live caller (note_render --replay deleted with the headless path).
+- That engine excludes the rendering shell's OWN channel: `note.for_shell(id)` picks note.shell_replay_exclude[id] (cli→ct, tg→tg); unset falls back to note.replay_exclude_channels. `note_render --shell <id>` still selects it (the tg bridge passes it).
 - Replay = stateless latest-window query (note.replay_events 6, marker-stripped, 300ch) against a private marker per shell (`<cortex_home>/state/replay-<shell>.marker`) under its own non-blocking flock; busy lock = skip. Rendering consumes it — no back-fill, no staging, no feeder promotion.
 - No budget / Plan-Used / per-shell Today / Net-Session / Window-SID lines; `note.daily_budget` + `note.shell_labels` config gone. `occupancy.store_window_tokens` still writes window occupancy to ct_pacemaker_state; only reader is `occupancy.window_tokens_hint` (no consumer).
 - _last_wake skips rows <90s to avoid self-reporting current wake (note.py:106-127). Handoff injection at marrow SessionStart not note.py; cal/rem lines retired pending global inject (note.py:9-10).

@@ -2,7 +2,7 @@
 
 Awake-presence layer: collectors gather signals → the always-on wake daemon reconciles the alarm ledger and decides when to wake → a resident Claude Code session runs the wake.
 
-Assumes [marrow](../marrow) + synapse already installed and a Claude Code max plan. Window mode (default) additionally needs macOS + iTerm2.
+Assumes [marrow](../marrow) + synapse already installed and a Claude Code max plan. The resident-window delivery needs macOS + iTerm2.
 
 ## Setup
 
@@ -39,7 +39,7 @@ Ships with `pacemaker.dry_run = true` — reconcile logs a due wake and redraws 
 
 - Collectors (launchd, ~30 min) read macOS app-usage (plus optional geofence/health) into `ct_` tables on the shared marrow DB.
 - The wake daemon (launchd, always on) holds the alarm ledger: it reconciles state every minute and fires the due wake through the daily token budget gate.
-- A wake lands in a resident iTerm window running `claude` (fresh spawn, `--resume`, or a bell into the live window), with the wakeup note injected by marrow's hook. Headless marrow-subprocess call is the fallback.
+- A wake lands in a resident iTerm window running `claude` (fresh spawn, `--resume`, or a bell into the live window), with the wakeup note injected by marrow's hook. There is no windowless fallback: a failed window path raises a marrow alert and the round is given up for the next tick to retry.
 - The session ends its wake itself via `lie_down(next_wake_min=N)` (0 = wake again immediately). While it stays up, every `silent_max_min` of user silence injects one free-round note + `[NEW ROUND]` line and re-arms the same timer — a perpetual cycle, never a forced sleep. A per-wake watchdog covers that cycle and the token fuses; the always-on wake daemon fires the exact-time wakes.
 
 ## Docs
