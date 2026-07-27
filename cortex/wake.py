@@ -740,9 +740,6 @@ def run_wake(
     symlinks.ensure_all(cfg)
     timer.mark("symlinks")
 
-    note_text = assemble_note(conn, cfg, now, decision=decision)
-    timer.mark("note")
-
     # Interactive path (B3v): the resident iTerm window is the cortex body and
     # the only delivery channel.
     from cortex import wake_state
@@ -767,12 +764,15 @@ def run_wake(
     # for "ear" was exactly the reintroduced race window.
     with _spawn_serialized(cfg):
         plan, rotate_driven = _classify_wake(cfg)
-        window_text = note_text
-        if plan == "fresh":
-            window_text = assemble_note(
-                conn, cfg, now, decision=decision, fresh=True,
-                wake_kind="rotate")
-            timer.mark("rotate_note")
+        # Assembled here, after the plan is known, so the note is gathered
+        # EXACTLY ONCE: gathering before the classification meant a rotate
+        # gathered twice, and the second gather found the kick reasons already
+        # consumed by the first (they were rendered into a note nobody sees).
+        fresh = plan == "fresh"
+        window_text = assemble_note(conn, cfg, now, decision=decision,
+                                    fresh=fresh,
+                                    wake_kind="rotate" if fresh else None)
+        timer.mark("note")
         if plan == "ear":
             win = _window_wake(conn, cfg, window_text, now, respawn=False,
                                wake_reasons=wake_reasons)
@@ -817,8 +817,8 @@ def run_wake(
 
     # osascript / iTerm failed -> the round is over. No windowless fallback:
     # audit + alert and give up, leaving cursor/alarm state untouched so the
-    # daemon's next tick retries naturally. The caller re-arms the floor on any
-    # non-window result (its own alarm was already consumed at fire time).
+    # daemon's next tick retries naturally. The caller re-arms the next wake on
+    # any non-window result (its own alarm was already consumed at fire time).
     _audit_wake(conn, wake_id, "window path failed -> round given up")
     _alert(conn, wake_id, "cortex_wake_window_failed",
            "cortex wake window path failed; round given up")
