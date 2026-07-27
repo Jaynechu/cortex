@@ -574,7 +574,6 @@ def test_ctl_pause_resume(cfg, monkeypatch, capsys):
 def test_ctl_pause_single_shell(cfg, monkeypatch):
     from cortex import ctl
     monkeypatch.setattr(ctl.config, "load", lambda: cfg)
-    monkeypatch.setattr(ctl, "_receipt", lambda c, m: None)
     ctl.main(["pause", "--shell", "tg"])
     assert breaker.holds(cfg, "tg") is True
     assert breaker.holds(cfg, "cli") is False
@@ -586,13 +585,31 @@ def test_ctl_pause_puts_live_cli_window_down(cfg, monkeypatch):
     from cortex import ctl
     from cortex import lie_down as lie_down_mod
     seen = {}
-    monkeypatch.setattr(ctl, "_receipt", lambda c, m: None)
     monkeypatch.setattr(lie_down_mod, "lie_down",
                         lambda c, **kw: seen.update(kw) or {})
     wake_state.set_awake(cfg, 1, None)
     line = ctl.cmd_pause(cfg)
     assert seen.get("force_slept") == "ct-pause"
     assert "put down" in line
+
+
+def test_ctl_pause_is_silent_no_outbox_row(cfg):
+    """A manual pause must not write a tg receipt: no outbox row at all (only
+    an auto trip, via watchdog._fuse, announces on tg)."""
+    from cortex import ctl
+    conn = db.connect(cfg)
+    conn.execute("CREATE TABLE outbox (id INTEGER PRIMARY KEY, from_sid TEXT,"
+                 " from_channel TEXT, target TEXT, body TEXT,"
+                 " status TEXT NOT NULL DEFAULT 'pending')")
+    conn.commit()
+    conn.close()
+    ctl.cmd_pause(cfg)
+    conn = db.connect(cfg)
+    try:
+        count = conn.execute("SELECT COUNT(*) FROM outbox").fetchone()[0]
+    finally:
+        conn.close()
+    assert count == 0
 
 
 def test_ctl_wake_clears_the_breaker(cfg, monkeypatch):

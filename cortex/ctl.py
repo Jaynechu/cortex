@@ -138,12 +138,9 @@ def cmd_pause(cfg: dict, shell: str | None = None) -> str:
     holds one. Persistent: only ct-wake / ctl resume releases it."""
     scope = (shell or breaker.SCOPE_ALL).strip().lower()
     state = breaker.pause(cfg, scope)
-    settings = breaker.settings(config.marrow_config_dir(cfg))
-    try:
-        message = str(settings["pause_message"]).format(scope=scope)
-    except (KeyError, IndexError, ValueError):
-        message = str(settings["pause_message"])
-    _receipt(cfg, message)
+    # Silent: a manual pause is a deliberate human action already known to the
+    # caller — no tg receipt. Only an auto trip (watchdog fuse) announces on
+    # tg and writes an alert row (see breaker.trip_message / watchdog._fuse).
     extra = ""
     # Put the live cli window down through the SAME proxy path the watchdog fuse
     # uses (lie_down -> clears awake, kills the watchdog, redraws the floor).
