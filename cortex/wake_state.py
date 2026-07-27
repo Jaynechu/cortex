@@ -73,17 +73,52 @@ def lock_path(cfg: dict) -> Path:
     return wake_state_path(cfg).with_suffix(".lock")
 
 
+def _alert_lock_giveup(cfg: dict, detail: str) -> None:
+    """Surface a lock give-up: one marrow `alerts` row (same table watchdog's
+    breaker trip writes) plus an audit line. Both give-ups were silent before —
+    an advisory _flock proceeding unlocked, and a strict section failing closed
+    with the caller swallowing it. Throttled to one row per
+    [wake].lock_alert_throttle_min via a stamp file, so a stuck lock cannot
+    spam. Best-effort: never raises, never blocks the caller."""
+    try:
+        stamp = config.state_dir(cfg) / "flock_alert.stamp"
+        throttle = float(cfg.get("wake", {}).get("lock_alert_throttle_min", 60))
+        now = datetime.now(timezone.utc)
+        try:
+            last = datetime.fromisoformat(stamp.read_text().strip())
+            if (now - last).total_seconds() < throttle * 60:
+                return
+        except (OSError, ValueError):
+            pass
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.write_text(now.isoformat())
+        wake_audit(cfg, "lock_giveup", detail, str(lock_path(cfg)))
+        from cortex import db
+        conn = db.connect(cfg)
+        try:
+            conn.execute(
+                "INSERT INTO alerts (severity, type, message, source)"
+                " VALUES (?, ?, ?, ?)",
+                ("warn", "cortex_lock_giveup", detail, "cortex.wake_state"))
+            conn.commit()
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001 — table/db may be absent; audit already tried
+        pass
+
+
 @contextlib.contextmanager
 def _flock(cfg: dict):
     """Blocking exclusive flock on the sibling .lock file (short timeout via a
     non-blocking retry loop). Best-effort: if the lock cannot be acquired the
     write still proceeds (an unlocked write is the pre-existing behaviour), so a
-    lock-dir hiccup never wedges a wake."""
+    lock-dir hiccup never wedges a wake — but the give-up raises an alert."""
     lp = lock_path(cfg)
     try:
         lp.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(str(lp), os.O_CREAT | os.O_RDWR, 0o644)
-    except OSError:
+    except OSError as e:
+        _alert_lock_giveup(cfg, f"wake_state lock open failed ({e}) — writing unlocked")
         yield
         return
     deadline = _mono() + _LOCK_TIMEOUT_SEC
@@ -98,6 +133,10 @@ def _flock(cfg: dict):
                 if _mono() >= deadline:
                     break
                 _sleep(0.02)
+        if not got:
+            _alert_lock_giveup(
+                cfg, "wake_state lock timeout — writing unlocked "
+                     "(concurrent update may be lost)")
         yield
     finally:
         if got:
@@ -119,6 +158,8 @@ def _strict_flock(cfg: dict):
         lp.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(str(lp), os.O_CREAT | os.O_RDWR, 0o644)
     except OSError as e:
+        _alert_lock_giveup(cfg, f"wake_state strict lock open failed ({e}) "
+                                f"— side effect dropped")
         raise StateValidationError(f"lock open failed: {e}") from e
     deadline = _mono() + _LOCK_TIMEOUT_SEC
     got = False
@@ -130,6 +171,9 @@ def _strict_flock(cfg: dict):
                 break
             except OSError:
                 if _mono() >= deadline:
+                    _alert_lock_giveup(
+                        cfg, "wake_state strict lock timeout — side effect "
+                             "dropped (fail-closed)")
                     raise StateValidationError("lock acquire timeout")
                 _sleep(0.02)
         yield
