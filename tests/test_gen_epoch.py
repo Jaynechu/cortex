@@ -239,9 +239,8 @@ def test_wake_receipt_token_roundtrip(cfg):
     """The epoch token now lives in the wake_state receipt, not the visible line.
     The on-screen bell is human text only."""
     from datetime import datetime
-    from zoneinfo import ZoneInfo
     from cortex import wake_state, window
-    now = datetime(2030, 1, 1, 9, 0, tzinfo=ZoneInfo(cfg["core"]["timezone"]))
+    now = datetime(2030, 1, 1, 9, 0, tzinfo=config.get_tz(cfg))
     line = window.wake_signal_line(cfg, now, token=(7, "abcd1234"))
     assert "{g" not in line  # no token on screen
     window.write_wake_receipt(cfg, now, token=(7, "abcd1234"))

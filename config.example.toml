@@ -2,7 +2,9 @@
 # Missing file / missing keys -> defaults below apply (tolerant load).
 
 [core]
-timezone = "Australia/Melbourne"
+# Empty/absent = follow the OS timezone. Set an IANA name only for
+# headless/VPS deploys where the OS tz differs from the user's.
+timezone = ""
 # Shell ids running as cortex shells (mirror of marrow [cortex].shells).
 # "cli" absent = this repo's heartbeat (wake daemon + watchdog) stays down.
 shells = ["cli"]

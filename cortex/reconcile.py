@@ -10,7 +10,7 @@ from __future__ import annotations
 import sys
 import time
 
-from cortex import db, occupancy, transcript, wake_state
+from cortex import config, db, occupancy, transcript, wake_state
 
 # A suspect marker older than this (minutes) is treated as absent even if its
 # gen still matches -- caps how long a single stale osascript hiccup can keep
@@ -128,14 +128,13 @@ def _stale_suspect_count(cfg: dict, snap_gen: int | None) -> int:
 
 def _parse_local(iso: str | None, cfg: dict):
     from datetime import datetime
-    from zoneinfo import ZoneInfo
     if not iso:
         return None
     try:
         dt = datetime.fromisoformat(iso)
     except ValueError:
         return None
-    tz = ZoneInfo(cfg["core"]["timezone"])
+    tz = config.get_tz(cfg)
     return dt.replace(tzinfo=tz) if dt.tzinfo is None else dt
 
 

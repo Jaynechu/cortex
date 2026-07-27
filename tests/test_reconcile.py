@@ -7,7 +7,6 @@ machine-touching calls are stubbed."""
 from __future__ import annotations
 
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -30,7 +29,7 @@ def cfg(tmp_path):
 
 
 def _tz(cfg):
-    return ZoneInfo(cfg["core"]["timezone"])
+    return config.get_tz(cfg)
 
 
 # --- ledger write/clear -------------------------------------------------------

@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import time
 from datetime import datetime, timedelta, timezone
-from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -87,13 +86,12 @@ def test_alarm_pending_suppresses_the_silence_fire(awake, typed):
     cfg = awake
     wake_state.update(cfg, user_replied_this_wake=True,
                       last_user_msg_ts=_minutes_ago(90))
-    due = datetime.now(ZoneInfo(cfg["core"]["timezone"])) + timedelta(minutes=30)
+    due = datetime.now(config.get_tz(cfg)) + timedelta(minutes=30)
     wake_state.set_next_wake_at(cfg, due.isoformat())
 
     st = wake_state.load(cfg)
     assert daemon.silence_due_in(cfg, st) is None
-    assert daemon.business_reason(cfg, st, datetime.now(ZoneInfo(
-        cfg["core"]["timezone"]))) is None
+    assert daemon.business_reason(cfg, st, datetime.now(config.get_tz(cfg))) is None
     assert watchdog.silence_action(cfg, silent_min=90.0) is None
     assert typed == []
 
@@ -104,7 +102,7 @@ def test_business_deadline_is_the_alarm_not_the_idle_cycle(awake):
     cfg = awake
     wake_state.update(cfg, user_replied_this_wake=True,
                       last_user_msg_ts=_minutes_ago(90))
-    due = datetime.now(ZoneInfo(cfg["core"]["timezone"])) + timedelta(minutes=30)
+    due = datetime.now(config.get_tz(cfg)) + timedelta(minutes=30)
     wake_state.set_next_wake_at(cfg, due.isoformat())
     d = daemon.WakeDaemon(cfg, scheduler=FakeScheduler(), clock=time.time)
     assert d._next_business_at(time.time()) == pytest.approx(due.timestamp(), abs=1)
@@ -115,7 +113,7 @@ def test_kick_still_fires_with_an_alarm_armed(awake, typed):
     alarm excludes."""
     cfg = awake
     wake_state.set_next_wake_at(
-        cfg, (datetime.now(ZoneInfo(cfg["core"]["timezone"]))
+        cfg, (datetime.now(config.get_tz(cfg))
               + timedelta(minutes=30)).isoformat())
     assert wake_state.mark_kick_round(cfg) is True
     assert daemon.silence_due_in(cfg, wake_state.load(cfg)) == 0.0
@@ -194,7 +192,7 @@ def test_alarm_is_consumed_before_the_wake_is_delivered(cfg, monkeypatch):
         raise RuntimeError("esc: delivery interrupted")
 
     monkeypatch.setattr(wake_mod, "run_wake", fake_run_wake)
-    tz = ZoneInfo(cfg["core"]["timezone"])
+    tz = config.get_tz(cfg)
     wake_state.set_next_wake_at(cfg, (datetime.now(tz)
                                       - timedelta(minutes=1)).isoformat())
     d = daemon.WakeDaemon(cfg, scheduler=FakeScheduler(), clock=time.time)

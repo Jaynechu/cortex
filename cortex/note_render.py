@@ -20,7 +20,6 @@ from __future__ import annotations
 import argparse
 from datetime import datetime
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 from cortex import config, db, note
 
@@ -43,7 +42,7 @@ def main() -> None:
     args = parser.parse_args()
 
     cfg = config.load()
-    tz = ZoneInfo(cfg.get("core", {}).get("timezone", "Australia/Melbourne"))
+    tz = config.get_tz(cfg)
     now = datetime.now(tz)
 
     window_sid = None

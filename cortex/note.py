@@ -16,9 +16,8 @@ from __future__ import annotations
 import json
 import subprocess
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, tzinfo
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 from cortex import config
 from cortex.occupancy import parse_due_at
@@ -28,8 +27,8 @@ from cortex.occupancy import parse_due_at
 _CURRENT_WAKE_EPSILON_S = 90
 
 
-def _tz(cfg: dict) -> ZoneInfo:
-    return ZoneInfo(cfg.get("core", {}).get("timezone", "Australia/Melbourne"))
+def _tz(cfg: dict) -> tzinfo:
+    return config.get_tz(cfg)
 
 
 def _parse_utc(ts_iso: str) -> datetime:

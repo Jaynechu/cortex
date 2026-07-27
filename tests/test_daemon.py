@@ -18,7 +18,6 @@ import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -126,7 +125,7 @@ def test_business_rearms_when_callback_raises(cfg, clock, monkeypatch):
 # --- next business deadline --------------------------------------------
 
 def _tz(cfg):
-    return ZoneInfo(cfg["core"]["timezone"])
+    return config.get_tz(cfg)
 
 
 def test_next_business_at_tracks_the_ledger(cfg, clock):

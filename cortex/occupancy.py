@@ -12,10 +12,10 @@ import dataclasses
 import json
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, tzinfo
 from zoneinfo import ZoneInfo
 
-from cortex import db
+from cortex import config as _config, db
 
 
 @dataclass(frozen=True)
@@ -34,7 +34,7 @@ class PacemakerState:
 # --------------------------------------------------------------------------
 
 def _now(cfg: dict) -> datetime:
-    return datetime.now(ZoneInfo(cfg["core"]["timezone"]))
+    return datetime.now(_config.get_tz(cfg))
 
 
 def _parse_dt(value: str | None) -> datetime | None:
@@ -50,7 +50,7 @@ def _iso(dt: datetime | None) -> str | None:
     return dt.isoformat() if dt is not None else None
 
 
-def parse_due_at(value: str | None, tz: ZoneInfo) -> datetime | None:
+def parse_due_at(value: str | None, tz: tzinfo) -> datetime | None:
     """Parse a self-schedule due_at. Accepts tz-aware ISO and offset-free (naive)
     ISO; naive is interpreted as local wall time in `tz` (DST-correct). The
     convention is offset-free local — no hardcoded UTC offset (breaks under DST)."""

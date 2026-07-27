@@ -18,14 +18,13 @@ import sys
 import sqlite3
 import time
 from datetime import datetime
-from zoneinfo import ZoneInfo
 
 from cortex import config, db, note, occupancy, symlinks
 from cortex.timing import WakeTimer
 
 
 def _now(cfg: dict) -> datetime:
-    return datetime.now(ZoneInfo(cfg["core"]["timezone"]))
+    return datetime.now(config.get_tz(cfg))
 
 
 def assemble_note(conn: sqlite3.Connection, cfg: dict, now: datetime,

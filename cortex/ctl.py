@@ -20,13 +20,12 @@ from __future__ import annotations
 import argparse
 import sys
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
 
 from cortex import breaker, config, db, occupancy, wake_state, window
 
 
 def _now(cfg: dict) -> datetime:
-    return datetime.now(ZoneInfo(cfg["core"]["timezone"]))
+    return datetime.now(config.get_tz(cfg))
 
 
 def cmd_wake(cfg: dict) -> str:

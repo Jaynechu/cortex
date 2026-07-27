@@ -7,7 +7,7 @@ from cortex import config
 
 def test_load_missing_file_returns_defaults(tmp_path):
     cfg = config.load(tmp_path / "does_not_exist.toml")
-    assert cfg["core"]["timezone"] == "Australia/Melbourne"
+    assert cfg["core"]["timezone"] == ""  # empty = follow OS timezone
     assert cfg["paths"]["marrow_db"] == ""
     assert cfg["geofence"]["enabled"] is False
     assert cfg["health"]["enabled"] is False

@@ -6,7 +6,6 @@ window._list_sessions / window._claude_start_on_tty."""
 from __future__ import annotations
 
 from datetime import datetime
-from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -25,7 +24,7 @@ def cfg(tmp_path):
 
 
 def _tz(cfg):
-    return ZoneInfo(cfg["core"]["timezone"])
+    return config.get_tz(cfg)
 
 
 # --- adoption unit (window.find_adoptable_window) ----------------------------

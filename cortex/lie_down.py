@@ -17,7 +17,6 @@ import signal
 import socket
 import sys
 from datetime import datetime, timezone
-from zoneinfo import ZoneInfo
 
 from cortex import config, db, occupancy, transcript, wake_state
 
@@ -39,7 +38,7 @@ def _clear_due_self_schedule(cfg: dict) -> int:
     if not isinstance(items, list):
         return 0
     now = _now_utc()
-    tz = ZoneInfo(cfg["core"]["timezone"])
+    tz = config.get_tz(cfg)
     kept = []
     for it in items:
         due = it.get("due_at") if isinstance(it, dict) else None
@@ -247,14 +246,14 @@ def _local_hm(dt: datetime | None, cfg: dict) -> str | None:
     """Next-floor datetime -> local HH:MM (config tz). None -> None."""
     if dt is None:
         return None
-    return dt.astimezone(ZoneInfo(cfg["core"]["timezone"])).strftime("%H:%M")
+    return dt.astimezone(config.get_tz(cfg)).strftime("%H:%M")
 
 
 def _local_iso(dt: datetime | None, cfg: dict) -> str | None:
     """Next-floor datetime -> local ISO (config tz) for the durable ledger."""
     if dt is None:
         return None
-    return dt.astimezone(ZoneInfo(cfg["core"]["timezone"])).isoformat()
+    return dt.astimezone(config.get_tz(cfg)).isoformat()
 
 
 def main(argv: list[str] | None = None) -> int:

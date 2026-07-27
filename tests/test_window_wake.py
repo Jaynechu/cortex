@@ -108,8 +108,7 @@ def test_clear_due_self_schedule(cfg):
 
 def test_clear_due_self_schedule_naive_local(cfg):
     """Offset-free (naive) due_at is read as Australia/Melbourne local time."""
-    from zoneinfo import ZoneInfo
-    tz = ZoneInfo(cfg["core"]["timezone"])
+    tz = config.get_tz(cfg)
     now_local = datetime.now(tz)
     past_naive = (now_local - timedelta(minutes=10)).replace(tzinfo=None).isoformat()
     future_naive = (now_local + timedelta(hours=4)).replace(tzinfo=None).isoformat()
@@ -1081,7 +1080,6 @@ def test_lie_down_returns_next_wake_hm(cfg):
     """lie_down returns next_wake as local HH:MM (the marrow MCP wrapper surfaces
     it). An explicit next_wake_min pins the next floor to now + N (clamped)."""
     from datetime import datetime as _dt
-    from zoneinfo import ZoneInfo
 
     conn = db.connect(cfg)
     conn.execute(
@@ -1095,7 +1093,7 @@ def test_lie_down_returns_next_wake_hm(cfg):
     # 120 is within [next_wake_min=21, next_wake_max=360] -> used verbatim.
     r = lie_down.lie_down(cfg, next_wake_min=120)
     assert "next_wake" in r
-    tz = ZoneInfo(cfg["core"]["timezone"])
+    tz = config.get_tz(cfg)
     expected = (_dt.now(tz) + timedelta(minutes=120)).strftime("%H:%M")
     # allow a 1-min clock-tick skew
     assert r["next_wake"] in (
@@ -1107,7 +1105,6 @@ def test_lie_down_clamps_next_wake_min_to_ceiling(cfg):
     """lie_down(next_wake_min=N) clamps to [0, next_wake_max=360] — the
     session-facing window, not the floor draw. 999 -> 360."""
     from datetime import datetime as _dt
-    from zoneinfo import ZoneInfo
 
     conn = db.connect(cfg)
     conn.execute(
@@ -1119,7 +1116,7 @@ def test_lie_down_clamps_next_wake_min_to_ceiling(cfg):
     wake_state.set_awake(cfg, wid, None)
 
     r = lie_down.lie_down(cfg, next_wake_min=999)
-    tz = ZoneInfo(cfg["core"]["timezone"])
+    tz = config.get_tz(cfg)
     expected = (_dt.now(tz) + timedelta(minutes=360)).strftime("%H:%M")
     assert r["next_wake"] in (
         expected, (_dt.now(tz) + timedelta(minutes=361)).strftime("%H:%M"))
@@ -1129,7 +1126,6 @@ def test_lie_down_zero_is_immediate_rewake(cfg):
     """T3: the merged clamp floor is 0 for every hour — lie_down(next_wake_min=0)
     schedules an immediate re-wake, never clamped up."""
     from datetime import datetime as _dt
-    from zoneinfo import ZoneInfo
 
     conn = db.connect(cfg)
     conn.execute(
@@ -1141,7 +1137,7 @@ def test_lie_down_zero_is_immediate_rewake(cfg):
     wake_state.set_awake(cfg, wid, None)
 
     r = lie_down.lie_down(cfg, next_wake_min=0)
-    tz = ZoneInfo(cfg["core"]["timezone"])
+    tz = config.get_tz(cfg)
     expected = _dt.now(tz).strftime("%H:%M")
     assert r["next_wake"] in (
         expected, (_dt.now(tz) + timedelta(minutes=1)).strftime("%H:%M"))
@@ -1150,7 +1146,6 @@ def test_lie_down_zero_is_immediate_rewake(cfg):
 def test_lie_down_negative_clamps_to_zero(cfg):
     """A sub-zero value clamps up to 0 (still immediate, never negative)."""
     from datetime import datetime as _dt
-    from zoneinfo import ZoneInfo
 
     conn = db.connect(cfg)
     conn.execute(
@@ -1162,7 +1157,7 @@ def test_lie_down_negative_clamps_to_zero(cfg):
     wake_state.set_awake(cfg, wid, None)
 
     r = lie_down.lie_down(cfg, next_wake_min=-30)
-    tz = ZoneInfo(cfg["core"]["timezone"])
+    tz = config.get_tz(cfg)
     expected = _dt.now(tz).strftime("%H:%M")
     assert r["next_wake"] in (
         expected, (_dt.now(tz) + timedelta(minutes=1)).strftime("%H:%M"))

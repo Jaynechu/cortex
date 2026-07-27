@@ -286,11 +286,9 @@ def _free_round_note(cfg: dict) -> str:
     try:
         from datetime import datetime
         from pathlib import Path
-        from zoneinfo import ZoneInfo
         from cortex import note
 
-        tz = ZoneInfo(cfg.get("core", {}).get("timezone", "Australia/Melbourne"))
-        now = datetime.now(tz)
+        now = datetime.now(config.get_tz(cfg))
         sid = None
         raw = wake_state.load(cfg).get("transcript")
         if raw:

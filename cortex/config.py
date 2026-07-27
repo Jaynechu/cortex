@@ -9,8 +9,10 @@ import copy
 import logging
 import os
 import tomllib
+from datetime import datetime, tzinfo
 from pathlib import Path
 from typing import Any
+from zoneinfo import ZoneInfo
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +35,9 @@ DEFAULT_WAKE_TIMING_LOG = Path.home() / ".config" / "marrow" / "logs" / "wake_ti
 DEFAULT_MACHINE_LINE_MARKERS = ["[NEW ROUND]", "[FUSE]", "[CTL]", "[CMD"]
 
 _DEFAULTS: dict[str, Any] = {
-    "core": {"timezone": "Australia/Melbourne"},
+    # Empty = follow the OS timezone; set an IANA name only for headless/VPS
+    # deploys where the OS tz differs from the user's.
+    "core": {"timezone": ""},
     "paths": {
         "marrow_db": "",
         "knowledgec_db": "",
@@ -293,6 +297,24 @@ def load(path: Path | None = None) -> dict[str, Any]:
     cfg["knowledgec"]["categories"] = categories
 
     return cfg
+
+
+def os_tz() -> tzinfo:
+    """OS local timezone. Resolves the IANA zone via /etc/localtime so DST
+    transitions stay correct; falls back to the current fixed offset."""
+    try:
+        parts = Path("/etc/localtime").resolve().parts
+        if "zoneinfo" in parts:
+            return ZoneInfo("/".join(parts[parts.index("zoneinfo") + 1:]))
+    except Exception:
+        pass
+    return datetime.now().astimezone().tzinfo
+
+
+def get_tz(cfg: dict) -> tzinfo:
+    """[core] timezone if set, else the OS local timezone."""
+    name = (cfg.get("core", {}).get("timezone") or "").strip()
+    return ZoneInfo(name) if name else os_tz()
 
 
 def marrow_db_path(cfg: dict) -> Path:
