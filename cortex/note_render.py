@@ -28,14 +28,12 @@ def main() -> None:
                              "notes via outbox.deliver, so rendering them here "
                              "would double them in the same payload")
     parser.add_argument("--shell", default=None,
-                        help="shell id this note is rendered for "
-                             "([note].shell_replay_exclude). Unset = the "
-                             "unqualified (cli) render")
+                        help="shell id this note is rendered for; scopes the "
+                             "wake ledger read. Unset = the unqualified (cli) "
+                             "render")
     args = parser.parse_args()
 
     cfg = config.load()
-    if args.shell:
-        cfg = note.for_shell(cfg, args.shell)
     tz = ZoneInfo(cfg.get("core", {}).get("timezone", "Australia/Melbourne"))
     now = datetime.now(tz)
 

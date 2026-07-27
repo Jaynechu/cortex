@@ -167,11 +167,6 @@ _DEFAULTS: dict[str, Any] = {
         # Optional first line of the wakeup note (e.g. a nickname for the
         # note), followed by a blank line then the usual content. "" omits it.
         "title": "",
-        # Trailing conversation events force-appended to the Replay block
-        # (cross-session, uniform, no decay). 4 = two round-trips.
-        "replay_events": 4,
-        # Per-event truncation inside the Replay block.
-        "replay_event_chars": 300,
         # Pending self-schedule entries surface only when due within this window.
         "pending_window_min": 15,
         # Reply-receipt line (C11): one per sent note she has replied to since the

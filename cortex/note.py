@@ -6,18 +6,14 @@ line rather than crashing the wake. render() is pure — no I/O, no DB — so it
 can be unit-tested with synthetic data.
 
 Layout: a header block (Now / Active), then `---`-separated blocks
-for pending self-schedule and Replay. The handoff injects at
+for pending self-schedule. The handoff injects at
 SessionStart (marrow), not here. Cal/Rem lines retired (global inject pending).
 The old "Wake:" reason line is gone — reasons carry no signal (desire engine
 retired, wander-only).
 """
 from __future__ import annotations
 
-import contextlib
-import fcntl
 import json
-import os
-import re
 import subprocess
 import sqlite3
 from datetime import datetime, timedelta
@@ -53,43 +49,6 @@ class _ClampDefaults(dict):
     turn_end_text template never crashes on a placeholder not in the clamp set."""
     def __missing__(self, key):
         return "{" + key + "}"
-
-
-# Channels whose turns are cortex self-talk (wake monologues), excluded from
-# Replay so the wakeup note does not replay itself back into its own context.
-_DEFAULT_REPLAY_EXCLUDE_CHANNELS = ("ct",)
-
-# Every shell excludes its OWN channel, not just the cli shell's: the cli shell
-# talks on 'ct', the tg shell on 'tg'. replay_exclude_channels stays the
-# unqualified (cli) set; this maps a shell id -> the set that shell renders
-# with, applied only when the renderer was told which shell it renders for
-# (note_render --shell). Absent shell id -> the unqualified set.
-_DEFAULT_SHELL_REPLAY_EXCLUDE = {"cli": ["ct"], "tg": ["tg"]}
-
-
-def _replay_exclude_channels(cfg: dict) -> tuple[str, ...]:
-    raw = _note_cfg(cfg).get("replay_exclude_channels")
-    if raw is None:
-        return _DEFAULT_REPLAY_EXCLUDE_CHANNELS
-    return tuple(str(c) for c in raw if str(c).strip())
-
-
-def for_shell(cfg: dict, shell: str) -> dict:
-    """`cfg` with Replay excluding `shell`'s own channel
-    ([note].shell_replay_exclude). A shell with no mapping returns `cfg`
-    untouched, so an unspecified render is byte-identical to before. Never
-    mutates the caller's dict."""
-    mapping = _note_cfg(cfg).get("shell_replay_exclude")
-    if not isinstance(mapping, dict):
-        mapping = _DEFAULT_SHELL_REPLAY_EXCLUDE
-    channels = mapping.get(str(shell))
-    if channels is None:
-        return cfg
-    out = dict(cfg)
-    ncfg = dict(_note_cfg(cfg))
-    ncfg["replay_exclude_channels"] = [str(c) for c in channels]
-    out["note"] = ncfg
-    return out
 
 
 def _consume_kick_reasons(cfg: dict, ws: dict, settle: bool = True) -> list[str]:
@@ -357,122 +316,8 @@ def _last_active(conn: sqlite3.Connection, cfg: dict, now: datetime) -> dict | N
     return {"minutes_ago": int(age.total_seconds() // 60), "ts": row["ts"]}
 
 
-# Media / bridge-marker shaper — deliberate copy of marrow strip_media_markers
-# (marrow/marrow/transcript.py:102; marrow not importable from the cortex env).
-# Keep byte-identical with that pairing. Strips wx [time:]/[sticker:] markers and
-# <image|file|gif path="..."/> tags so replayed rows read like plain dialogue.
-_TIME_PREFIX_RE = re.compile(r"^\[time:[^\]]+\]\s*")
-_STICKER_LINE_RE = re.compile(r"^\[sticker:[^\]\n]*\]\n?", re.M)
-_MEDIA_TAG_RE = re.compile(r'\s*<(?:image|file|gif)\s+path="[^"]*?"[^>]*>\s*')
-
-
-def _strip_markers(text: str) -> str:
-    if not text:
-        return ""
-    text = _TIME_PREFIX_RE.sub("", text)
-    text = _STICKER_LINE_RE.sub("", text)
-    return _MEDIA_TAG_RE.sub(" ", text).strip()
-
-
 CLI_SHELL = "cli"
 
-
-def _marker_path(cfg: dict, shell: str | None) -> Path:
-    """This consumer's private replay marker. One file per shell, written only by
-    the renderer that feeds that shell."""
-    return config.state_dir(cfg) / f"replay-{shell or CLI_SHELL}.marker"
-
-
-@contextlib.contextmanager
-def _marker_lock(cfg: dict, shell: str | None):
-    """Private non-blocking flock on <marker>.lock. Yields True when held, False
-    when another writer for the SAME consumer holds it (skip the round)."""
-    p = _marker_path(cfg, shell)
-    fd = None
-    try:
-        fd = os.open(str(p) + ".lock", os.O_CREAT | os.O_RDWR, 0o600)
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        if fd is not None:
-            os.close(fd)
-        yield False
-        return
-    try:
-        yield True
-    finally:
-        with contextlib.suppress(OSError):
-            fcntl.flock(fd, fcntl.LOCK_UN)
-            os.close(fd)
-
-
-def _load_marker(cfg: dict, shell: str | None) -> int | None:
-    try:
-        return int(_marker_path(cfg, shell).read_text().strip())
-    except (OSError, ValueError):
-        return None
-
-
-def _save_marker(cfg: dict, shell: str | None, row_id: int) -> None:
-    try:
-        _marker_path(cfg, shell).write_text(str(int(row_id)))
-    except OSError:
-        pass
-
-
-def _replay(conn: sqlite3.Connection, cfg: dict, limit: int, per_chars: int,
-            shell: str | None = None) -> list[dict]:
-    """The latest `limit` user/assistant events of OTHER conversations that this
-    consumer has not been shown yet.
-
-    Stateless query + private marker: always the newest window (ORDER BY id DESC
-    LIMIT), never a back-fill of everything missed. Nothing newer than the marker
-    -> []. First call (no marker) renders the window and records it. The marker
-    advances to the newest SCANNED row, so rows that can only ever drop never
-    stall it. A busy marker lock skips the round rather than writing unlocked.
-
-    Rows are tagged [channel HH:mm] + role marker (N=user, Y=assistant) and
-    capped at per_chars. cortex's own wake monologues are excluded so the note
-    never replays itself (note.replay_exclude_channels / shell_replay_exclude)."""
-    if limit <= 0:
-        return []
-    exclude = _replay_exclude_channels(cfg)
-    placeholders = ",".join("?" for _ in exclude) if exclude else ""
-    where_channel = (
-        f" AND COALESCE(channel,'') NOT IN ({placeholders})" if exclude else "")
-    with _marker_lock(cfg, shell) as held:
-        if not held:
-            return []
-        try:
-            rows = conn.execute(
-                "SELECT id, role, content, timestamp, channel FROM events "
-                "WHERE role IN ('user', 'assistant')" + where_channel
-                + " ORDER BY id DESC LIMIT ?",
-                (*exclude, limit),
-            ).fetchall()
-        except sqlite3.OperationalError:
-            return []
-        if not rows:
-            return []
-        newest = max(int(r["id"]) for r in rows)
-        marker = _load_marker(cfg, shell)
-        if marker is not None and newest <= marker:
-            return []
-        _save_marker(cfg, shell, newest)
-        events = []
-        for row in reversed(rows):  # chronological
-            if marker is not None and int(row["id"]) <= marker:
-                continue
-            content = _strip_markers(row["content"])
-            if not content:
-                continue
-            ts = row["timestamp"]
-            events.append({
-                "channel": row["channel"] or "?",
-                "hm": _local_hm(ts, cfg) if ts else "??:??",
-                "role": "N" if row["role"] == "user" else "Y",
-                "content": _truncate(content, per_chars),
-            })
-        return events
 
 
 # --------------------------------------------------------------------------- #
@@ -551,7 +396,6 @@ def gather(
     fresh: bool = False,
     wake_kind: str | None = None,
     window_sid: str | None = None,
-    replay: bool = False,
     consume_kick: bool = False,
     claim_ct_notes: bool = True,
     settle: bool = False,
@@ -566,11 +410,6 @@ def gather(
     rotation, whereas wake_state.transcript was cleared at lie_down and is only
     re-set after this note is written. awake_since still comes from wake_state.
 
-    `replay` (default False): include the Replay section. No live caller passes
-    True — marrow's turn_inject is the single replay channel for every session
-    (window and shell alike). Kept for a hookless consumer: a render that
-    includes replay CONSUMES it (the marker advances, nothing is passed twice).
-
     `settle` (default False): kick reasons / receipts / ct notes are pending-
     visible — a claim/read does NOT consume them; ONLY a real payload injection
     settles them (clear/stamp/mark-sent). settle=True is passed by injection
@@ -580,10 +419,8 @@ def gather(
     un-injected payload surfaces again — never consumes, never settles.
 
     `shell` (default None = the unqualified/cli render): the shell this note is
-    rendered for. It picks both the replay channel exclusions and the private
-    replay marker, so no two shells consume each other's window."""
-    ncfg = _note_cfg(cfg)
-
+    rendered for. It scopes the wake ledger read (ct_wake_log.shell), so one
+    shell's page never shows another shell's rows."""
     from cortex import wake_state
 
     last_wake = _safe(_last_wake, conn, now, shell)
@@ -599,7 +436,6 @@ def gather(
         transcript_raw = ws.get("transcript")
         if transcript_raw:
             try:
-                from pathlib import Path
                 window_sid = Path(str(transcript_raw)).stem[:8]
             except Exception:
                 pass
@@ -610,15 +446,6 @@ def gather(
             awake_since_hm = since_dt.astimezone(_tz(cfg)).strftime("%H:%M")
         except (TypeError, ValueError):
             pass
-    # Reading Replay consumes it: _replay advances this shell's private marker.
-    replay_events = _safe(
-        _replay, conn, cfg,
-        ncfg.get("replay_events", 4),
-        ncfg.get("replay_event_chars", 300),
-        shell,
-        default=[],
-    ) if replay else []
-
     # Kick reason flags (cortex.kick): plain lines (no header). Pending-visible:
     # peek (render, no clear) on any read; settle (clear) only when an injection
     # path passes consume_kick+settle. A passive re-render (consume_kick=False)
@@ -652,7 +479,6 @@ def gather(
         "last_active": last_active,
         "active_app": _safe(_frontmost_app),
         "pending": _safe(_pending, cfg, now, default=[]),
-        "replay": replay_events,
         "window_sid": window_sid,
         "awake_since_hm": awake_since_hm,
     }
@@ -662,7 +488,7 @@ def render(cfg: dict, now: datetime, data: dict) -> str:
     """Pure assembly: data dict -> wakeup note text. No DB / no I/O.
 
     Layout (plan §一): a header block (Now / Active), then
-    `---`-separated blocks for pending self-schedule and Replay, then a final
+    `---`-separated blocks for pending self-schedule, then a final
     turn-end reminder line (note.turn_end_text, every render; "" omits it).
     Handoff no longer lives here — it is injected at SessionStart on a
     fresh window."""
@@ -715,15 +541,6 @@ def render(cfg: dict, now: datetime, data: dict) -> str:
         segs = [f"due {p['hm']} {p['intent']}".rstrip() for p in pending]
         blocks.append("Pending self-schedule: " + " · ".join(segs))
 
-    replay = data.get("replay") or []
-    if replay:
-        rlines = ["### Replay"]
-        for ev in replay:
-            role = ev.get("role", "")
-            content = " ".join((ev.get("content") or "").split())
-            rlines.append(f"[{ev['channel']} {ev['hm']}] {role}: {content}")
-        blocks.append("\n".join(rlines))
-
     note_text = "\n\n---\n\n".join(blocks)
     turn_end = _note_cfg(cfg).get("turn_end_text", "")
     if turn_end:
@@ -740,13 +557,6 @@ def render(cfg: dict, now: datetime, data: dict) -> str:
     if machine_tag:
         note_text = machine_tag + "\n\n" + note_text
     return note_text
-
-
-def _truncate(text: str, limit: int) -> str:
-    text = text or ""
-    if len(text) <= limit:
-        return text
-    return text[: max(limit - 1, 0)] + "…"
 
 
 if __name__ == "__main__":  # pragma: no cover - eyeball a real note

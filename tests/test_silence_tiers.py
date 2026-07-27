@@ -318,15 +318,6 @@ def test_free_round_note_carries_no_replay_section(awake_window):
     assert "chatter elsewhere" not in staged
 
 
-def test_free_round_leaves_the_replay_marker_untouched(awake_window):
-    """A window free-round consumes no replay marker — nothing to consume."""
-    from cortex import note as _note
-    cfg = awake_window
-    wake_state.update(cfg, user_replied_this_wake=True)
-    watchdog.silence_action(cfg, silent_min=21.0)
-    assert not _note._marker_path(cfg, None).exists()
-
-
 def _make_outbox(cfg, body="睡了吗", note_id=9):
     conn = db.connect(cfg)
     conn.execute(

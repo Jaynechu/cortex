@@ -16,9 +16,8 @@ NOW = datetime(2026, 7, 8, 14, 30, tzinfo=MEL)
 def cfg(tmp_path):
     # Pure defaults: point load at a nonexistent path so no live cortex.toml leaks in.
     c = config.load(path=tmp_path / "absent.toml")
-    # Replay markers live under state_dir — keep them off the live runtime dir.
     c["paths"]["cortex_home"] = str(tmp_path / "home")
-    # These tests assert the note BODY structure (Now: / title / replay). The Fix 5
+    # These tests assert the note BODY structure (Now: / title). The Fix 5
     # machine-origin tag is a separate first line, verified in test_wake_regime_fixes;
     # blank it here so the body assertions (startswith "Now:" / title) stay exact.
     c["note"]["wake_machine_tag"] = ""
@@ -34,7 +33,7 @@ def make_events_table(conn):
 
 
 def _row_id(conn, content: str) -> int:
-    """events.id of the row carrying `content` (row-id replay cursor tests)."""
+    """events.id of the row carrying `content` (row-id cursor tests)."""
     return conn.execute("SELECT id FROM events WHERE content=?",
                         (content,)).fetchone()[0]
 
@@ -88,10 +87,6 @@ def test_render_full_note(cfg):
         "last_active": {"minutes_ago": 12},
         "active_app": "Google Chrome",
         "pending": [{"hm": "00:18", "intent": "去看看老婆睡了没"}],
-        "replay": [
-            {"channel": "cli", "hm": "00:30", "role": "N", "content": "笨鸭子"},
-            {"channel": "cli", "hm": "00:31", "role": "Y", "content": "在呢"},
-        ],
     }
     text = note.render(cfg, NOW, data)
     assert "Wake:" not in text  # reason line retired
@@ -104,9 +99,6 @@ def test_render_full_note(cfg):
         "Active (Mac): Google Chrome",
     ]
     assert "Pending self-schedule: due 00:18 去看看老婆睡了没" in text
-    assert "### Replay" in text
-    assert "[cli 00:30] N: 笨鸭子" in text
-    assert "[cli 00:31] Y: 在呢" in text
     # block separators
     assert "\n\n---\n\n" in text
     # cal/rem retired
@@ -483,133 +475,6 @@ def test_render_last_active_overrides_wake_minutes(cfg):
     assert "Last active: 3min ago (force-slept: timeout)" in text
 
 
-def test_replay_events_channel_time_and_truncation(marrow_conn, cfg):
-    make_events_table(marrow_conn)
-    marrow_conn.executemany(
-        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
-        [
-            ("s", "2026-07-08T03:00:00+00:00", "user", "hi", "wx"),
-            ("s", "2026-07-08T03:01:00+00:00", "tl", "【专注】skip me", "cli"),
-            ("s", "2026-07-08T03:02:00+00:00", "assistant", "y" * 500, "cli"),
-        ],
-    )
-    marrow_conn.commit()
-    ev = note._replay(marrow_conn, cfg, 6, 300)
-    assert len(ev) == 2  # tl excluded
-    assert ev[0] == {"channel": "wx", "hm": "13:00", "role": "N", "content": "hi"}
-    assert ev[1]["channel"] == "cli"
-    assert ev[1]["role"] == "Y"  # assistant -> Y
-    assert len(ev[1]["content"]) == 300 and ev[1]["content"].endswith("…")
-
-
-def test_replay_excludes_cortex_self_talk(marrow_conn, cfg):
-    make_events_table(marrow_conn)
-    marrow_conn.executemany(
-        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
-        [
-            ("s", "2026-07-08T03:00:00+00:00", "user", "user message", "cli"),
-            ("s", "2026-07-08T03:01:00+00:00", "assistant", "cortex自言自语", "ct"),
-            ("s", "2026-07-08T03:02:00+00:00", "user", "cortex醒来读note", "ct"),
-            ("s", "2026-07-08T03:03:00+00:00", "assistant", "assistant reply", "cli"),
-        ],
-    )
-    marrow_conn.commit()
-    ev = note._replay(marrow_conn, cfg, 6, 300)
-    # ct channel (cortex wake monologue) excluded; real cli exchange kept.
-    assert [(e["channel"], e["content"]) for e in ev] == [
-        ("cli", "user message"), ("cli", "assistant reply")]
-
-
-def test_replay_strips_media_markers(marrow_conn, cfg):
-    make_events_table(marrow_conn)
-    marrow_conn.executemany(
-        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
-        [
-            ("s", "2026-07-08T03:00:00+00:00", "user",
-             '[time: 12:30] 你看 <image path="/stk/a.png"/> 这个', "wx"),
-        ],
-    )
-    marrow_conn.commit()
-    ev = note._replay(marrow_conn, cfg, 6, 300)
-    assert ev[0]["content"] == "你看 这个"
-
-
-def test_replay_exclude_channels_configurable(marrow_conn, tmp_path):
-    make_events_table(marrow_conn)
-    marrow_conn.execute(
-        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
-        ("s", "2026-07-08T03:00:00+00:00", "assistant", "ct turn", "ct"))
-    marrow_conn.commit()
-    # empty exclude list → include everything, including ct
-    cfg2 = {"note": {"replay_exclude_channels": []},
-            "paths": {"cortex_home": str(tmp_path / "h")},
-            "core": {"timezone": "Australia/Melbourne"}}
-    ev = note._replay(marrow_conn, cfg2, 6, 300)
-    assert [e["content"] for e in ev] == ["ct turn"]
-
-
-# --------------------------------------------------------------------------- #
-# per-shell replay exclude — every shell drops its OWN channel
-# --------------------------------------------------------------------------- #
-
-def _shell_events(conn):
-    make_events_table(conn)
-    conn.executemany(
-        "INSERT INTO events (session_id, timestamp, role, content, channel) VALUES (?,?,?,?,?)",
-        [
-            ("s", "2026-07-08T03:00:00+00:00", "user", "tg user turn", "tg"),
-            ("s", "2026-07-08T03:01:00+00:00", "assistant", "tg shell自言自语", "tg"),
-            ("s", "2026-07-08T03:02:00+00:00", "assistant", "cli shell自言自语", "ct"),
-            ("s", "2026-07-08T03:03:00+00:00", "user", "wx user turn", "wx"),
-        ],
-    )
-    conn.commit()
-
-
-def test_for_shell_tg_excludes_tg_and_keeps_ct(marrow_conn, cfg):
-    """The tg shell renders through the same renderer — without this it reads
-    its own conversation replayed back at itself."""
-    _shell_events(marrow_conn)
-    ev = note._replay(marrow_conn, note.for_shell(cfg, "tg"), 6, 300, "tg")
-    assert [e["content"] for e in ev] == ["cli shell自言自语", "wx user turn"]
-
-
-def test_for_shell_cli_matches_the_unqualified_render(marrow_conn, cfg):
-    _shell_events(marrow_conn)
-    plain = note._replay(marrow_conn, cfg, 6, 300)
-    # a separate marker, else the second read sees nothing new
-    cli = note._replay(marrow_conn, note.for_shell(cfg, "cli"), 6, 300, "cli2")
-    assert cli == plain
-    assert [e["content"] for e in plain] == ["tg user turn", "tg shell自言自语",
-                                             "wx user turn"]
-
-
-def test_replay_marker_is_private_per_shell_and_consumed_once(marrow_conn, cfg):
-    """Reading Replay advances that shell's own marker: a second read of the
-    same shell shows nothing new, while another shell still sees the window."""
-    _shell_events(marrow_conn)
-    assert note._replay(marrow_conn, cfg, 6, 300, "tg")
-    assert note._replay(marrow_conn, cfg, 6, 300, "tg") == []
-    assert note._replay(marrow_conn, cfg, 6, 300, "wx")  # own marker, untouched
-
-
-def test_for_shell_unknown_shell_returns_the_config_untouched(cfg):
-    assert note.for_shell(cfg, "wx") is cfg
-
-
-def test_for_shell_never_mutates_the_caller_config(cfg):
-    before = cfg["note"].get("replay_exclude_channels")
-    note.for_shell(cfg, "tg")
-    assert cfg["note"].get("replay_exclude_channels") == before
-
-
-def test_for_shell_map_is_config_driven(cfg, marrow_conn):
-    _shell_events(marrow_conn)
-    cfg["note"]["shell_replay_exclude"] = {"tg": ["tg", "wx"]}
-    ev = note._replay(marrow_conn, note.for_shell(cfg, "tg"), 6, 300, "tg")
-    assert [e["content"] for e in ev] == ["cli shell自言自语"]
-
-
 def test_pending_within_window(cfg, tmp_path, monkeypatch):
     sp = tmp_path / "ss.json"
     due_soon = (NOW + timedelta(minutes=10)).isoformat()
@@ -678,7 +543,7 @@ def test_frontmost_app_ok(monkeypatch):
 
 def test_gather_end_to_end(marrow_conn, cfg, tmp_path, monkeypatch):
     # Isolate wake_state so a stale cursor on a real machine's live state
-    # (diff-mode baseline, D6) can never filter out this fixture's replay row.
+    # (diff-mode baseline, D6) can never filter out this fixture's row.
     cfg["paths"]["wake_state_file"] = str(tmp_path / "wake_state.json")
     make_events_table(marrow_conn)
     marrow_conn.execute(
@@ -692,9 +557,7 @@ def test_gather_end_to_end(marrow_conn, cfg, tmp_path, monkeypatch):
         "reasons": [_FloorReason()]})
     assert "wake_parts" not in data  # Wake reason line retired
     assert "budget" not in data  # budget line retired
-    assert data["replay"] == []  # window render -> no replay section
-    with_replay = note.gather(marrow_conn, cfg, NOW, replay=True)
-    assert len(with_replay["replay"]) == 1
+    assert "replay" not in data  # Replay section deleted — turn_inject is the channel
     assert "handoff" not in data  # handoff moved to SessionStart
     text = note.render(cfg, NOW, data)
     assert text.startswith("Now: ")
@@ -870,9 +733,13 @@ def test_note_render_carries_no_replay(tmp_path, monkeypatch, capsys):
     """note_render never carries Replay — marrow's turn_inject is the single
     replay channel for every session."""
     out = _render_cli(tmp_path, monkeypatch, capsys, [])
+    assert "Now:" in out
     assert "### Replay" not in out
     assert "tg shell self talk" not in out
-    out = _render_cli(tmp_path / "shelled", monkeypatch, capsys, ["--shell", "tg"])
+    # the live tg bridge shape (note_render_cmd) still renders a note body
+    out = _render_cli(tmp_path / "shelled", monkeypatch, capsys,
+                      ["--no-ct", "--shell", "tg"])
+    assert "Now:" in out
     assert "### Replay" not in out
 
 

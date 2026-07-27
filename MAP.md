@@ -111,12 +111,10 @@ wake daemon (launchd KeepAlive, always on) ──reconcile (60s cadence)──�
 - gather (note.py:311-340): every section behind _safe(), render pure, omit cleanly when absent (386-446).
 - Sections: header = 2 lines only, `Now HH:MM Day | Last active` [+ force_slept] and `Active (Mac)` · Pending self-schedule (note.pending_window_min 15).
 - Visible note = 3 lines: note.wake_machine_tag, `Now … | Last active …`, `Active (Mac)`. turn_end_text + title default "" (omitted). "Wake:" reason line retired.
-- No note ever carries Replay: marrow turn_inject is the single replay channel for every session, window and shell alike (marrow/MAP.md §replay). `gather(replay=True)` still implements the section but has no live caller (note_render --replay deleted with the headless path).
-- That engine excludes the rendering shell's OWN channel: `note.for_shell(id)` picks note.shell_replay_exclude[id] (cli→ct, tg→tg); unset falls back to note.replay_exclude_channels. `note_render --shell <id>` still selects it (the tg bridge passes it).
-- Replay = stateless latest-window query (note.replay_events 6, marker-stripped, 300ch) against a private marker per shell (`<cortex_home>/state/replay-<shell>.marker`) under its own non-blocking flock; busy lock = skip. Rendering consumes it — no back-fill, no staging, no feeder promotion.
+- No note carries Replay: the engine is deleted; marrow turn_inject is the single replay channel for every session, window and shell alike (marrow/MAP.md §replay).
+- `note_render --shell <id>` (tg bridge passes `--no-ct --shell tg`) scopes the wake-ledger read only — gather(shell) picks ct_wake_log rows for that shell.
 - No budget / Plan-Used / per-shell Today / Net-Session / Window-SID lines; `note.daily_budget` + `note.shell_labels` config gone. `occupancy.store_window_tokens` still writes window occupancy to ct_pacemaker_state; only reader is `occupancy.window_tokens_hint` (no consumer).
 - _last_wake skips rows <90s to avoid self-reporting current wake (note.py:106-127). Handoff injection at marrow SessionStart not note.py; cal/rem lines retired pending global inject (note.py:9-10).
-- _strip_markers = deliberate local copy of marrow strip_media_markers (not importable from cortex venv), byte-identical today (note.py:189-204 vs marrow/transcript.py:97-117) — drift tracked.
 ## 7. transcript.py — token/liveness probe
 - _munge replicates CC cwd→projects dirname; transcript_dir overridable via paths.transcript_dir (transcript.py:14-26). newest() = latest-mtime top-level *.jsonl (subagents/ excluded).
 - window_tokens = LAST usage line input+cache_read+cache_creation+output → occupancy; drives watchdog fuse only; 0 on read error (transcript.py:42-64, watchdog.py:153). mtime() drives rotation + ear polling.
