@@ -9,10 +9,11 @@ ledger writes, no file writes. --transcript supplies the Window-line SID
 (Path(...).stem[:8]) — the caller's own transcript, correct even after
 rotation. Print the note; exit 0.
 
---shell <non-cli> additionally reports which events row the rendered Replay
-covered, out-of-band on stderr as one `cutoff_row_id=N` line (stdout stays the
-note body). The feeder writes that to the shell ledger only after a successful
-feed, so a manual/debug render can never poison a cursor.
+A render that showed Replay rows reports the events row it covered, out-of-band
+on stderr as one `cutoff_row_id=N` line (stdout stays the note body). Every
+shell — the unqualified/cli render included — emits it. The feeder writes that
+to its cursor only after a successful feed, so a manual/debug render can never
+poison one.
 """
 from __future__ import annotations
 
@@ -60,10 +61,11 @@ def main() -> None:
         if args.no_ct:
             data["ct_notes"] = []
         print(note.render(cfg, now, data))
-        # Out-of-band cutoff for a non-cli shell's feeder. Nothing rendered ->
-        # no line, so the feeder promotes nothing.
+        # Out-of-band cutoff for the caller that feeds this note (tg bridge
+        # ledger, marrow wake hook wake_state). Nothing rendered -> no line, so
+        # the feeder promotes nothing.
         cutoff = data.get("rendered_cutoff_row_id")
-        if args.shell and args.shell != note.CLI_SHELL and cutoff is not None:
+        if cutoff is not None:
             print(f"cutoff_row_id={int(cutoff)}", file=sys.stderr)
     finally:
         conn.close()

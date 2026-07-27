@@ -116,8 +116,9 @@ def test_shell_render_ignores_wake_state_cursor(env, monkeypatch, capsys):
 
 
 def test_unqualified_render_unchanged(env, monkeypatch, capsys):
-    """Baseline: no --shell -> cursor from wake_state, ledger ignored, no stderr
-    cutoff line, no writes."""
+    """Baseline: no --shell -> cursor from wake_state, ledger ignored, still no
+    writes. The cutoff IS reported (the marrow wake hook advances wake_state
+    with it after injecting), the render itself just never writes one."""
     wake_state.set_last_note_row_id(env["cfg"], env["ids"]["second"])
     env["ledger"].write_text(json.dumps({"last_note_row_id": env["ids"]["first"]}))
     before = _snapshot(env["ledger"], env["wake_state"])
@@ -127,17 +128,20 @@ def test_unqualified_render_unchanged(env, monkeypatch, capsys):
 
     assert "third" in out
     assert "second" not in out and "first" not in out
-    assert err == ""
+    assert err.strip() == f"cutoff_row_id={env['ids']['third']}"
     assert _snapshot(env["ledger"], env["wake_state"]) == before
 
 
-def test_cli_shell_render_has_no_cutoff_line(env, monkeypatch, capsys):
-    """--shell cli is the unqualified path: wake_state cursor, no stderr line."""
+def test_cli_shell_render_reports_cutoff_without_writing(env, monkeypatch, capsys):
+    """--shell cli is the unqualified path: wake_state cursor, cutoff on stderr,
+    no cursor write of its own."""
     wake_state.set_last_note_row_id(env["cfg"], env["ids"]["second"])
     env["ledger"].write_text(json.dumps({"last_note_row_id": env["ids"]["first"]}))
+    before = _snapshot(env["ledger"], env["wake_state"])
 
     _run(monkeypatch, "--shell", note.CLI_SHELL)
     out, err = capsys.readouterr()
 
     assert "third" in out and "second" not in out
-    assert err == ""
+    assert err.strip() == f"cutoff_row_id={env['ids']['third']}"
+    assert _snapshot(env["ledger"], env["wake_state"]) == before
