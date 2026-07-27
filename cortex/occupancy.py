@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import dataclasses
 import json
-import random
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -247,35 +246,30 @@ def log_activation_wake_row(conn: sqlite3.Connection, now: datetime,
         return None
 
 
-def reschedule_floor(now: datetime, config: dict, rng: random.Random,
+def reschedule_floor(now: datetime, config: dict,
                      minutes: float | None = None) -> datetime:
     """Draw the next wake due time from `now`. `minutes` = an explicit choice
-    (already clamped by the caller); None = a uniform "dice" draw within the
-    floor band [floor_min_min, floor_max_min]. Callers pass lie-down time as
-    `now` on the wake path (C-wm: the clock runs from lie-down, not wake);
-    gated firings redraw from tick time so a blocked floor doesn't re-fire
-    every tick."""
+    (already clamped by the caller); None = the fixed [triggers].floor_min
+    interval. Callers pass lie-down time as `now` on the wake path (C-wm: the
+    clock runs from lie-down, not wake); gated firings redraw from tick time
+    so a blocked floor doesn't re-fire every tick."""
     trig_config = config.get("triggers", {})
-    lo = trig_config.get("floor_min_min", 10)
-    hi = trig_config.get("floor_max_min", 55)
-    draw = rng.uniform(lo, hi) if minutes is None else minutes
+    draw = trig_config.get("floor_min", 55) if minutes is None else minutes
     return now + timedelta(minutes=draw)
 
 
 def lie_down(conn: sqlite3.Connection, cfg: dict, now: datetime | None = None,
-             rng: random.Random | None = None,
              minutes: float | None = None) -> datetime:
     """Mark wake end (C-wm): lie_down chooses the next internal wake. `minutes`
     = an explicit choice (pre-clamped by the caller to [1, next_wake_max] via
-    clamp_next_wake_minutes, not re-clamped here); None = a uniform "dice"
-    draw within [floor_min_min, floor_max_min] (preserves prior behaviour). The
-    clock restarts from lie-down. Called when a wake finishes — including on
-    wake failure, so a crashed wake can't wedge it.
+    clamp_next_wake_minutes, not re-clamped here); None = the fixed
+    [triggers].floor_min interval (preserves prior behaviour). The clock
+    restarts from lie-down. Called when a wake finishes — including on wake
+    failure, so a crashed wake can't wedge it.
     Returns the redrawn next-floor datetime (local tz)."""
     now = now or _now(cfg)
-    rng = rng or random.Random()
 
-    next_floor = reschedule_floor(now, cfg, rng, minutes)
+    next_floor = reschedule_floor(now, cfg, minutes)
     state = load_state(conn)
     new_state = dataclasses.replace(
         state,

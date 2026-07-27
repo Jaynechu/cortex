@@ -134,12 +134,9 @@ _DEFAULTS: dict[str, Any] = {
         "dry_run": True,
     },
     "triggers": {
-        # Wake-window draw (minutes) from lie-down. lie_down picks the next wake:
-        # an explicit choice clamped to [min, max] (max = cache-TTL guard, min =
-        # anti-thrash), or a uniform "dice" draw within the window when omitted.
-        # Also the clamp for a model-declared watchdog silence window.
-        "floor_min_min": 10,
-        "floor_max_min": 55,
+        # Wake-window interval (minutes) from lie-down. lie_down picks the
+        # next wake: an explicit choice, or this fixed interval when omitted.
+        "floor_min": 55,
     },
     # External-wake (cortex.kick) reason lines rendered as plain lines into the
     # wakeup note (no section header), then cleared on delivery. A bridge/cli
