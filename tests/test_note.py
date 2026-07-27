@@ -372,10 +372,10 @@ def test_render_turn_end_line_appears_with_custom_template(cfg):
         "NOTE: lie_down(next_wake_min=N) [0-360].")
 
 
-def test_render_title_prepended_with_blank_line(cfg):
+def test_render_title_prepended_single_newline(cfg):
     cfg["note"]["title"] = "📮 小道消息"
     text = note.render(cfg, NOW, {})
-    assert text.startswith("📮 小道消息\n\nNow: ")
+    assert text.startswith("📮 小道消息\nNow: ")
 
 
 def test_render_title_empty_omits_it(cfg):
