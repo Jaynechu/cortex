@@ -4,13 +4,10 @@ The wake-time note is assembled once and frozen to disk; a rotated window then
 gets a stale file. This entry re-renders at injection time so "Now:" and the
 Window SID always reflect the caller's current moment and transcript.
 
-Contract: no ct_wake_log writes, no wake_state writes, no shell ledger writes.
+Contract: read-only. No ct_wake_log writes, no wake_state writes, no shell
+ledger writes, no Replay (marrow's turn_inject is the single replay channel).
 --transcript supplies the Window-line SID (Path(...).stem[:8]) — the caller's
 own transcript, correct even after rotation. Print the note; exit 0.
-
---replay is the one exception to read-only: a headless consumer has no
-UserPromptSubmit hook, so the note is its only replay channel and this render
-consumes that shell's private replay marker.
 """
 from __future__ import annotations
 
@@ -31,16 +28,9 @@ def main() -> None:
                              "notes via outbox.deliver, so rendering them here "
                              "would double them in the same payload")
     parser.add_argument("--shell", default=None,
-                        help="shell id this note is rendered for; its own "
-                             "channel drops out of Replay so the note does not "
-                             "replay the shell back at itself "
-                             "([note].shell_replay_exclude) and it uses its own "
-                             "replay marker. Unset = the unqualified (cli) set")
-    parser.add_argument("--replay", action="store_true",
-                        help="include the Replay section — headless consumers "
-                             "only (no UserPromptSubmit hook, so the note is "
-                             "their only replay outlet). Consumes this shell's "
-                             "replay marker; a window render must never pass it")
+                        help="shell id this note is rendered for "
+                             "([note].shell_replay_exclude). Unset = the "
+                             "unqualified (cli) render")
     args = parser.parse_args()
 
     cfg = config.load()
@@ -56,7 +46,7 @@ def main() -> None:
     conn = db.connect(cfg)
     try:
         data = note.gather(conn, cfg, now, window_sid=window_sid,
-                           shell=args.shell, replay=args.replay)
+                           shell=args.shell)
         if args.no_ct:
             data["ct_notes"] = []
         print(note.render(cfg, now, data))

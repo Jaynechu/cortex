@@ -584,6 +584,15 @@ def test_for_shell_cli_matches_the_unqualified_render(marrow_conn, cfg):
                                              "wx user turn"]
 
 
+def test_replay_marker_is_private_per_shell_and_consumed_once(marrow_conn, cfg):
+    """Reading Replay advances that shell's own marker: a second read of the
+    same shell shows nothing new, while another shell still sees the window."""
+    _shell_events(marrow_conn)
+    assert note._replay(marrow_conn, cfg, 6, 300, "tg")
+    assert note._replay(marrow_conn, cfg, 6, 300, "tg") == []
+    assert note._replay(marrow_conn, cfg, 6, 300, "wx")  # own marker, untouched
+
+
 def test_for_shell_unknown_shell_returns_the_config_untouched(cfg):
     assert note.for_shell(cfg, "wx") is cfg
 
@@ -684,8 +693,8 @@ def test_gather_end_to_end(marrow_conn, cfg, tmp_path, monkeypatch):
     assert "wake_parts" not in data  # Wake reason line retired
     assert "budget" not in data  # budget line retired
     assert data["replay"] == []  # window render -> no replay section
-    headless = note.gather(marrow_conn, cfg, NOW, replay=True)
-    assert len(headless["replay"]) == 1
+    with_replay = note.gather(marrow_conn, cfg, NOW, replay=True)
+    assert len(with_replay["replay"]) == 1
     assert "handoff" not in data  # handoff moved to SessionStart
     text = note.render(cfg, NOW, data)
     assert text.startswith("Now: ")
@@ -857,41 +866,14 @@ def _render_cli(tmp_path, monkeypatch, capsys, argv):
     return capsys.readouterr().out
 
 
-def test_note_render_shell_tg_drops_the_tg_channel_from_replay(
-        tmp_path, monkeypatch, capsys):
-    out = _render_cli(tmp_path, monkeypatch, capsys,
-                      ["--shell", "tg", "--replay"])
-    assert "tg shell self talk" not in out
-    assert "cli shell self talk" in out
-
-
-def test_note_render_default_and_cli_shell_render_identically(
-        tmp_path, monkeypatch, capsys):
-    """Unspecified = the cli shell's own render, byte-identical."""
-    plain = _render_cli(tmp_path / "a", monkeypatch, capsys, ["--replay"])
-    cli = _render_cli(tmp_path / "b", monkeypatch, capsys,
-                      ["--shell", "cli", "--replay"])
-    assert plain == cli
-    assert "tg shell self talk" in plain and "cli shell self talk" not in plain
-
-
-def test_note_render_without_replay_flag_carries_no_replay(
-        tmp_path, monkeypatch, capsys):
-    """Window renders (marrow render_module) must NOT carry Replay — turn_inject
-    is that session's outlet."""
+def test_note_render_carries_no_replay(tmp_path, monkeypatch, capsys):
+    """note_render never carries Replay — marrow's turn_inject is the single
+    replay channel for every session."""
     out = _render_cli(tmp_path, monkeypatch, capsys, [])
     assert "### Replay" not in out
     assert "tg shell self talk" not in out
-
-
-def test_note_render_replay_is_consumed_once(tmp_path, monkeypatch, capsys):
-    """Second render of the same shell shows nothing new — the marker advanced."""
-    first = _render_cli(tmp_path, monkeypatch, capsys, ["--shell", "tg", "--replay"])
-    assert "cli shell self talk" in first
-    monkeypatch.setattr("sys.argv", ["note_render", "--shell", "tg", "--replay"])
-    from cortex import note_render
-    note_render.main()
-    assert "### Replay" not in capsys.readouterr().out
+    out = _render_cli(tmp_path / "shelled", monkeypatch, capsys, ["--shell", "tg"])
+    assert "### Replay" not in out
 
 
 # --------------------------------------------------------------------------- #

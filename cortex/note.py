@@ -566,12 +566,10 @@ def gather(
     rotation, whereas wake_state.transcript was cleared at lie_down and is only
     re-set after this note is written. awake_since still comes from wake_state.
 
-    `replay` (default False): include the Replay section. OFF for every window
-    delivery — a window session has UserPromptSubmit hooks and marrow's
-    turn_inject is its single replay outlet. ON only for a headless consumer with
-    no hooks (the windowless wake fallback, true headless mode, the tg shell via
-    `note_render --replay`), where the note is the only channel. A render that
-    includes replay CONSUMES it: the marker advances, so nothing is passed twice.
+    `replay` (default False): include the Replay section. No live caller passes
+    True — marrow's turn_inject is the single replay channel for every session
+    (window and shell alike). Kept for a hookless consumer: a render that
+    includes replay CONSUMES it (the marker advances, nothing is passed twice).
 
     `settle` (default False): kick reasons / receipts / ct notes are pending-
     visible — a claim/read does NOT consume them; ONLY a real payload injection
@@ -612,8 +610,7 @@ def gather(
             awake_since_hm = since_dt.astimezone(_tz(cfg)).strftime("%H:%M")
         except (TypeError, ValueError):
             pass
-    # Replay is a headless-only section (see `replay` above). Reading it consumes
-    # it: _replay advances this shell's private marker.
+    # Reading Replay consumes it: _replay advances this shell's private marker.
     replay_events = _safe(
         _replay, conn, cfg,
         ncfg.get("replay_events", 4),
