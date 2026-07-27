@@ -692,3 +692,45 @@ def test_pacemaker_package_is_gone():
             importlib.import_module(name)
     # the relocated reconcile logic imports cleanly on its own
     importlib.reload(reconcile)
+
+
+def test_ctl_pause_stamps_the_wake_ledger_row(cfg, monkeypatch):
+    """T3: pausing a live cli window lands the pause on the ledger — the wake
+    row carries force_slept='ct-pause' and the shell it put down."""
+    from cortex import ctl, occupancy, transcript
+    monkeypatch.setattr(transcript, "window_tokens", lambda c: 1234)
+    conn = db.connect(cfg)
+    try:
+        now = datetime.now(_tz(cfg))
+        wid = occupancy.log_activation_wake_row(conn, now, "ctl")
+    finally:
+        conn.close()
+    wake_state.set_awake(cfg, wid, None)
+
+    line = ctl.cmd_pause(cfg)
+
+    assert "put down" in line
+    conn = db.connect(cfg)
+    try:
+        row = conn.execute(
+            "SELECT force_slept, shell, tokens FROM ct_wake_log WHERE id=?",
+            (wid,)).fetchone()
+        total = conn.execute("SELECT COUNT(*) FROM ct_wake_log").fetchone()[0]
+    finally:
+        conn.close()
+    assert (row["force_slept"], row["shell"], row["tokens"]) == ("ct-pause", "cli", 1234)
+    assert total == 1  # the pause stamps the open row, it does not add one
+
+
+def test_ctl_pause_without_live_window_writes_no_row(cfg):
+    """T3: a pause that finds no live window writes nothing to the ledger."""
+    from cortex import ctl
+    db.connect(cfg).close()  # ensure the table exists
+
+    ctl.cmd_pause(cfg)
+
+    conn = db.connect(cfg)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM ct_wake_log").fetchone()[0] == 0
+    finally:
+        conn.close()

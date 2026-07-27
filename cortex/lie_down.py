@@ -65,19 +65,28 @@ def _kill_watchdog(cfg: dict) -> None:
     p.unlink(missing_ok=True)
 
 
+def shell_id(cfg: dict) -> str:
+    """The shell this cortex process drives ([daemon].shell, default 'cli') —
+    the value stamped on its ct_wake_log rows. Non-cli shells never reach this
+    module (marrow routes them to their own host)."""
+    return str((cfg.get("daemon") or {}).get("shell") or "cli")
+
+
 def _record_tokens(conn, cfg: dict, state: dict, force_slept: str | None) -> int:
     """Record this wake's context occupancy (`tokens` — last assistant usage
     totals) into its ct_wake_log row. Occupancy grows monotonically within a
     window; the daily Cortex-Today metric sums each window's final occupancy
     (occupancy._finished_window_finals) plus the live window, so no per-wake
-    net delta is stored. Returns the recorded occupancy."""
+    net delta is stored. The shell is re-stamped here so the row always names
+    the shell that was put down, whoever inserted it. Returns the recorded
+    occupancy."""
     tokens = transcript.window_tokens(cfg)
     wid = state.get("wake_log_id")
     if wid:
         try:
             conn.execute(
-                "UPDATE ct_wake_log SET tokens=?, force_slept=? WHERE id=?",
-                (tokens or None, force_slept, wid))
+                "UPDATE ct_wake_log SET tokens=?, force_slept=?, shell=? WHERE id=?",
+                (tokens or None, force_slept, shell_id(cfg), wid))
             conn.commit()
         except Exception:  # column race with concurrent migrate; best-effort
             pass

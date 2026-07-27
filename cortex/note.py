@@ -300,13 +300,17 @@ def _peek_ct_notes(cfg: dict, conn: sqlite3.Connection) -> list[str]:
 # DB-sourced facts
 # --------------------------------------------------------------------------- #
 
-def _last_wake(conn: sqlite3.Connection, now: datetime) -> dict | None:
-    """Previous wake=1 row's age + force_slept marker. Skips a row logged for
-    the current wake (younger than the epsilon)."""
+def _last_wake(conn: sqlite3.Connection, now: datetime,
+               shell: str | None = None) -> dict | None:
+    """Previous wake=1 row's age + force_slept marker for THIS shell (rows carry
+    a shell column, default 'cli'), so one shell's force-slept marker can never
+    surface on another shell's page. Skips a row logged for the current wake
+    (younger than the epsilon)."""
     try:
         rows = conn.execute(
-            "SELECT ts, force_slept FROM ct_wake_log WHERE wake = 1 "
-            "ORDER BY ts DESC LIMIT 3"
+            "SELECT ts, force_slept FROM ct_wake_log WHERE wake = 1 AND shell = ? "
+            "ORDER BY ts DESC LIMIT 3",
+            (shell or CLI_SHELL,),
         ).fetchall()
     except sqlite3.OperationalError:
         return None
@@ -584,7 +588,7 @@ def gather(
 
     from cortex import wake_state
 
-    last_wake = _safe(_last_wake, conn, now)
+    last_wake = _safe(_last_wake, conn, now, shell)
     last_active = _safe(_last_active, conn, cfg, now)
 
     ws = {}
@@ -676,9 +680,11 @@ def render(cfg: dict, now: datetime, data: dict) -> str:
     if active:
         seg = f"Last active: {active['minutes_ago']}min ago"
         # "auto" = routine proxy sleep on the silence path -> render neutrally,
-        # never as a force incident. Only real force incidents get the tag.
-        if last and last.get("force_slept") and last.get("force_slept") != "auto":
-            seg += " (force-slept mid-task)"
+        # never as a force incident. Only real force incidents get the tag, and
+        # the tag names the raw reason (ct-pause / fuse / stale).
+        reason = last.get("force_slept") if last else None
+        if reason and reason != "auto":
+            seg += f" (force-slept: {reason})"
         now_seg += f" | {seg}"
     header.append(now_seg)
 

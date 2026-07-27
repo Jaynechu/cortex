@@ -395,7 +395,7 @@ def test_render_title_empty_omits_it(cfg):
 def test_render_force_slept_marker(cfg):
     data = {"last_wake": {"minutes_ago": 40, "force_slept": "timeout"}}
     text = note.render(cfg, NOW, data)
-    assert "Last active: 40min ago (force-slept mid-task)" in text
+    assert "Last active: 40min ago (force-slept: timeout)" in text
 
 
 def test_render_auto_sleep_is_neutral(cfg):
@@ -404,7 +404,7 @@ def test_render_auto_sleep_is_neutral(cfg):
     data = {"last_wake": {"minutes_ago": 40, "force_slept": "auto"}}
     text = note.render(cfg, NOW, data)
     assert "Last active: 40min ago" in text
-    assert "force-slept mid-task" not in text
+    assert "force-slept" not in text
 
 
 def test_render_no_wake_line_ever(cfg):
@@ -469,7 +469,7 @@ def test_render_last_active_falls_back_to_wake_minutes(cfg):
     'Last active:' label and the force-slept suffix."""
     data = {"last_wake": {"minutes_ago": 22, "force_slept": "timeout"}}
     text = note.render(cfg, NOW, data)
-    assert "Last active: 22min ago (force-slept mid-task)" in text
+    assert "Last active: 22min ago (force-slept: timeout)" in text
 
 
 def test_render_last_active_overrides_wake_minutes(cfg):
@@ -480,7 +480,7 @@ def test_render_last_active_overrides_wake_minutes(cfg):
         "last_active": {"minutes_ago": 3},
     }
     text = note.render(cfg, NOW, data)
-    assert "Last active: 3min ago (force-slept mid-task)" in text
+    assert "Last active: 3min ago (force-slept: timeout)" in text
 
 
 def test_replay_events_channel_time_and_truncation(marrow_conn, cfg):
@@ -892,3 +892,66 @@ def test_note_render_replay_is_consumed_once(tmp_path, monkeypatch, capsys):
     from cortex import note_render
     note_render.main()
     assert "### Replay" not in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- #
+# per-shell wake ledger (T1) + force-slept reason copy (T4)
+# --------------------------------------------------------------------------- #
+
+def test_last_wake_is_scoped_to_its_own_shell(marrow_conn):
+    """T1: a cli row never surfaces for the tg shell, and vice versa — one
+    shell's force-slept marker can never appear on another shell's page."""
+    cli_ts = (NOW - timedelta(minutes=30)).astimezone(ZoneInfo("UTC")).isoformat()
+    tg_ts = (NOW - timedelta(minutes=90)).astimezone(ZoneInfo("UTC")).isoformat()
+    marrow_conn.executemany(
+        "INSERT INTO ct_wake_log (ts, wake, dry_run, force_slept, shell) "
+        "VALUES (?, 1, 0, ?, ?)",
+        [(cli_ts, "ct-pause", "cli"), (tg_ts, None, "tg")],
+    )
+    marrow_conn.commit()
+
+    tg = note._last_wake(marrow_conn, NOW, "tg")
+    assert tg["minutes_ago"] == 90 and tg["force_slept"] is None
+    cli = note._last_wake(marrow_conn, NOW, "cli")
+    assert cli["minutes_ago"] == 30 and cli["force_slept"] == "ct-pause"
+    # No shell given = the cli render (unqualified default).
+    assert note._last_wake(marrow_conn, NOW)["ts"] == cli_ts
+
+
+def test_last_wake_none_when_other_shell_only(marrow_conn):
+    """T1: the tg page shows nothing when only cli rows exist."""
+    ts = (NOW - timedelta(minutes=30)).astimezone(ZoneInfo("UTC")).isoformat()
+    marrow_conn.execute(
+        "INSERT INTO ct_wake_log (ts, wake, dry_run, force_slept, shell) "
+        "VALUES (?, 1, 0, 'ct-pause', 'cli')", (ts,))
+    marrow_conn.commit()
+    assert note._last_wake(marrow_conn, NOW, "tg") is None
+
+
+def test_gather_render_hides_other_shells_force_slept(marrow_conn, cfg):
+    """T1 end-to-end: a cli force-slept row does not reach a tg render."""
+    ts = (NOW - timedelta(minutes=30)).astimezone(ZoneInfo("UTC")).isoformat()
+    marrow_conn.execute(
+        "INSERT INTO ct_wake_log (ts, wake, dry_run, force_slept, shell) "
+        "VALUES (?, 1, 0, 'ct-pause', 'cli')", (ts,))
+    marrow_conn.commit()
+    tg_text = note.render(cfg, NOW, note.gather(marrow_conn, cfg, NOW, shell="tg"))
+    assert "force-slept" not in tg_text
+    cli_text = note.render(cfg, NOW, note.gather(marrow_conn, cfg, NOW, shell="cli"))
+    assert "(force-slept: ct-pause)" in cli_text
+
+
+def test_render_force_slept_shows_raw_reason(cfg):
+    """T4: the marker names the row's force_slept value."""
+    for reason in ("ct-pause", "fuse", "stale"):
+        text = note.render(cfg, NOW, {"last_wake": {"minutes_ago": 5,
+                                                    "force_slept": reason}})
+        assert f"(force-slept: {reason})" in text
+
+
+def test_render_force_slept_silent_for_auto_and_empty(cfg):
+    """T4: 'auto' (routine) and empty stay silent."""
+    for reason in ("auto", "", None):
+        text = note.render(cfg, NOW, {"last_wake": {"minutes_ago": 5,
+                                                    "force_slept": reason}})
+        assert "force-slept" not in text

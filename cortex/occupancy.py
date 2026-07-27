@@ -226,18 +226,20 @@ def _finished_window_finals(conn: sqlite3.Connection, now: datetime) -> int:
 # --------------------------------------------------------------------------
 
 def log_activation_wake_row(conn: sqlite3.Connection, now: datetime,
-                            reasons: str) -> int | None:
+                            reasons: str, shell: str = "cli") -> int | None:
     """Insert one wake=1 activation row for a wake that no scheduled decision
     row already covers (user/ctl/reconcile/rotate wakes). `reasons` tags the
     origin (e.g. 'user', 'ctl', 'reconcile', 'rotate') so the wakeup note's
     "Last wake" segment sees every real wake, while force_slept-based auto-rate
     stats stay unaffected (this row's force_slept is NULL until lie_down sets
-    it). Returns the new row id, or None on any error (best-effort — a failed
-    log must never block the wake)."""
+    it). `shell` stamps which shell the wake belongs to — every caller here is
+    the cli window. Returns the new row id, or None on any error (best-effort —
+    a failed log must never block the wake)."""
     try:
         cur = conn.execute(
-            "INSERT INTO ct_wake_log (ts, wake, dry_run, reasons) VALUES (?, 1, 0, ?)",
-            (now.astimezone(ZoneInfo("UTC")).isoformat(), reasons),
+            "INSERT INTO ct_wake_log (ts, wake, dry_run, reasons, shell) "
+            "VALUES (?, 1, 0, ?, ?)",
+            (now.astimezone(ZoneInfo("UTC")).isoformat(), reasons, shell),
         )
         conn.commit()
         return int(cur.lastrowid)
