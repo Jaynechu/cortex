@@ -6,7 +6,7 @@ line rather than crashing the wake. render() is pure — no I/O, no DB — so it
 can be unit-tested with synthetic data.
 
 Layout: a header block (Now / Active), then `---`-separated blocks
-for pending self-schedule. The handoff injects at
+for pending self-schedule and location (📍). The handoff injects at
 SessionStart (marrow), not here. Cal/Rem lines retired (global inject pending).
 The old "Wake:" reason line is gone — reasons carry no signal (desire engine
 retired, wander-only).
@@ -388,6 +388,97 @@ def _pending(cfg: dict, now: datetime) -> list[dict]:
     return out
 
 
+def _location_path(cfg: dict) -> Path:
+    """marrow's OwnTracks receiver state file (ct-location-sensor T2 schema).
+    Fixed path, no cortex config key (open-source default: absent file -> no
+    line, feature fully off)."""
+    return config.marrow_config_dir(cfg) / "state" / "sensors" / "location.json"
+
+
+def _location(cfg: dict) -> dict | None:
+    """Parsed location.json, or None when absent/corrupt (no line rendered)."""
+    try:
+        raw = json.loads(_location_path(cfg).read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _parse_local(ts_iso: str, cfg: dict) -> datetime:
+    """location.json timestamps are ISO local (naive or offset-aware); a naive
+    string is the configured local wall clock, never UTC."""
+    dt = datetime.fromisoformat(ts_iso)
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=_tz(cfg))
+
+
+def _loc_hm(ts_iso: str, now: datetime, cfg: dict) -> str:
+    """HH:MM, weekday-prefixed (`Tue 22:30`) when the clock is not from today."""
+    dt = _parse_local(ts_iso, cfg).astimezone(_tz(cfg))
+    hm = dt.strftime("%H:%M")
+    return hm if dt.date() == now.date() else f"{dt.strftime('%a')} {hm}"
+
+
+def _loc_duration(delta: timedelta) -> str:
+    """<60m -> `45m`; else `2h15m`."""
+    minutes = max(0, int(delta.total_seconds() // 60))
+    if minutes < 60:
+        return f"{minutes}m"
+    return f"{minutes // 60}h{minutes % 60}m"
+
+
+def _render_location(cfg: dict, now: datetime, loc: dict) -> str | None:
+    """The 📍 line (plan ct-location-sensor T5, 7 locked shapes). Priority:
+    stale signal loss > cold-start seed > out (leave, no zone) > arrived (with
+    or without a prior hop). Any field the locked shapes don't cover -> no
+    line — never invent a time or zone."""
+    zone = loc.get("zone")
+    since = loc.get("since")
+    seeded = bool(loc.get("seeded"))
+    prev = loc.get("prev") if isinstance(loc.get("prev"), dict) else None
+    last_seen = loc.get("last_seen")
+
+    if last_seen:
+        try:
+            elapsed = now - _parse_local(last_seen, cfg)
+        except (TypeError, ValueError):
+            elapsed = None
+        if elapsed is not None and elapsed.total_seconds() > 24 * 3600:
+            name = zone or (prev.get("zone") if prev else None)
+            if not name:
+                return None
+            return f"📍 {name} (no signal {int(elapsed.total_seconds() // 3600)}h)"
+
+    if zone and seeded and not since:
+        return f"📍 {zone}"
+
+    if not zone:
+        if not since or not prev or not prev.get("zone"):
+            return None
+        try:
+            hm = _loc_hm(since, now, cfg)
+            dur = _loc_duration(now - _parse_local(since, cfg))
+        except (TypeError, ValueError):
+            return None
+        return f"📍 {hm} Left {prev['zone']} ({dur})"
+
+    if not since:
+        return None
+    try:
+        hm = _loc_hm(since, now, cfg)
+        dur = _loc_duration(now - _parse_local(since, cfg))
+    except (TypeError, ValueError):
+        return None
+    cur_hop = f"{hm} Arrived {zone}"
+    if prev and prev.get("zone") and prev.get("ts"):
+        try:
+            p_hm = _loc_hm(prev["ts"], now, cfg)
+        except (TypeError, ValueError):
+            return f"📍 {cur_hop} ({dur})"
+        verb = "Left" if prev.get("event") == "leave" else "Arrived"
+        return f"📍 {p_hm} {verb} {prev['zone']} → {cur_hop} ({dur})"
+    return f"📍 {cur_hop} ({dur})"
+
+
 # --------------------------------------------------------------------------- #
 # gather / render
 # --------------------------------------------------------------------------- #
@@ -497,6 +588,7 @@ def gather(
         "paused": paused,
         "active_app": _safe(_frontmost_app),
         "pending": _safe(_pending, cfg, now, default=[]),
+        "location": _safe(_location, cfg),
         "window_sid": window_sid,
         "awake_since_hm": awake_since_hm,
     }
@@ -562,6 +654,14 @@ def render(cfg: dict, now: datetime, data: dict) -> str:
     if pending:
         segs = [f"due {p['hm']} {p['intent']}".rstrip() for p in pending]
         blocks.append("Pending self-schedule: " + " · ".join(segs))
+
+    # 📍 location line (ct-location-sensor T5): absent/corrupt location.json ->
+    # no line (open-source off state), never a section header.
+    loc = data.get("location")
+    if loc:
+        line = _safe(_render_location, cfg, now, loc)
+        if line:
+            blocks.append(line)
 
     note_text = "\n\n---\n\n".join(blocks)
     turn_end = _note_cfg(cfg).get("turn_end_text", "")

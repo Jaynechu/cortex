@@ -682,6 +682,118 @@ def test_gather_survives_naive_due_at_self_schedule(marrow_conn, cfg, tmp_path, 
 
 
 # --------------------------------------------------------------------------- #
+# location (📍) — ct-location-sensor T5, 7 locked shapes
+# --------------------------------------------------------------------------- #
+
+def _write_location(tmp_path, monkeypatch, data):
+    p = tmp_path / "location.json"
+    p.write_text(json.dumps(data), encoding="utf-8")
+    monkeypatch.setattr(note, "_location_path", lambda c: p)
+    return p
+
+
+def test_location_missing_file_no_line(cfg, tmp_path, monkeypatch):
+    monkeypatch.setattr(note, "_location_path", lambda c: tmp_path / "nope.json")
+    assert note._location(cfg) is None
+    text = note.render(cfg, NOW, {"location": note._location(cfg)})
+    assert "📍" not in text
+
+
+def test_location_corrupt_file_no_line(cfg, tmp_path, monkeypatch):
+    p = tmp_path / "location.json"
+    p.write_text("not json", encoding="utf-8")
+    monkeypatch.setattr(note, "_location_path", lambda c: p)
+    assert note._location(cfg) is None
+
+
+def test_render_location_two_hop(cfg, tmp_path, monkeypatch):
+    _write_location(tmp_path, monkeypatch, {
+        "zone": "Deakin", "since": "2026-07-08T12:15:00", "seeded": False,
+        "prev": {"event": "leave", "zone": "Home", "ts": "2026-07-08T08:30:00"},
+        "last_seen": "2026-07-08T14:00:00",
+    })
+    loc = note._location(cfg)
+    text = note.render(cfg, NOW, {"location": loc})
+    assert "📍 08:30 Left Home → 12:15 Arrived Deakin (2h15m)" in text
+
+
+def test_render_location_no_prev(cfg, tmp_path, monkeypatch):
+    _write_location(tmp_path, monkeypatch, {
+        "zone": "Deakin", "since": "2026-07-08T12:15:00", "seeded": False,
+        "prev": None, "last_seen": "2026-07-08T14:00:00",
+    })
+    loc = note._location(cfg)
+    text = note.render(cfg, NOW, {"location": loc})
+    assert "📍 12:15 Arrived Deakin (2h15m)" in text
+
+
+def test_render_location_out_leave(cfg, tmp_path, monkeypatch):
+    _write_location(tmp_path, monkeypatch, {
+        "zone": None, "since": "2026-07-08T13:45:00", "seeded": False,
+        "prev": {"event": "enter", "zone": "Home", "ts": "2026-07-08T09:00:00"},
+        "last_seen": "2026-07-08T14:00:00",
+    })
+    loc = note._location(cfg)
+    text = note.render(cfg, NOW, {"location": loc})
+    assert "📍 13:45 Left Home (45m)" in text
+
+
+def test_render_location_cold_start_seeded(cfg, tmp_path, monkeypatch):
+    _write_location(tmp_path, monkeypatch, {
+        "zone": "Deakin", "since": None, "seeded": True,
+        "prev": None, "last_seen": "2026-07-08T14:00:00",
+    })
+    loc = note._location(cfg)
+    text = note.render(cfg, NOW, {"location": loc})
+    assert "📍 Deakin" in text
+    assert "📍 Deakin (" not in text  # no clock, no duration ever invented
+
+
+def test_render_location_cross_day_weekday_prefix(cfg, tmp_path, monkeypatch):
+    _write_location(tmp_path, monkeypatch, {
+        "zone": "Deakin", "since": "2026-07-08T07:00:00", "seeded": False,
+        "prev": {"event": "leave", "zone": "Home", "ts": "2026-07-07T22:30:00"},
+        "last_seen": "2026-07-08T14:00:00",
+    })
+    loc = note._location(cfg)
+    text = note.render(cfg, NOW, {"location": loc})
+    assert "📍 Tue 22:30 Left Home → 07:00 Arrived Deakin (7h30m)" in text
+
+
+def test_loc_duration_formatting(cfg):
+    assert note._loc_duration(timedelta(minutes=39)) == "39m"
+    assert note._loc_duration(timedelta(minutes=135)) == "2h15m"
+
+
+def test_render_location_stale_no_signal(cfg, tmp_path, monkeypatch):
+    stale_last_seen = (NOW - timedelta(hours=26)).replace(tzinfo=None).isoformat()
+    _write_location(tmp_path, monkeypatch, {
+        "zone": "Deakin", "since": "2026-07-08T07:00:00", "seeded": False,
+        "prev": None, "last_seen": stale_last_seen,
+    })
+    loc = note._location(cfg)
+    text = note.render(cfg, NOW, {"location": loc})
+    assert "📍 Deakin (no signal 26h)" in text
+
+
+def test_gather_location_uses_location_path(cfg, tmp_path, monkeypatch):
+    import sqlite3
+
+    _write_location(tmp_path, monkeypatch, {
+        "zone": "Deakin", "since": None, "seeded": True,
+        "prev": None, "last_seen": "2026-07-08T14:00:00",
+    })
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    make_events_table(conn)
+    data = note.gather(conn, cfg, NOW)
+    assert data["location"] == {
+        "zone": "Deakin", "since": None, "seeded": True,
+        "prev": None, "last_seen": "2026-07-08T14:00:00",
+    }
+
+
+# --------------------------------------------------------------------------- #
 # Window-line SID override (caller transcript beats wake_state)
 # --------------------------------------------------------------------------- #
 
