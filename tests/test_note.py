@@ -93,13 +93,12 @@ def test_render_full_note(cfg):
     }
     text = note.render(cfg, NOW, data)
     assert "Wake:" not in text  # reason line retired
-    assert text.startswith("Now: 14:30 Wed | Last active: 12min ago")
+    assert "Now:" not in text  # Now line deleted — hook injects current time
+    assert text.startswith("🐆 Last active: 12min ago | 💻 Current active: Google Chrome")
     assert "Plan Used" not in text  # budget line retired
-    assert "Active (Mac): Google Chrome" in text
-    # header = exactly the two lines above, nothing else
+    # header = exactly the merged line above, nothing else
     assert text.split("\n\n---\n\n")[0].split("\n") == [
-        "Now: 14:30 Wed | Last active: 12min ago",
-        "Active (Mac): Google Chrome",
+        "🐆 Last active: 12min ago | 💻 Current active: Google Chrome",
     ]
     assert "Pending self-schedule: due 00:18 去看看老婆睡了没" in text
     # block separators
@@ -111,7 +110,8 @@ def test_render_full_note(cfg):
 def test_render_omits_absent_lines(cfg):
     text = note.render(cfg, NOW, {})
     assert "Wake:" not in text  # reason line retired
-    assert text.startswith("Now: 14:30 Wed")
+    assert "Now:" not in text  # Now line deleted
+    assert text == ""  # nothing to report -> empty header, no lines at all
     assert "Last active:" not in text
     assert "Plan Used:" not in text
     assert "Active (Mac):" not in text
@@ -378,12 +378,12 @@ def test_render_turn_end_line_appears_with_custom_template(cfg):
 def test_render_title_prepended_single_newline(cfg):
     cfg["note"]["title"] = "📮 小道消息"
     text = note.render(cfg, NOW, {})
-    assert text.startswith("📮 小道消息\nNow: ")
+    assert text == "📮 小道消息\n"
 
 
 def test_render_title_empty_omits_it(cfg):
     text = note.render(cfg, NOW, {})
-    assert text.startswith("Now: ")
+    assert text == ""
     assert "小道消息" not in text
 
 
@@ -414,7 +414,7 @@ def test_render_pause_tag_without_activity_line(cfg):
     """Nothing to report on activity -> the tag still shows: the pause is a fact
     about the shell, not about the last reply."""
     text = note.render(cfg, NOW, {"paused": {"reason": "auto_fuse"}})
-    assert text.startswith("Now: ") and "(paused: auto_fuse)" in text
+    assert text.startswith("🐆 ") and "(paused: auto_fuse)" in text
 
 
 def test_render_no_wake_line_ever(cfg):
@@ -628,7 +628,7 @@ def test_gather_end_to_end(marrow_conn, cfg, tmp_path, monkeypatch):
     assert "replay" not in data  # Replay section deleted — turn_inject is the channel
     assert "handoff" not in data  # handoff moved to SessionStart
     text = note.render(cfg, NOW, data)
-    assert text.startswith("Now: ")
+    assert "Now:" not in text  # Now line deleted
     assert "Wake:" not in text
 
 
@@ -776,6 +776,46 @@ def test_render_location_stale_no_signal(cfg, tmp_path, monkeypatch):
     assert "📍 Deakin (no signal 26h)" in text
 
 
+def test_render_locked_header_shape_tag_then_location_then_merged_line(cfg):
+    """The exact locked header (coordinator spec): machine tag, then 📍, then
+    one merged "🐆 Last active ... | 💻 Current active ..." line — no "Now:"
+    line anywhere."""
+    cfg["note"]["wake_machine_tag"] = (
+        "[AUTOMATED WAKE SIGNAL — Note delivered by the scheduler]")
+    data = {
+        "location": {
+            "zone": "Deakin", "since": "2026-07-08T09:00:00", "seeded": False,
+            "prev": {"event": "leave", "zone": "Home", "ts": "2026-07-08T08:30:00"},
+            "last_seen": "2026-07-08T14:00:00",
+        },
+        "last_active": {"minutes_ago": 19},
+        "active_app": "Notion",
+    }
+    text = note.render(cfg, NOW, data)
+    assert text == (
+        "[AUTOMATED WAKE SIGNAL — Note delivered by the scheduler]\n"
+        "📍 08:30 Left Home → 09:00 Arrived Deakin (5h30m)\n"
+        "🐆 Last active: 19min ago | 💻 Current active: Notion"
+    )
+
+
+def test_render_location_omitted_when_no_state_active_line_unaffected(cfg):
+    """No location state -> merged active line is still the first (only)
+    header line — unchanged position logic, just no 📍 line."""
+    data = {"last_active": {"minutes_ago": 19}, "active_app": "Notion"}
+    text = note.render(cfg, NOW, data)
+    assert text == "🐆 Last active: 19min ago | 💻 Current active: Notion"
+    assert "📍" not in text
+
+
+def test_render_merged_line_active_only_no_pipe(cfg):
+    """No Active(Mac) app -> just the 🐆 half, no trailing pipe."""
+    data = {"last_active": {"minutes_ago": 19}}
+    text = note.render(cfg, NOW, data)
+    assert text == "🐆 Last active: 19min ago"
+    assert "|" not in text
+
+
 def test_gather_location_uses_location_path(cfg, tmp_path, monkeypatch):
     import sqlite3
 
@@ -868,7 +908,8 @@ def test_note_render_main_prints_fresh_note_no_writes(tmp_path, monkeypatch, cap
 
     note_render.main()
     out = capsys.readouterr().out
-    assert "Now: " in out
+    assert "AUTOMATED WAKE SIGNAL" in out  # machine tag (default on)
+    assert "Now: " not in out  # Now line deleted
     assert "Window:" not in out  # Window/SID line retired
     # no wake_state written, DB not mutated by a fresh render
     assert not (tmp_path / "ws.json").exists()
@@ -913,13 +954,15 @@ def test_note_render_carries_no_replay(tmp_path, monkeypatch, capsys):
     """note_render never carries Replay — marrow's turn_inject is the single
     replay channel for every session."""
     out = _render_cli(tmp_path, monkeypatch, capsys, [])
-    assert "Now:" in out
+    assert "AUTOMATED WAKE SIGNAL" in out  # machine tag (default on)
+    assert "Now:" not in out  # Now line deleted
     assert "### Replay" not in out
     assert "tg shell self talk" not in out
     # the live tg bridge shape (note_render_cmd) still renders a note body
     out = _render_cli(tmp_path / "shelled", monkeypatch, capsys,
                       ["--no-ct", "--shell", "tg"])
-    assert "Now:" in out
+    assert "AUTOMATED WAKE SIGNAL" in out
+    assert "Now:" not in out
     assert "### Replay" not in out
 
 

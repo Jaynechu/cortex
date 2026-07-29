@@ -5,8 +5,9 @@ probe. Every external source is wrapped in try/except so a failure omits its
 line rather than crashing the wake. render() is pure — no I/O, no DB — so it
 can be unit-tested with synthetic data.
 
-Layout: a header block (Now / Active), then `---`-separated blocks
-for pending self-schedule and location (📍). The handoff injects at
+Layout: a header block (📍 location, then merged Last-active/Current-active),
+then `---`-separated blocks for pending self-schedule. No "Now: HH:MM Ddd" line
+— the per-turn hook already injects current time. The handoff injects at
 SessionStart (marrow), not here. Cal/Rem lines retired (global inject pending).
 The old "Wake:" reason line is gone — reasons carry no signal (desire engine
 retired, wander-only).
@@ -597,37 +598,55 @@ def gather(
 def render(cfg: dict, now: datetime, data: dict) -> str:
     """Pure assembly: data dict -> wakeup note text. No DB / no I/O.
 
-    Layout (plan §一): a header block (Now / Active), then
-    `---`-separated blocks for pending self-schedule, then a final
-    turn-end reminder line (note.turn_end_text, every render; "" omits it).
-    Handoff no longer lives here — it is injected at SessionStart on a
-    fresh window."""
+    Layout (locked header format): machine tag, then 📍 location (if any),
+    then one merged "🐆 Last active ... | 💻 Current active ..." line, then
+    `---`-separated blocks for pending self-schedule, then a final turn-end
+    reminder line (note.turn_end_text, every render; "" omits it). No "Now:
+    HH:MM Ddd" line — the per-turn hook already injects current time. Handoff
+    no longer lives here — it is injected at SessionStart on a fresh window."""
     header: list[str] = []
 
-    now_seg = f"Now: {now.strftime('%H:%M %a')}"
+    # 📍 location line (ct-location-sensor T5): the first header line, right
+    # after the machine-tag line (prepended below) — absent/corrupt
+    # location.json -> no line, never a section header.
+    loc = data.get("location")
+    if loc:
+        loc_line = _safe(_render_location, cfg, now, loc)
+        if loc_line:
+            header.append(loc_line)
+
     last = data.get("last_wake")
     # Minutes from this shell's own cortex session's last reply (ct_activity by
     # sid); fall back to the prior wake row's age so the line never disappears
     # when activity is missing.
     active = data.get("last_active") or last
-    if active:
-        now_seg += f" | Last active: {active['minutes_ago']}min ago"
     # Pause tag: the circuit breaker holding THIS shell (note.pause_tag; ""
     # omits). Per-shell by construction — scope cli tags only cli, tg only tg.
     paused = data.get("paused")
     tag = str(_note_cfg(cfg).get("pause_tag") or "")
+    pause_suffix = ""
     if paused and tag:
         try:
-            tag = tag.format(reason=paused.get("reason", "?"),
-                             scope=paused.get("scope", "?"))
+            pause_suffix = " " + tag.format(reason=paused.get("reason", "?"),
+                                            scope=paused.get("scope", "?"))
         except (KeyError, IndexError, ValueError):
-            pass
-        now_seg += f" {tag}"
-    header.append(now_seg)
+            pause_suffix = " " + tag
+
+    active_seg = None
+    if active:
+        active_seg = f"🐆 Last active: {active['minutes_ago']}min ago{pause_suffix}"
+    elif pause_suffix:
+        # The pause is a fact about the shell, not about the last reply — it
+        # still shows even without an activity line.
+        active_seg = f"🐆{pause_suffix}"
 
     app = data.get("active_app")
-    if app:
-        header.append(f"Active (Mac): {app}")
+    if active_seg and app:
+        header.append(f"{active_seg} | 💻 Current active: {app}")
+    elif active_seg:
+        header.append(active_seg)
+    elif app:
+        header.append(f"💻 Current active: {app}")
 
     blocks: list[str] = ["\n".join(header)]
 
@@ -655,22 +674,14 @@ def render(cfg: dict, now: datetime, data: dict) -> str:
         segs = [f"due {p['hm']} {p['intent']}".rstrip() for p in pending]
         blocks.append("Pending self-schedule: " + " · ".join(segs))
 
-    # 📍 location line (ct-location-sensor T5): absent/corrupt location.json ->
-    # no line (open-source off state), never a section header.
-    loc = data.get("location")
-    if loc:
-        line = _safe(_render_location, cfg, now, loc)
-        if line:
-            blocks.append(line)
-
     note_text = "\n\n---\n\n".join(blocks)
     turn_end = _note_cfg(cfg).get("turn_end_text", "")
     if turn_end:
         note_text += "\n\n" + turn_end.format_map(_ClampDefaults(config.wake_clamps(cfg)))
 
     # Title and machine tag join the header block with a single newline (no
-    # blank line): the approved note opens with tag / "Now:" / "Active (Mac):"
-    # on three consecutive lines, in every shape.
+    # blank line): the locked note opens with tag / 📍 (if any) / merged
+    # Last-active·Current-active line, on consecutive lines, in every shape.
     title = _note_cfg(cfg).get("title", "")
     if title:
         note_text = title + "\n" + note_text
