@@ -28,6 +28,7 @@ DEFAULT_CORTEX_HOME = Path.home() / ".config" / "marrow" / "cortex"
 DEFAULT_NY_DB_PAGES = Path.home() / "Desktop" / "NY" / "db-pages"
 DEFAULT_MARROW_REPO = Path.home() / "CC-Lab" / "marrow"
 DEFAULT_WAKE_TIMING_LOG = Path.home() / ".config" / "marrow" / "logs" / "wake_timing.log"
+DEFAULT_AWAY_IDLE_MIN = 20
 
 # Single source of truth for the machine-line marker family (wake bell /
 # free-round / fuse / ctl / slash-command). Referenced by _DEFAULTS below AND
@@ -245,6 +246,26 @@ def shell_enabled(cfg: dict, shell: str = "cli") -> bool:
     except (OSError, ValueError, TypeError) as e:
         logger.warning("shell_enabled: marrow config read failed (%s) — using default ['cli']", e)
     return shell.strip().lower() in [str(s).strip().lower() for s in raw]
+
+
+def away_idle_min(cfg: dict) -> int:
+    """Minutes of HID idle before the wake note reports Away.
+
+    The shared marrow config's [cortex] section is the single source; missing,
+    unreadable, or invalid values fall back to 20 minutes.
+    """
+    p = marrow_config_dir(cfg) / "config.toml"
+    try:
+        if p.is_file():
+            with p.open("rb") as f:
+                raw = (tomllib.load(f).get("cortex") or {}).get(
+                    "away_idle_min", DEFAULT_AWAY_IDLE_MIN)
+            value = int(raw)
+            if value >= 0:
+                return value
+    except (OSError, ValueError, TypeError):
+        pass
+    return DEFAULT_AWAY_IDLE_MIN
 
 
 def shell_id(cfg: dict) -> str:

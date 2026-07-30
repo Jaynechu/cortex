@@ -1,11 +1,11 @@
 """Wakeup note: the床头字条 (bedside note) handed to a cortex session on wake.
 
-gather() is the I/O layer — DB reads plus a best-effort macOS frontmost-app
-probe. Every external source is wrapped in try/except so a failure omits its
-line rather than crashing the wake. render() is pure — no I/O, no DB — so it
-can be unit-tested with synthetic data.
+gather() is the I/O layer — DB reads plus best-effort macOS session, HID-idle,
+and frontmost-app probes. Every external source is wrapped in try/except so a
+failure omits its line rather than crashing the wake. render() is pure — no
+I/O, no DB — so it can be unit-tested with synthetic data.
 
-Layout: a header block (📍 location, then merged Last-active/Current-active),
+Layout: a header block (📍 location, then merged Last-active/computer-state),
 then `---`-separated blocks for pending self-schedule. No "Now: HH:MM Ddd" line
 — the per-turn hook already injects current time. The handoff injects at
 SessionStart (marrow), not here. Cal/Rem lines retired (global inject pending).
@@ -14,7 +14,9 @@ retired, wander-only).
 """
 from __future__ import annotations
 
+import ctypes
 import json
+import re
 import subprocess
 import sqlite3
 from datetime import datetime, timedelta, tzinfo
@@ -337,12 +339,83 @@ CLI_SHELL = "cli"
 
 
 # --------------------------------------------------------------------------- #
-# External best-effort facts (cadence CLI, osascript, handoff file)
+# External best-effort facts (macOS session/HID/app state, handoff file)
 # --------------------------------------------------------------------------- #
 
+_APPLICATION_SERVICES = (
+    "/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices"
+)
+_CORE_FOUNDATION = (
+    "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
+)
+_CF_STRING_ENCODING_UTF8 = 0x08000100
+
+
+def _screen_locked() -> bool | None:
+    """macOS login-session lock state via CoreGraphics; None on failure."""
+    session = None
+    keys = []
+    try:
+        cg = ctypes.CDLL(_APPLICATION_SERVICES)
+        cf = ctypes.CDLL(_CORE_FOUNDATION)
+        cg.CGSessionCopyCurrentDictionary.restype = ctypes.c_void_p
+        cg.CGSessionCopyCurrentDictionary.argtypes = []
+        cf.CFStringCreateWithCString.restype = ctypes.c_void_p
+        cf.CFStringCreateWithCString.argtypes = [
+            ctypes.c_void_p, ctypes.c_char_p, ctypes.c_uint32]
+        cf.CFDictionaryGetValue.restype = ctypes.c_void_p
+        cf.CFDictionaryGetValue.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+        cf.CFBooleanGetValue.restype = ctypes.c_bool
+        cf.CFBooleanGetValue.argtypes = [ctypes.c_void_p]
+        cf.CFRelease.argtypes = [ctypes.c_void_p]
+
+        session = cg.CGSessionCopyCurrentDictionary()
+        if not session:
+            return None
+
+        values = []
+        for name in (b"kCGSSessionOnConsoleKey",
+                     b"CGSSessionScreenIsLocked"):
+            key = cf.CFStringCreateWithCString(
+                None, name, _CF_STRING_ENCODING_UTF8)
+            if not key:
+                return None
+            keys.append(key)
+            value = cf.CFDictionaryGetValue(session, key)
+            if not value:
+                return None
+            values.append(bool(cf.CFBooleanGetValue(value)))
+        on_console, screen_locked = values
+        return not on_console or screen_locked
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+    finally:
+        if "cf" in locals():
+            try:
+                for key in keys:
+                    cf.CFRelease(key)
+                if session:
+                    cf.CFRelease(session)
+            except (AttributeError, TypeError, ValueError):
+                pass
+
+
+def _idle_seconds() -> int | None:
+    """Seconds since the last keyboard/mouse event from IOHIDSystem."""
+    try:
+        out = subprocess.run(
+            ["ioreg", "-c", "IOHIDSystem"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if out.returncode != 0:
+        return None
+    match = re.search(r'"HIDIdleTime"\s*=\s*(\d+)', out.stdout)
+    return int(match.group(1)) // 1_000_000_000 if match else None
+
 def _frontmost_app() -> str | None:
-    """macOS frontmost application name. Locked screen / login window / any
-    failure -> None (line omitted)."""
+    """macOS frontmost application name; loginwindow/failure -> None."""
     try:
         out = subprocess.run(
             ["osascript", "-e",
@@ -356,6 +429,46 @@ def _frontmost_app() -> str | None:
     if out.returncode != 0 or not name or name in ("loginwindow",):
         return None
     return name
+
+
+def _computer_status(cfg: dict) -> dict | None:
+    """Best-effort Locked/Away/Active state for the wake-note computer segment."""
+    locked = _screen_locked()
+    idle = _idle_seconds()
+    if idle is None:
+        return None
+    if locked is True:
+        return {"state": "locked", "idle_seconds": idle}
+
+    app = _frontmost_app()
+    if not app:
+        return None
+    state = "away" if idle >= config.away_idle_min(cfg) * 60 else "active"
+    return {"state": state, "app": app, "idle_seconds": idle}
+
+
+def _idle_duration(seconds: int) -> str:
+    """HID idle duration: minutes below one hour, else whole hours."""
+    minutes = max(0, int(seconds) // 60)
+    return f"{minutes}m" if minutes < 60 else f"{minutes // 60}h"
+
+
+def _render_computer(computer: dict) -> str | None:
+    """Render one of the three locked computer-segment shapes."""
+    state = computer.get("state")
+    idle = computer.get("idle_seconds")
+    if idle is None:
+        return None
+    if state == "locked":
+        return f"💻 Locked: idle {_idle_duration(idle)}"
+    app = computer.get("app")
+    if not app:
+        return None
+    if state == "away":
+        return f"💻 Away: {app} (idle {_idle_duration(idle)})"
+    if state == "active":
+        return f"💻 Active: {app}"
+    return None
 
 
 def _pending(cfg: dict, now: datetime) -> list[dict]:
@@ -587,7 +700,7 @@ def gather(
         "last_wake": last_wake,
         "last_active": last_active,
         "paused": paused,
-        "active_app": _safe(_frontmost_app),
+        "computer": _safe(_computer_status, cfg),
         "pending": _safe(_pending, cfg, now, default=[]),
         "location": _safe(_location, cfg),
         "window_sid": window_sid,
@@ -599,7 +712,7 @@ def render(cfg: dict, now: datetime, data: dict) -> str:
     """Pure assembly: data dict -> wakeup note text. No DB / no I/O.
 
     Layout (locked header format): machine tag, then 📍 location (if any),
-    then one merged "🐆 Last active ... | 💻 Current active ..." line, then
+    then one merged "🐆 Last active ... | 💻 ..." line, then
     `---`-separated blocks for pending self-schedule, then a final turn-end
     reminder line (note.turn_end_text, every render; "" omits it). No "Now:
     HH:MM Ddd" line — the per-turn hook already injects current time. Handoff
@@ -640,13 +753,14 @@ def render(cfg: dict, now: datetime, data: dict) -> str:
         # still shows even without an activity line.
         active_seg = f"🐆{pause_suffix}"
 
-    app = data.get("active_app")
-    if active_seg and app:
-        header.append(f"{active_seg} | 💻 Current active: {app}")
+    computer = data.get("computer")
+    computer_seg = _safe(_render_computer, computer) if computer else None
+    if active_seg and computer_seg:
+        header.append(f"{active_seg} | {computer_seg}")
     elif active_seg:
         header.append(active_seg)
-    elif app:
-        header.append(f"💻 Current active: {app}")
+    elif computer_seg:
+        header.append(computer_seg)
 
     blocks: list[str] = ["\n".join(header)]
 

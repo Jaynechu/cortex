@@ -120,6 +120,23 @@ def test_shells_reads_from_marrow_config(tmp_path):
     assert config.shell_enabled(cfg, "TG") is True
 
 
+def test_away_idle_min_defaults_when_marrow_config_absent(tmp_path):
+    cfg = _cfg_with_marrow_dir(tmp_path)
+    assert config.away_idle_min(cfg) == 20
+
+
+def test_away_idle_min_reads_from_marrow_config(tmp_path):
+    (tmp_path / "config.toml").write_text('[cortex]\naway_idle_min = 35\n')
+    cfg = _cfg_with_marrow_dir(tmp_path)
+    assert config.away_idle_min(cfg) == 35
+
+
+def test_away_idle_min_invalid_value_uses_default(tmp_path):
+    (tmp_path / "config.toml").write_text('[cortex]\naway_idle_min = "later"\n')
+    cfg = _cfg_with_marrow_dir(tmp_path)
+    assert config.away_idle_min(cfg) == 20
+
+
 def test_leftover_core_shells_key_warns_not_fatal(tmp_path, caplog):
     """cortex.toml [core].shells is no longer read; presence just warns once."""
     toml_path = tmp_path / "cortex.toml"
