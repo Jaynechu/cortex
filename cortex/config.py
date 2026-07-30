@@ -424,6 +424,26 @@ def shell_state_dir(cfg: dict) -> Path:
     return marrow_db_path(cfg).parent / "state" / "shells"
 
 
+def shell_socket_path(cfg: dict, shell: str = "tg") -> Path | None:
+    """Kick socket of a non-cli shell host. marrow's [cortex].shell_socket owns
+    that single path and it belongs to the tg bridge, so any other shell has
+    none: None (the caller skips the kick and the host reads its ledger on the
+    next recompute tick). Empty/unreadable config -> <shell_state_dir>/tg.sock."""
+    if shell != "tg":
+        return None
+    raw = ""
+    p = marrow_config_dir(cfg) / "config.toml"
+    try:
+        if p.is_file():
+            with p.open("rb") as f:
+                data = tomllib.load(f)
+            raw = str((data.get("cortex") or {}).get("shell_socket") or "").strip()
+    except (OSError, ValueError, TypeError) as e:
+        logger.warning("shell_socket_path: marrow config read failed (%s) — "
+                       "using the default path", e)
+    return Path(raw).expanduser() if raw else shell_state_dir(cfg) / f"{shell}.sock"
+
+
 def cortex_home(cfg: dict) -> Path:
     """cwd for the resumed full-env marrow cortex session (Decided 07-03 pm)."""
     raw = cfg["paths"].get("cortex_home") or ""
