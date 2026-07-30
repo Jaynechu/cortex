@@ -106,11 +106,11 @@ def test_render_full_note(cfg):
     text = note.render(cfg, NOW, data)
     assert "Wake:" not in text  # reason line retired
     assert "Now:" not in text  # Now line deleted — hook injects current time
-    assert text.startswith("🐆 Last active: 12min ago | 💻 Active: Google Chrome")
+    assert text.startswith("🐆 Cortex last wake: 12m ago | 💻 Mac is Active: Google Chrome")
     assert "Plan Used" not in text  # budget line retired
     # header = exactly the merged line above, nothing else
     assert text.split("\n\n---\n\n")[0].split("\n") == [
-        "🐆 Last active: 12min ago | 💻 Active: Google Chrome",
+        "🐆 Cortex last wake: 12m ago | 💻 Mac is Active: Google Chrome",
     ]
     assert "Pending self-schedule: due 00:18 去看看老婆睡了没" in text
     # block separators
@@ -124,7 +124,7 @@ def test_render_omits_absent_lines(cfg):
     assert "Wake:" not in text  # reason line retired
     assert "Now:" not in text  # Now line deleted
     assert text == ""  # nothing to report -> empty header, no lines at all
-    assert "Last active:" not in text
+    assert "Cortex last wake:" not in text
     assert "Plan Used:" not in text
     assert "Active (Mac):" not in text
     assert "Pending" not in text
@@ -404,7 +404,7 @@ def test_render_pause_tag_from_breaker(cfg):
     data = {"last_wake": {"minutes_ago": 40, "force_slept": None},
             "paused": {"reason": "manual", "scope": "cli"}}
     text = note.render(cfg, NOW, data)
-    assert "Last active: 40min ago (paused: manual)" in text
+    assert "Cortex last wake: 40m ago (paused: manual)" in text
 
 
 def test_render_no_pause_tag_when_breaker_clear(cfg):
@@ -412,7 +412,7 @@ def test_render_no_pause_tag_when_breaker_clear(cfg):
     is the cli window's own shutdown ledger, not a per-shell pause state."""
     data = {"last_wake": {"minutes_ago": 40, "force_slept": "timeout"}}
     text = note.render(cfg, NOW, data)
-    assert "Last active: 40min ago" in text
+    assert "Cortex last wake: 40m ago" in text
     assert "force-slept" not in text and "paused" not in text
 
 
@@ -539,10 +539,10 @@ def test_paused_is_per_shell(cfg, tmp_path):
 
 def test_render_last_active_falls_back_to_wake_minutes(cfg):
     """No last_active -> the line uses the wake row's minutes and keeps the
-    'Last active:' label."""
+    'Cortex last wake:' label."""
     data = {"last_wake": {"minutes_ago": 22, "force_slept": "timeout"}}
     text = note.render(cfg, NOW, data)
-    assert "Last active: 22min ago" in text
+    assert "Cortex last wake: 22m ago" in text
 
 
 def test_render_last_active_overrides_wake_minutes(cfg):
@@ -552,7 +552,7 @@ def test_render_last_active_overrides_wake_minutes(cfg):
         "last_active": {"minutes_ago": 3},
     }
     text = note.render(cfg, NOW, data)
-    assert "Last active: 3min ago" in text
+    assert "Cortex last wake: 3m ago" in text
 
 
 def test_pending_within_window(cfg, tmp_path, monkeypatch):
@@ -751,11 +751,11 @@ def test_idle_duration(seconds, expected):
 
 @pytest.mark.parametrize(("computer", "expected"), [
     ({"state": "locked", "idle_seconds": 12 * 3600},
-     "💻 Locked: idle 12h"),
+     "💻 Mac is Locked: 12h"),
     ({"state": "away", "app": "Code", "idle_seconds": 40 * 60},
-     "💻 Away: Code (idle 40m)"),
+     "💻 Mac is Inactive: 40m Code"),
     ({"state": "active", "app": "Code", "idle_seconds": 5 * 60},
-     "💻 Active: Code"),
+     "💻 Mac is Active: Code"),
 ])
 def test_render_computer_three_states(computer, expected):
     assert note._render_computer(computer) == expected
@@ -934,8 +934,8 @@ def test_render_location_stale_no_signal(cfg, tmp_path, monkeypatch):
 
 def test_render_locked_header_shape_tag_then_location_then_merged_line(cfg):
     """The exact locked header (coordinator spec): machine tag, then 📍, then
-    one merged "🐆 Last active ... | 💻 Active ..." line — no "Now:"
-    line anywhere."""
+    one merged "🐆 Cortex last wake ... | 💻 Mac is Active ..." line — no
+    "Now:" line anywhere."""
     cfg["note"]["wake_machine_tag"] = (
         "[AUTOMATED WAKE SIGNAL — Note delivered by the scheduler]")
     data = {
@@ -951,7 +951,7 @@ def test_render_locked_header_shape_tag_then_location_then_merged_line(cfg):
     assert text == (
         "[AUTOMATED WAKE SIGNAL — Note delivered by the scheduler]\n"
         "📍 08:30 Left Home → 09:00 Arrived Deakin (5h30m)\n"
-        "🐆 Last active: 19min ago | 💻 Active: Notion"
+        "🐆 Cortex last wake: 19m ago | 💻 Mac is Active: Notion"
     )
 
 
@@ -963,7 +963,7 @@ def test_render_location_omitted_when_no_state_active_line_unaffected(cfg):
         "computer": {"state": "active", "app": "Notion", "idle_seconds": 60},
     }
     text = note.render(cfg, NOW, data)
-    assert text == "🐆 Last active: 19min ago | 💻 Active: Notion"
+    assert text == "🐆 Cortex last wake: 19m ago | 💻 Mac is Active: Notion"
     assert "📍" not in text
 
 
@@ -971,7 +971,7 @@ def test_render_merged_line_active_only_no_pipe(cfg):
     """No Active(Mac) app -> just the 🐆 half, no trailing pipe."""
     data = {"last_active": {"minutes_ago": 19}}
     text = note.render(cfg, NOW, data)
-    assert text == "🐆 Last active: 19min ago"
+    assert text == "🐆 Cortex last wake: 19m ago"
     assert "|" not in text
 
 
@@ -1168,9 +1168,9 @@ def test_gather_render_scopes_wake_fallback_to_its_shell(marrow_conn, cfg):
         "VALUES (?, 1, 0, 'ct-pause', 'cli')", (ts,))
     marrow_conn.commit()
     tg_text = note.render(cfg, NOW, note.gather(marrow_conn, cfg, NOW, shell="tg"))
-    assert "Last active" not in tg_text
+    assert "Cortex last wake" not in tg_text
     cli_text = note.render(cfg, NOW, note.gather(marrow_conn, cfg, NOW, shell="cli"))
-    assert "Last active: 30min ago" in cli_text
+    assert "Cortex last wake: 30m ago" in cli_text
 
 
 def test_render_never_tags_force_slept(cfg):

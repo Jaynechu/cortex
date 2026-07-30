@@ -207,7 +207,7 @@ max_reasons = 8                # cap the pending-flag list (stuck bridge guard)
 wake_machine_tag = "[AUTOMATED WAKE SIGNAL — Note delivered by the scheduler]"
 title = ""                   # first line of the wakeup note, e.g. a nickname for the note; empty hides it
 pending_window_min = 15      # surface a self-schedule entry only when due within this window
-pause_tag = "(paused: {reason})"  # appended to the "Now: … | Last active: …" line while the circuit breaker covers THIS shell. {reason} = manual/auto_fuse, {scope} = all/cli/tg; "" omits the tag
+pause_tag = "(paused: {reason})"  # appended to the "🐆 Cortex last wake: …" line while the circuit breaker covers THIS shell. {reason} = manual/auto_fuse, {scope} = all/cli/tg; "" omits the tag
 handoff_title = "碎碎念"   # title of the handoff-note section (customisable display name)
 handoff_wake_kinds = ["rotate"]  # wake kinds that get the handoff (fresh window only)
 cadence_bin = ""             # cadence CLI for cal/rem lines; empty = packaged default path

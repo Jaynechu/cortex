@@ -454,26 +454,30 @@ def _computer_status(cfg: dict) -> dict | None:
 
 
 def _idle_duration(seconds: int) -> str:
-    """HID idle duration: minutes below one hour, else whole hours."""
+    """Short duration string (minutes below one hour, else whole hours) —
+    shared by the computer idle/away readout and the leopard last-wake
+    segment."""
     minutes = max(0, int(seconds) // 60)
     return f"{minutes}m" if minutes < 60 else f"{minutes // 60}h"
 
 
 def _render_computer(computer: dict) -> str | None:
-    """Render one of the three locked computer-segment shapes."""
+    """Render one of the three locked computer-segment shapes: Active /
+    Inactive / Locked, all under the unified `Mac is <State>: <detail>`
+    skeleton."""
     state = computer.get("state")
     idle = computer.get("idle_seconds")
     if idle is None:
         return None
     if state == "locked":
-        return f"💻 Locked: idle {_idle_duration(idle)}"
+        return f"💻 Mac is Locked: {_idle_duration(idle)}"
     app = computer.get("app")
     if not app:
         return None
     if state == "away":
-        return f"💻 Away: {app} (idle {_idle_duration(idle)})"
+        return f"💻 Mac is Inactive: {_idle_duration(idle)} {app}"
     if state == "active":
-        return f"💻 Active: {app}"
+        return f"💻 Mac is Active: {app}"
     return None
 
 
@@ -718,7 +722,7 @@ def render(cfg: dict, now: datetime, data: dict) -> str:
     """Pure assembly: data dict -> wakeup note text. No DB / no I/O.
 
     Layout (locked header format): machine tag, then 📍 location (if any),
-    then one merged "🐆 Last active ... | 💻 ..." line, then
+    then one merged "🐆 Cortex last wake: ... | 💻 Mac is ..." line, then
     `---`-separated blocks for pending self-schedule, then a final turn-end
     reminder line (note.turn_end_text, every render; "" omits it). No "Now:
     HH:MM Ddd" line — the per-turn hook already injects current time. Handoff
@@ -753,7 +757,8 @@ def render(cfg: dict, now: datetime, data: dict) -> str:
 
     active_seg = None
     if active:
-        active_seg = f"🐆 Last active: {active['minutes_ago']}min ago{pause_suffix}"
+        wake_dur = _idle_duration(active["minutes_ago"] * 60)
+        active_seg = f"🐆 Cortex last wake: {wake_dur} ago{pause_suffix}"
     elif pause_suffix:
         # The pause is a fact about the shell, not about the last reply — it
         # still shows even without an activity line.
