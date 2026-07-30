@@ -373,19 +373,25 @@ def _screen_locked() -> bool | None:
         if not session:
             return None
 
-        values = []
-        for name in (b"kCGSSessionOnConsoleKey",
-                     b"CGSSessionScreenIsLocked"):
-            key = cf.CFStringCreateWithCString(
-                None, name, _CF_STRING_ENCODING_UTF8)
-            if not key:
-                return None
-            keys.append(key)
-            value = cf.CFDictionaryGetValue(session, key)
-            if not value:
-                return None
-            values.append(bool(cf.CFBooleanGetValue(value)))
-        on_console, screen_locked = values
+        on_console_key = cf.CFStringCreateWithCString(
+            None, b"kCGSSessionOnConsoleKey", _CF_STRING_ENCODING_UTF8)
+        if not on_console_key:
+            return None
+        keys.append(on_console_key)
+        on_console_value = cf.CFDictionaryGetValue(session, on_console_key)
+        if not on_console_value:
+            return None
+        on_console = bool(cf.CFBooleanGetValue(on_console_value))
+
+        locked_key = cf.CFStringCreateWithCString(
+            None, b"CGSSessionScreenIsLocked", _CF_STRING_ENCODING_UTF8)
+        if not locked_key:
+            return None
+        keys.append(locked_key)
+        locked_value = cf.CFDictionaryGetValue(session, locked_key)
+        screen_locked = (
+            bool(cf.CFBooleanGetValue(locked_value)) if locked_value else False
+        )
         return not on_console or screen_locked
     except (AttributeError, OSError, TypeError, ValueError):
         return None

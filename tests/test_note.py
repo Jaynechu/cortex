@@ -627,8 +627,10 @@ class _CFunc:
 
 @pytest.mark.parametrize(("on_console", "locked", "expected"), [
     (True, False, False),
+    (True, None, False),
     (True, True, True),
     (False, False, True),
+    (None, False, None),
 ])
 def test_screen_locked_reads_coregraphics(
         monkeypatch, on_console, locked, expected):
@@ -641,7 +643,10 @@ def test_screen_locked_reads_coregraphics(
             {b"kCGSSessionOnConsoleKey": 2,
              b"CGSSessionScreenIsLocked": 3}[name])
     cf.CFDictionaryGetValue = _CFunc(
-        lambda _session, key: {2: 4, 3: 5}[key])
+        lambda _session, key:
+            None if ((key == 2 and on_console is None)
+                     or (key == 3 and locked is None))
+            else {2: 4, 3: 5}[key])
     cf.CFBooleanGetValue = _CFunc(
         lambda value: {4: on_console, 5: locked}[value])
     cf.CFRelease = _CFunc(releases.append)
@@ -650,7 +655,8 @@ def test_screen_locked_reads_coregraphics(
         lambda path: cg if path == note._APPLICATION_SERVICES else cf)
 
     assert note._screen_locked() is expected
-    assert releases == [2, 3, 1]
+    expected_releases = [2, 1] if on_console is None else [2, 3, 1]
+    assert releases == expected_releases
 
 
 def test_screen_locked_ctypes_failure_returns_none(monkeypatch):
