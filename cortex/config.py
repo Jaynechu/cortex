@@ -88,9 +88,13 @@ _DEFAULTS: dict[str, Any] = {
         # older than this, and the producer overwrites it on every new bell.
         "receipt_ttl_min": 15,
         "say_sound": "Glass",
-        # lie_down(next_wake_min=N) clamp (minutes): [0, next_wake_max], every
-        # hour (0 = immediate re-wake).
+        # lie_down(next_wake_min=N) legal minutes: two bands, every hour —
+        # [0, next_wake_low_max] and [next_wake_high_min, next_wake_max]
+        # (0 = immediate re-wake). The gap between the bands is unselectable:
+        # a choice landing there snaps to the nearer band edge.
         "next_wake_max": 360,
+        "next_wake_low_max": 55,
+        "next_wake_high_min": 180,
         # Minutes until the next wake when no caller picked one (proxy
         # lie_down, daemon/ctl/reconcile re-arm after a failed round).
         # Cross-repo interval contract — keep these three equal:
@@ -276,12 +280,15 @@ def shell_id(cfg: dict) -> str:
 
 def wake_clamps(cfg: dict) -> dict[str, int]:
     """The wake-clamp numbers rendered into note/tool text (never hardcoded).
-    lie_down bounds [0, next_wake_max] from [wake]; idle bar from
+    lie_down's two legal bands from [wake] — next_wake_min..next_wake_low_max
+    and next_wake_high_min..next_wake_max; idle bar from
     [wake.watchdog].silent_max_min."""
     w = cfg.get("wake", {})
     wd = w.get("watchdog", {})
     return {
         "next_wake_min": 0,
+        "next_wake_low_max": int(w.get("next_wake_low_max", 55)),
+        "next_wake_high_min": int(w.get("next_wake_high_min", 180)),
         "next_wake_max": int(w.get("next_wake_max", 360)),
         "silent_max_min": int(wd.get("silent_max_min", 20)),
     }
