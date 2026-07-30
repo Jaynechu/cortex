@@ -454,11 +454,14 @@ def _computer_status(cfg: dict) -> dict | None:
 
 
 def _idle_duration(seconds: int) -> str:
-    """Short duration string (minutes below one hour, else whole hours) —
-    shared by the computer idle/away readout and the leopard last-wake
-    segment."""
+    """Short duration string — minutes below one hour, else compound
+    hours+minutes (exact hour drops the trailing minutes) — shared by the
+    computer idle/away readout and the leopard last-wake segment."""
     minutes = max(0, int(seconds) // 60)
-    return f"{minutes}m" if minutes < 60 else f"{minutes // 60}h"
+    if minutes < 60:
+        return f"{minutes}m"
+    hours, rem = divmod(minutes, 60)
+    return f"{hours}h" if rem == 0 else f"{hours}h{rem}m"
 
 
 def _render_computer(computer: dict) -> str | None:

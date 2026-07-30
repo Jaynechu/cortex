@@ -743,7 +743,8 @@ def test_computer_status_omitted_when_idle_fails(cfg, monkeypatch):
     (40 * 60, "40m"),
     (59 * 60 + 59, "59m"),
     (60 * 60, "1h"),
-    (12 * 60 * 60 + 59 * 60, "12h"),
+    (60 * 60 + 20 * 60, "1h20m"),
+    (12 * 60 * 60 + 59 * 60, "12h59m"),
 ])
 def test_idle_duration(seconds, expected):
     assert note._idle_duration(seconds) == expected
