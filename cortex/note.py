@@ -410,7 +410,7 @@ def _idle_seconds() -> int | None:
     """Seconds since the last keyboard/mouse event from IOHIDSystem."""
     try:
         out = subprocess.run(
-            ["ioreg", "-c", "IOHIDSystem"],
+            ["/usr/sbin/ioreg", "-c", "IOHIDSystem"],
             capture_output=True, text=True, timeout=5,
         )
     except (OSError, subprocess.SubprocessError):
@@ -424,7 +424,7 @@ def _frontmost_app() -> str | None:
     """macOS frontmost application name; loginwindow/failure -> None."""
     try:
         out = subprocess.run(
-            ["osascript", "-e",
+            ["/usr/bin/osascript", "-e",
              'tell application "System Events" to get name of first application '
              'process whose frontmost is true'],
             capture_output=True, text=True, timeout=5,

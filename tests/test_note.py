@@ -598,8 +598,12 @@ def test_frontmost_app_loginwindow_returns_none(monkeypatch):
     class FakeProc:
         returncode = 0
         stdout = "loginwindow\n"
-    monkeypatch.setattr(note.subprocess, "run", lambda *a, **k: FakeProc())
+    calls = []
+    monkeypatch.setattr(
+        note.subprocess, "run",
+        lambda *a, **k: calls.append((a, k)) or FakeProc())
     assert note._frontmost_app() is None
+    assert calls[0][0][0][0] == "/usr/bin/osascript"
 
 
 def test_frontmost_app_failure_returns_none(monkeypatch):
@@ -613,8 +617,12 @@ def test_frontmost_app_ok(monkeypatch):
     class FakeProc:
         returncode = 0
         stdout = "WeChat\n"
-    monkeypatch.setattr(note.subprocess, "run", lambda *a, **k: FakeProc())
+    calls = []
+    monkeypatch.setattr(
+        note.subprocess, "run",
+        lambda *a, **k: calls.append((a, k)) or FakeProc())
     assert note._frontmost_app() == "WeChat"
+    assert calls[0][0][0][0] == "/usr/bin/osascript"
 
 
 class _CFunc:
@@ -674,8 +682,12 @@ def test_screen_locked_ctypes_failure_returns_none(monkeypatch):
 ])
 def test_idle_seconds_parses_ioreg(monkeypatch, stdout, returncode, expected):
     proc = type("Proc", (), {"stdout": stdout, "returncode": returncode})()
-    monkeypatch.setattr(note.subprocess, "run", lambda *a, **k: proc)
+    calls = []
+    monkeypatch.setattr(
+        note.subprocess, "run",
+        lambda *a, **k: calls.append((a, k)) or proc)
     assert note._idle_seconds() == expected
+    assert calls[0][0][0] == ["/usr/sbin/ioreg", "-c", "IOHIDSystem"]
 
 
 def test_idle_seconds_subprocess_failure_returns_none(monkeypatch):
