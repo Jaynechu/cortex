@@ -16,11 +16,13 @@ the manual breaker scope and the duty hold (see breaker.covers).
 
 from __future__ import annotations
 
+import argparse
 import contextlib
 import fcntl
 import json
 import logging
 import os
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -55,6 +57,10 @@ _HOLD_BY_MODE = {
 }
 
 CLEAR = {"mode": MODE_ALL, "hold": None, "ts": ""}
+
+ERR_DISABLED = "duty disabled"
+ERR_BREAKER_HELD = ("breaker held - transfer never clears it; "
+                    "release it with /ct-duty <mode>")
 
 
 # --- paths ---------------------------------------------------------------
@@ -287,3 +293,50 @@ def _wake_tg(cfg: dict, now: datetime) -> bool:
     fresh = _tg_needs_fresh(cfg, now)
     ctl._wake_tg(cfg, rotate=fresh)
     return fresh
+
+
+# --- transfer ------------------------------------------------------------
+
+def other_shell(shell: str) -> str | None:
+    """The shell a transfer hands duty to. Two-shell world: the target is
+    whichever one the caller is not."""
+    s = str(shell).strip().lower()
+    if s not in SHELLS:
+        return None
+    return next(x for x in SHELLS if x != s)
+
+
+def transfer(cfg: dict, shell: str) -> dict:
+    """Hand duty from `shell` to the other cortex shell — the on-duty shell's
+    own graceful handover (marrow exposes it as the transfer MCP tool).
+
+    Duty moves to mode = the target, so the caller's shell is what the new hold
+    covers: it simply goes quiet where it stands, and the fresh-vs-resume gate
+    judges its window at its own next takeover. Everything else is apply's
+    ordinary transition — no lie_down and no rotate are issued here.
+
+    A standing breaker.json refuses: a manual/fuse pause outranks a rotation,
+    and transfer must never clear it (only an explicit ctl duty does)."""
+    if not (cfg.get("duty") or {}).get("enabled"):
+        return {"ok": False, "error": ERR_DISABLED}
+    target = other_shell(shell)
+    if target is None:
+        return {"ok": False, "error": f"unknown shell: {shell}"}
+    if breaker.read(config.marrow_config_dir(cfg)) is not None:
+        return {"ok": False, "error": ERR_BREAKER_HELD}
+    out = apply(cfg, target)
+    return {"ok": True, "shell": str(shell).strip().lower(),
+            "target": target, **out}
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Duty rotation")
+    parser.add_argument("--transfer", metavar="SHELL", required=True,
+                        help="hand duty from SHELL to the other cortex shell")
+    args = parser.parse_args(argv)
+    print(json.dumps(transfer(config.load(), args.transfer), ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
