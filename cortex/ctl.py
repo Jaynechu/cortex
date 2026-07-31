@@ -77,12 +77,16 @@ def _kick_shell_host(cfg: dict, shell: str) -> bool:
         return False
 
 
-def _wake_tg(cfg: dict) -> str:
+def _wake_tg(cfg: dict, rotate: bool = False) -> str:
     """Book a due-now wake in the tg ledger, then kick its host. The ledger
     write is the durable half — the host claims it whenever it next reads
-    (kick, safety tick, or bridge start), so the kick itself is best effort."""
-    shell_ledger.write(config.shell_state_dir(cfg), TG_SHELL,
-                       {"next_wake_at": _now(cfg).isoformat()})
+    (kick, safety tick, or bridge start), so the kick itself is best effort.
+    `rotate` rides along in the same booking: the host ends its window and
+    respawns instead of feeding the round into the old session."""
+    booking = {"next_wake_at": _now(cfg).isoformat()}
+    if rotate:
+        booking["rotate_pending"] = True
+    shell_ledger.write(config.shell_state_dir(cfg), TG_SHELL, booking)
     if _kick_shell_host(cfg, TG_SHELL):
         return "wake tg: round due now, host kicked"
     return "wake tg: round due now, host unreachable — fires on its next pass"
