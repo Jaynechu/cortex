@@ -9,7 +9,7 @@ import json
 
 import pytest
 
-from cortex import breaker, config, ctl, shell_ledger, wake_state
+from cortex import breaker, config, ctl, duty, shell_ledger, wake_state
 
 
 @pytest.fixture
@@ -192,3 +192,101 @@ def test_resume_never_writes_an_outbox_receipt(cfg):
 
 def test_resume_when_nothing_is_held(cfg):
     assert ctl.cmd_resume(cfg) == "resume: breaker already clear — nothing held"
+
+
+# --- duty ---------------------------------------------------------------------
+
+@pytest.fixture
+def duty_cfg(cfg, tmp_path):
+    cfg["duty"]["enabled"] = True
+    cfg["paths"]["transcript_dir"] = str(tmp_path / "transcript")
+    return cfg
+
+
+def test_duty_accepts_every_mode(duty_cfg, cdir, stub_cli_wake, kicks):
+    for mode in duty.MODES:
+        line, code = ctl.cmd_duty(duty_cfg, mode)
+        assert code == 0
+        assert duty.read(cdir) == {"mode": mode,
+                                   "hold": duty.hold_for(mode),
+                                   "ts": duty.read(cdir)["ts"]}
+        assert f"duty: mode={mode}" in line
+
+
+def test_duty_rejects_an_unknown_mode(duty_cfg, cdir):
+    line, code = ctl.cmd_duty(duty_cfg, "sideways")
+    assert code == 1
+    assert "unknown mode" in line and "cli|tg|off|all" in line
+    assert duty.duty_path(cdir).exists() is False
+
+
+def test_duty_bad_mode_exits_non_zero(duty_cfg, monkeypatch, capsys):
+    monkeypatch.setattr(config, "load", lambda: duty_cfg)
+    assert ctl.main(["duty", "sideways"]) == 1
+    assert "unknown mode" in capsys.readouterr().out
+
+
+def test_duty_mode_survives_a_round_trip_through_main(duty_cfg, cdir, kicks,
+                                                      stub_cli_wake, monkeypatch,
+                                                      capsys):
+    monkeypatch.setattr(config, "load", lambda: duty_cfg)
+    assert ctl.main(["duty", "tg"]) == 0
+    assert duty.read(cdir)["hold"] == "cli"
+    assert "duty: mode=tg hold=cli" in capsys.readouterr().out
+
+
+def test_duty_disabled_errors_without_touching_state(cfg, cdir):
+    breaker.pause(cfg, "all")
+    line, code = ctl.cmd_duty(cfg, "tg")
+    assert code == 1
+    assert "duty disabled" in line
+    assert duty.duty_path(cdir).exists() is False
+    assert breaker.read(cdir)["scope"] == "all"
+
+
+def test_duty_clears_the_breaker_and_applies_once(duty_cfg, cdir, kicks,
+                                                  stub_cli_wake, monkeypatch):
+    """An explicit duty command outranks a standing trip — the fuse scope goes,
+    and the released shell is woken by exactly one apply."""
+    ctl.cmd_duty(duty_cfg, "cli")
+    breaker.trip(cdir, breaker.SCOPE_ALL, breaker.REASON_AUTO)
+    applied = []
+    real_apply = duty.apply
+
+    def _apply(c, mode, **kw):
+        applied.append(mode)
+        return real_apply(c, mode, **kw)
+
+    monkeypatch.setattr(duty, "apply", _apply)
+    line, code = ctl.cmd_duty(duty_cfg, "tg")
+    assert code == 0
+    assert applied == ["tg"]
+    assert breaker.read(cdir) is None
+    assert duty.read(cdir)["mode"] == "tg" and duty.read(cdir)["hold"] == "cli"
+    assert _ledger(duty_cfg)["next_wake_at"]
+    assert kicks == [(str(config.shell_socket_path(duty_cfg, "tg")), "tg")]
+    assert line.startswith("breaker cleared; duty: mode=tg hold=cli woken=tg")
+
+
+def test_duty_off_holds_both_and_kicks_nothing(duty_cfg, cdir, kicks,
+                                               monkeypatch):
+    from cortex import wake as wake_mod
+    monkeypatch.setattr(wake_mod, "run_wake",
+                        lambda *a, **k: pytest.fail("wake under duty off"))
+    line, code = ctl.cmd_duty(duty_cfg, "off")
+    assert code == 0
+    assert duty.read(cdir)["hold"] == "all"
+    assert kicks == []
+    assert "woken=-" in line
+
+
+# --- status -------------------------------------------------------------------
+
+def test_status_reads_all_when_no_duty_file_exists(cfg):
+    assert "duty: mode=all hold=-" in ctl.cmd_status(cfg)
+
+
+def test_status_shows_the_current_duty_mode_and_hold(duty_cfg, kicks,
+                                                     stub_cli_wake):
+    ctl.cmd_duty(duty_cfg, "tg")
+    assert "duty: mode=tg hold=cli" in ctl.cmd_status(duty_cfg)

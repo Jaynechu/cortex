@@ -17,7 +17,9 @@ hand without racing the reconcile.
                   shell with --shell (scope "all" narrows to the other shell).
                   A cli release with an empty ledger books a due-now alarm so
                   the next reconcile pulls the shell up.
-  status          print the breaker + ledger state
+  duty            rotate duty to cli|tg|off|all: clear the breaker, then hold
+                  the off-duty shell and wake the on-duty one
+  status          print the breaker + duty + ledger state
 
 Each subcommand prints one human-readable result line.
 """
@@ -27,8 +29,8 @@ import argparse
 import sys
 from datetime import datetime, timedelta
 
-from cortex import (breaker, config, db, occupancy, shell_ledger, wake_state,
-                    window)
+from cortex import (breaker, config, db, duty, occupancy, shell_ledger,
+                    wake_state, window)
 
 TG_SHELL = "tg"
 
@@ -171,7 +173,7 @@ def cmd_pause(cfg: dict, shell: str | None = None) -> str:
     """Throw the breaker. Default scope "all" (both shells); --shell cli|tg
     holds one, MERGING with whatever already stands (cli then tg -> all), so a
     second pause never releases the shell the first one holds. Persistent: only
-    ct-wake / ctl resume releases it."""
+    ctl wake / ctl resume / ct-duty releases it."""
     scope = (shell or breaker.SCOPE_ALL).strip().lower()
     state = breaker.pause(cfg, scope)
     # Silent: a manual pause is a deliberate human action already known to the
@@ -180,7 +182,7 @@ def cmd_pause(cfg: dict, shell: str | None = None) -> str:
     extra = ""
     # Put the live cli window down through the SAME proxy path the watchdog fuse
     # uses (lie_down -> clears awake, kills the watchdog). book_alarm=False: a
-    # pause is a pure stop, it books NO next wake — only a manual ct-wake
+    # pause is a pure stop, it books NO next wake — only a manual release
     # resumes, and that fires a round immediately.
     if scope in (breaker.SCOPE_ALL, "cli") and wake_state.load(cfg).get("awake"):
         from cortex import lie_down as lie_down_mod
@@ -190,11 +192,11 @@ def cmd_pause(cfg: dict, shell: str | None = None) -> str:
         except Exception as e:  # noqa: BLE001 — the breaker stands regardless
             extra = f"; live cli window still up ({e})"
     return (f"pause: breaker ON scope={state['scope']} — cortex autonomous "
-            f"activity held until ct-wake{extra}")
+            f"activity held until ct-duty{extra}")
 
 
 def _book_cli_alarm(cfg: dict) -> bool:
-    """ct-pause puts the cli window down with NO alarm booked, so a bare
+    """A pause puts the cli window down with NO alarm booked, so a bare
     release would leave the daemon nothing to fire (business_reason returns
     None while asleep with an empty ledger and no kick reasons) — the shell
     would sleep forever. Book one due now instead: the next reconcile pulls it
@@ -227,6 +229,28 @@ def cmd_resume(cfg: dict, shell: str | None = None) -> str:
             f"reconcile{tail}")
 
 
+def cmd_duty(cfg: dict, mode: str) -> tuple[str, int]:
+    """Rotate duty and act on it now. Validation lives here — duty.write takes
+    any string, so an unchecked mode would land as a no-hold state.
+
+    The breaker is cleared first: an explicit duty command is the human saying
+    which shell runs, and that outranks a standing fuse trip. This is the only
+    place duty code touches breaker.json."""
+    target = str(mode or "").strip().lower()
+    if target not in duty.MODES:
+        return (f"duty: unknown mode {mode!r} — choose "
+                f"{'|'.join(duty.MODES)}", 1)
+    if not (cfg.get("duty") or {}).get("enabled"):
+        return ("duty disabled — set [duty].enabled = true in cortex.toml", 1)
+    prefix = "breaker cleared; " if breaker.release(cfg, None) else ""
+    r = duty.apply(cfg, target)
+    woken = ", ".join(f"{s} fresh" if s in r["fresh"] else s
+                      for s in r["woken"]) or "-"
+    tail = "; live cli window put down" if r["put_down"] else ""
+    return (f"{prefix}duty: mode={r['mode']} hold={r['hold'] or '-'} "
+            f"woken={woken}{tail}", 0)
+
+
 def cmd_status(cfg: dict) -> str:
     st = breaker.state(cfg)
     if st is None:
@@ -234,8 +258,11 @@ def cmd_status(cfg: dict) -> str:
     else:
         line = (f"breaker: ON scope={st['scope']} reason={st['reason']} "
                 f"since={st['ts']}")
+    duty_state = duty.read(config.marrow_config_dir(cfg))
     d = wake_state.load(cfg)
-    return (f"{line} | awake={bool(d.get('awake'))} "
+    return (f"{line} | duty: mode={duty_state['mode']} "
+            f"hold={duty_state['hold'] or '-'} "
+            f"| awake={bool(d.get('awake'))} "
             f"next_wake_at={d.get('next_wake_at') or '-'} "
             f"rotated={bool(d.get('rotated'))}")
 
@@ -258,10 +285,17 @@ def main(argv: list[str] | None = None) -> int:
     rp = sub.add_parser("resume", help="breaker OFF (without waking)")
     rp.add_argument("--shell", default=None, choices=["cli", "tg"],
                     help="release ONE shell only (default: all)")
-    sub.add_parser("status", help="breaker + ledger state")
+    dp = sub.add_parser("duty", help="rotate which shell is on duty")
+    dp.add_argument("mode", metavar="{" + ",".join(duty.MODES) + "}",
+                    help="cli/tg = that shell only, off = neither, all = both")
+    sub.add_parser("status", help="breaker + duty + ledger state")
     args = parser.parse_args(argv)
 
     cfg = config.load()
+    if args.cmd == "duty":
+        line, code = cmd_duty(cfg, args.mode)
+        print(line)
+        return code
     if args.cmd == "wake":
         line = cmd_wake(cfg, args.shell)
     elif args.cmd == "sleep":
