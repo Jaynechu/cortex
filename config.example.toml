@@ -137,7 +137,7 @@ ctl_sleep_marker = "⚙️ [CTL]"
 [wake.watchdog]
 poll_sec = 60
 silent_max_min = 20            # silence cycle (same bar for chat or no-user wake): at this silence, inject one free-round note + marker, then re-arm the same timer
-fuse_tokens = 180000           # window tokens >= this -> esc + proxy lie_down (fuse); marrow's soft nudge (cortex_rotate.show_tokens, 150k) fires first
+fuse_tokens = 300000           # window tokens >= this -> esc + proxy lie_down (fuse); marrow's soft nudge (cortex_rotate.show_tokens) fires first
 # Process-level hard interrupt (SIGINT), a guaranteed esc-equivalent for when the
 # osascript esc may not land (no window focus). Fires after esc on the fuse
 # path, only if the transcript is still growing past the grace window.
