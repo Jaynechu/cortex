@@ -23,10 +23,11 @@ Assumes [marrow](../marrow) + synapse already installed and a Claude Code max pl
    ```
    - `CLAUDE.md` — world rules + house rules for the resident session
    - `playbook.md` — activity menu (what to do when awake)
-   - `notebook.md` — long-term memory, self-maintained
-   - `handoff_template.md` — page template for the rolling log (per shell, `handoff-<shell>.md`; a page over `handoff_max_lines` is archived and a fresh page carries the unchecked todos + last lines)
+   - `desire.md` — drive system that steers activity choice while roaming
+   - `notebook.md` / `secret.md` — long-term memory, self-maintained
+   - `handoff-cli.md` / `handoff-tg.md` — rolling log, one page per shell (`handoff-<shell>.md`; a page over `handoff_max_lines` is archived and a fresh page carries the unchecked todos + last lines). Add a page per extra shell listed in `[cortex] shells`.
    - `wishlist.md` — created automatically on first `wish`; template optional
-   Everything else under cortex_home (wakeup_note, wake_state, handoff-cli.md, logs) is generated at runtime.
+   Everything else under cortex_home (wakeup_note, wake_state, logs) is generated at runtime.
 5. Install the launchd jobs (collect-tick + wake-daemon):
    ```
    .venv/bin/python -m cortex.install
