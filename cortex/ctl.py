@@ -233,15 +233,20 @@ def cmd_duty(cfg: dict, mode: str) -> tuple[str, int]:
     """Rotate duty and act on it now. Validation lives here — duty.write takes
     any string, so an unchecked mode would land as a no-hold state.
 
-    The breaker is cleared first: an explicit duty command is the human saying
-    which shell runs, and that outranks a standing fuse trip. This is the only
+    The breaker is cleared mid-transition (apply's after_hold): an explicit duty
+    command is the human saying which shell runs, and that outranks a standing
+    fuse trip. Clearing it before the new hold is written would leave an instant
+    with both enforcement files clear; clearing it after the kicks would let the
+    woken shell meet a standing breaker and skip its round. This is the only
     place duty code touches breaker.json."""
     target = str(mode or "").strip().lower()
     if target not in duty.MODES:
         return (f"duty: unknown mode {mode!r} — choose "
                 f"{'|'.join(duty.MODES)}", 1)
-    prefix = "breaker cleared; " if breaker.release(cfg, None) else ""
-    r = duty.apply(cfg, target)
+    cleared: list[bool] = []
+    r = duty.apply(cfg, target,
+                   after_hold=lambda: cleared.append(breaker.release(cfg, None)))
+    prefix = "breaker cleared; " if any(cleared) else ""
     woken = ", ".join(f"{s} fresh" if s in r["fresh"] else s
                       for s in r["woken"]) or "-"
     tail = "; live cli window put down" if r["put_down"] else ""

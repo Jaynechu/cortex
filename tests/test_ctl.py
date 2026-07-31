@@ -266,6 +266,33 @@ def test_duty_clears_the_breaker_and_applies_once(duty_cfg, cdir, kicks,
     assert line.startswith("breaker cleared; duty: mode=tg hold=cli woken=tg")
 
 
+def test_duty_clears_the_breaker_between_the_hold_and_the_kick(
+        duty_cfg, cdir, kicks, monkeypatch):
+    """No instant with both enforcement files clear, and no kick delivered under
+    a standing breaker: the duty hold is on disk when the breaker goes, and the
+    breaker is gone when the shell is woken."""
+    breaker.trip(cdir, breaker.SCOPE_ALL, breaker.REASON_AUTO)
+    seen = []
+
+    async def _send_kick(path, shell):
+        seen.append(("kick", duty.read(cdir)["hold"], breaker.read(cdir)))
+
+    real_clear = breaker.clear
+
+    def _clear(config_dir, shell=None):
+        seen.append(("clear", duty.read(cdir)["hold"], breaker.read(cdir)))
+        return real_clear(config_dir, shell)
+
+    from synapse_core import scheduler
+    monkeypatch.setattr(scheduler, "send_kick", _send_kick)
+    monkeypatch.setattr(breaker, "clear", _clear)
+
+    ctl.cmd_duty(duty_cfg, "tg")
+    assert [what for what, _h, _b in seen] == ["clear", "kick"]
+    assert seen[0][1] == "cli" and seen[0][2] is not None
+    assert seen[1][1] == "cli" and seen[1][2] is None
+
+
 def test_duty_off_holds_both_and_kicks_nothing(duty_cfg, cdir, kicks,
                                                monkeypatch):
     from cortex import wake as wake_mod

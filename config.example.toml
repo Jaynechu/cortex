@@ -24,9 +24,9 @@ health_export = ""
 affect_flag_file = ""
 # Self-schedule queue (JSON list of {due_at}). Default: ~/.config/marrow/cortex/state/self_schedule.json
 self_schedule_file = ""
-# Handoff note the cli shell reads/writes (assistant's handoff; per-shell rolling
-# log, mirror of marrow [cortex].handoff_file_pattern).
-# Default: ~/.config/marrow/cortex/handoff-cli.md
+# Handoff note every shell reads/writes (assistant's handoff; one rolling log,
+# mirror of marrow [cortex].handoff_file).
+# Default: ~/.config/marrow/cortex/handoff.md
 handoff_file = ""
 # Cortex session cwd (own CLAUDE.md lives here). Default: ~/.config/marrow/cortex
 cortex_home = ""

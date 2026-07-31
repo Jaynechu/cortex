@@ -63,10 +63,10 @@ def test_absent_file_reads_clear(cdir):
 @pytest.mark.parametrize("body", [
     "{ not json",
     "[]",
-    '{"mode": "sideways", "hold": "cli"}',
-    '{"hold": "all"}',
+    '{"mode": "sideways"}',
+    "{}",
 ])
-def test_corrupt_file_reads_clear(cdir, body):
+def test_unreadable_file_reads_clear(cdir, body):
     duty.duty_path(cdir).write_text(body, encoding="utf-8")
     st = duty.read(cdir)
     assert (st["mode"], st["hold"]) == ("all", None)
@@ -79,6 +79,28 @@ def test_unknown_hold_value_is_ignored(cdir):
         json.dumps({"mode": "cli", "hold": "elsewhere", "ts": ""}), encoding="utf-8")
     assert duty.read(cdir)["hold"] is None
     assert duty.covers(cdir, "tg") is False
+
+
+# --- cross-repo agreement: hold alone drives enforcement -----------------------
+
+@pytest.mark.parametrize("body,held", [
+    ('{"mode": "bogus", "hold": "tg"}', "tg"),
+    ('{"hold": "all"}', "all"),
+    ('{"mode": "cli", "hold": "elsewhere"}', None),
+    ('{"mode": "cli"}', None),
+])
+def test_both_repos_enforce_the_same_hold(cdir, body, held):
+    """A corrupt mode never invalidates a valid hold and an invalid hold reads as
+    no hold — the tg bridge reads `hold` alone, so cortex must agree field for
+    field or the two shells disagree on the same file."""
+    from synapse_core import breaker as tg_breaker
+
+    duty.duty_path(cdir).write_text(body, encoding="utf-8")
+    assert duty.read(cdir)["hold"] == held
+    for shell in ("cli", "tg"):
+        covered = held in ("all", shell)
+        assert duty.covers(cdir, shell) is covered
+        assert tg_breaker.covers(cdir, shell) is covered
 
 
 # --- union with the manual breaker --------------------------------------------

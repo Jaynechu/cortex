@@ -21,9 +21,9 @@ DEFAULT_MARROW_DB = Path.home() / ".config" / "marrow" / "marrow.db"
 DEFAULT_KNOWLEDGEC_DB = (
     Path.home() / "Library" / "Application Support" / "Knowledge" / "knowledgeC.db"
 )
-# Per-shell rolling log; this repo is the cli shell (mirror of marrow
-# [cortex].handoff_file_pattern = "handoff-{shell}.md"). Override: paths.handoff_file.
-DEFAULT_HANDOFF = Path.home() / ".config" / "marrow" / "cortex" / "handoff-cli.md"
+# One rolling log shared by every shell (mirror of marrow [cortex].handoff_file).
+# Override: paths.handoff_file.
+DEFAULT_HANDOFF = Path.home() / ".config" / "marrow" / "cortex" / "handoff.md"
 DEFAULT_CORTEX_HOME = Path.home() / ".config" / "marrow" / "cortex"
 DEFAULT_NY_DB_PAGES = Path.home() / "Desktop" / "NY" / "db-pages"
 DEFAULT_MARROW_REPO = Path.home() / "CC-Lab" / "marrow"

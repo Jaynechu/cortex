@@ -70,6 +70,14 @@ def test_path_helpers_default_when_empty():
     assert config.health_export_path(cfg) is None
 
 
+def test_handoff_defaults_to_the_single_shared_page():
+    """One handoff for every shell (marrow [cortex].handoff_file) — no per-shell
+    name, so the fuse's handoff check watches the file the session writes."""
+    cfg = config.load(Path("/does/not/exist.toml"))
+    assert cfg["paths"]["handoff_file"] == ""  # unset -> DEFAULT_HANDOFF
+    assert config.DEFAULT_HANDOFF.name == "handoff.md"
+
+
 def test_user_name_reads_persona_section(tmp_path):
     """Current marrow layout: user_name lives under [persona]."""
     marrow_cfg = tmp_path / "config.toml"

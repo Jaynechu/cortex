@@ -287,3 +287,60 @@ def test_apply_never_writes_the_breaker(cfg, cdir, trace):
     from cortex import breaker
     duty.apply(cfg, "off")
     assert breaker.breaker_path(cdir).exists() is False
+
+
+# --- serialisation ------------------------------------------------------------
+
+def test_after_hold_runs_between_the_write_and_the_actions(cfg, cdir, trace):
+    seen = []
+    duty.apply(cfg, "tg", after_hold=lambda: seen.append(duty.read(cdir)["hold"]))
+    assert seen == ["cli"]
+    assert _acts(trace) == ["kick_tg"]
+
+
+def test_two_opposing_transitions_never_interleave(cfg, cdir, monkeypatch):
+    """Concurrent apply calls are serialised end to end: every action runs under
+    the hold of the transition that issued it, and the file matches the winner.
+    Without the lock a kick lands under the other transition's hold — both
+    shells active."""
+    import threading
+    seen = []
+    lock = threading.Lock()
+
+    def _mark(what):
+        with lock:
+            seen.append((what, duty.read(cdir)["hold"]))
+        time.sleep(0.05)
+
+    def _run_wake(conn, c, decision, now=None):
+        _mark("wake_cli")
+        return {"mode": "window"}
+
+    async def _send_kick(path, shell):
+        _mark(f"kick_{shell}")
+
+    from synapse_core import scheduler
+
+    from cortex import wake as wake_mod
+    monkeypatch.setattr(wake_mod, "run_wake", _run_wake)
+    monkeypatch.setattr(wake_mod, "_window_alive", lambda c: False)
+    monkeypatch.setattr(scheduler, "send_kick", _send_kick)
+
+    start = threading.Barrier(2)
+
+    def _apply(mode):
+        start.wait()
+        duty.apply(cfg, mode)
+
+    threads = [threading.Thread(target=_apply, args=(m,)) for m in ("cli", "tg")]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    expected = {"wake_cli": "tg", "kick_tg": "cli"}
+    assert sorted(what for what, _ in seen) == ["kick_tg", "wake_cli"]
+    assert all(expected[what] == hold for what, hold in seen)
+    final = duty.read(cdir)
+    assert final["mode"] in ("cli", "tg")
+    assert final["hold"] == duty.hold_for(final["mode"])

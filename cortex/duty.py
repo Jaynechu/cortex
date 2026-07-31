@@ -56,8 +56,6 @@ _HOLD_BY_MODE = {
     MODE_ALL: None,
 }
 
-CLEAR = {"mode": MODE_ALL, "hold": None, "ts": ""}
-
 ERR_BREAKER_HELD = ("breaker held - transfer never clears it; "
                     "release it with /ct-duty <mode>")
 
@@ -123,14 +121,15 @@ def _write_json(p: Path, data) -> None:
 # --- state ---------------------------------------------------------------
 
 def read(config_dir: Path | str) -> dict:
-    """Current duty state. An absent, corrupt or unknown-mode file reads as
-    mode "all" with no hold — a broken duty file must never freeze a shell."""
+    """Current duty state. Each field is validated on its own: `hold` alone
+    drives enforcement (the tg bridge reads nothing else), so an unknown mode
+    never invalidates a live hold, an unknown hold reads as no hold, and an
+    absent or unparseable file reads as mode "all" with no hold — a broken duty
+    file must never freeze a shell."""
     d = _read_json(duty_path(config_dir), {})
     mode = str(d.get("mode") or "").strip().lower()
-    if mode not in MODES:
-        return dict(CLEAR)
     hold = str(d.get("hold") or "").strip().lower()
-    return {"mode": mode,
+    return {"mode": mode if mode in MODES else MODE_ALL,
             "hold": hold if hold in HOLDS else None,
             "ts": str(d.get("ts") or "")}
 
@@ -139,13 +138,19 @@ def write(config_dir: Path | str, mode: str, *,
           now: datetime | None = None) -> dict:
     """Record `mode` with the hold it materialises. Last writer wins — a mode
     describes the whole two-shell world, so there is nothing to merge."""
+    with _flock(duty_path(config_dir)):
+        return _write_state(config_dir, mode, now=now)
+
+
+def _write_state(config_dir: Path | str, mode: str, *,
+                 now: datetime | None = None) -> dict:
+    """Unlocked half of write: the caller already holds the duty lock (flock is
+    per-descriptor, so taking it twice in one process would deadlock)."""
     target = str(mode).strip().lower() or MODE_ALL
-    p = duty_path(config_dir)
     state = {"mode": target,
              "hold": hold_for(target),
              "ts": (now or datetime.now().astimezone()).isoformat()}
-    with _flock(p):
-        _write_json(p, state)
+    _write_json(duty_path(config_dir), state)
     return state
 
 
@@ -168,12 +173,23 @@ def held_shells(hold: str | None) -> frozenset[str]:
 
 # --- transition ----------------------------------------------------------
 
-def apply(cfg: dict, mode: str, *, now: datetime | None = None) -> dict:
+def apply(cfg: dict, mode: str, *, now: datetime | None = None,
+          after_hold=None) -> dict:
     """Move duty to `mode` and act on the change: the new hold lands on disk
     FIRST, then a shell newly under it is put down, and only then is every
     shell the hold leaves free woken — so no instant exists where both shells
     are active. The incoming shell passes the fresh-vs-resume gate ([duty]
     thresholds) on its way up.
+
+    The WHOLE transition runs under the duty lock, put-down and kicks included:
+    two opposing transitions racing would otherwise interleave their actions and
+    leave both shells running under the last writer's hold. Nothing called from
+    inside takes that lock again (the read path never locks), so it cannot
+    deadlock.
+
+    `after_hold` is a callback run once the new hold is on disk and before any
+    put-down or kick — ctl clears the breaker there, so the two enforcement
+    files are never both clear and no kick is delivered under a standing breaker.
 
     The kick does not depend on the previous state: naming a shell means "that
     one is on duty, wake it NOW", so repeating a mode kicks it again (the cli
@@ -182,20 +198,23 @@ def apply(cfg: dict, mode: str, *, now: datetime | None = None) -> dict:
     writes through as a no-hold state rather than raising."""
     now = now or datetime.now(config.get_tz(cfg))
     config_dir = config.marrow_config_dir(cfg)
-    before = held_shells(read(config_dir)["hold"])
-    state = write(config_dir, mode, now=now)
-    after = held_shells(state["hold"])
-
-    put_down = SHELL_CLI in (after - before) and _put_down_cli(cfg)
-    waking = frozenset(SHELLS) - after
     fresh = []
-    for shell in SHELLS:
-        if shell not in waking:
-            continue
-        woke_fresh = (_wake_tg(cfg, now) if shell == SHELL_TG
-                      else _wake_cli(cfg, now))
-        if woke_fresh:
-            fresh.append(shell)
+    with _flock(duty_path(config_dir)):
+        before = held_shells(read(config_dir)["hold"])
+        state = _write_state(config_dir, mode, now=now)
+        after = held_shells(state["hold"])
+        if after_hold is not None:
+            after_hold()
+
+        put_down = SHELL_CLI in (after - before) and _put_down_cli(cfg)
+        waking = frozenset(SHELLS) - after
+        for shell in SHELLS:
+            if shell not in waking:
+                continue
+            woke_fresh = (_wake_tg(cfg, now) if shell == SHELL_TG
+                          else _wake_cli(cfg, now))
+            if woke_fresh:
+                fresh.append(shell)
     return {"mode": state["mode"], "hold": state["hold"],
             "put_down": put_down,
             "woken": [s for s in SHELLS if s in waking],
