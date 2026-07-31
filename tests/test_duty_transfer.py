@@ -21,7 +21,6 @@ def cfg(tmp_path):
     c["paths"]["handoff_file"] = str(home / "handoff.md")
     c["paths"]["wake_timing_log"] = str(home / "wake_timing.log")
     c["paths"]["transcript_dir"] = str(tmp_path / "transcript")
-    c["duty"]["enabled"] = True
     return c
 
 
@@ -108,14 +107,6 @@ def test_transfer_carries_the_fresh_gate(cfg, cdir, trace):
 
 # --- refusals ----------------------------------------------------------------
 
-def test_disabled_duty_refuses_and_writes_nothing(cfg, cdir, trace):
-    cfg["duty"]["enabled"] = False
-    res = duty.transfer(cfg, "cli")
-    assert res == {"ok": False, "error": duty.ERR_DISABLED}
-    assert not duty.duty_path(cdir).exists()
-    assert trace == []
-
-
 def test_unknown_shell_refuses(cfg, cdir, trace):
     res = duty.transfer(cfg, "wx")
     assert res["ok"] is False and "wx" in res["error"]
@@ -158,8 +149,8 @@ def test_main_prints_the_outcome_as_json(cfg, cdir, trace, monkeypatch, capsys):
 
 
 def test_main_prints_a_refusal_as_json(cfg, cdir, trace, monkeypatch, capsys):
-    cfg["duty"]["enabled"] = False
+    breaker.trip(cdir, "all", breaker.REASON_MANUAL)
     monkeypatch.setattr(config, "load", lambda *a, **k: cfg)
     assert duty.main(["--transfer", "cli"]) == 0
     out = json.loads(capsys.readouterr().out)
-    assert out == {"ok": False, "error": duty.ERR_DISABLED}
+    assert out == {"ok": False, "error": duty.ERR_BREAKER_HELD}

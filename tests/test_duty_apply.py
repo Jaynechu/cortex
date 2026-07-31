@@ -245,10 +245,35 @@ def test_mode_off_holds_everything_and_kicks_nobody(cfg, cdir, trace):
     assert shell_ledger.state_path(config.shell_state_dir(cfg), "tg").exists() is False
 
 
-def test_repeating_a_mode_kicks_nothing(cfg, cdir, trace):
+def test_repeating_a_mode_kicks_the_named_shell_again(cfg, cdir, trace):
     duty.write(cdir, "cli")
     duty.apply(cfg, "cli")
-    assert _acts(trace) == []
+    assert _acts(trace) == ["wake_cli"]
+
+
+def test_naming_tg_from_a_clean_state_wakes_tg(cfg, cdir, trace):
+    res = duty.apply(cfg, "tg")
+    assert res["woken"] == ["tg"]
+    assert _acts(trace) == ["kick_tg"]
+    assert _ledger(cfg)["next_wake_at"]
+
+
+def test_naming_cli_from_a_clean_state_wakes_cli(cfg, cdir, trace):
+    res = duty.apply(cfg, "cli")
+    assert res["woken"] == ["cli"]
+    assert _acts(trace) == ["wake_cli"]
+
+
+def test_a_repeat_cli_kick_no_ops_on_a_live_awake_window(cfg, cdir, monkeypatch):
+    """The already-awake guard in the cli pipeline is what makes repeat kicks
+    safe — duty must go through it, not around."""
+    from cortex import wake as wake_mod
+    monkeypatch.setattr(wake_mod, "_window_alive", lambda c: True)
+    monkeypatch.setattr(wake_mod, "run_wake",
+                        lambda *a, **k: pytest.fail("re-drove a live window"))
+    wake_state.set_awake(cfg, 1, None)
+    assert duty.apply(cfg, "cli")["woken"] == ["cli"]
+    assert wake_state.load(cfg)["awake"] is True
 
 
 def test_garbage_mode_does_not_raise(cfg, cdir, trace):
@@ -256,12 +281,6 @@ def test_garbage_mode_does_not_raise(cfg, cdir, trace):
     res = duty.apply(cfg, "sideways")
     assert res["hold"] is None
     assert duty.read(cdir)["hold"] is None
-
-
-def test_apply_ignores_the_enabled_flag(cfg, cdir, trace):
-    cfg["duty"]["enabled"] = False
-    duty.write(cdir, "tg")
-    assert duty.apply(cfg, "cli")["woken"] == ["cli"]
 
 
 def test_apply_never_writes_the_breaker(cfg, cdir, trace):

@@ -198,7 +198,6 @@ def test_resume_when_nothing_is_held(cfg):
 
 @pytest.fixture
 def duty_cfg(cfg, tmp_path):
-    cfg["duty"]["enabled"] = True
     cfg["paths"]["transcript_dir"] = str(tmp_path / "transcript")
     return cfg
 
@@ -235,13 +234,12 @@ def test_duty_mode_survives_a_round_trip_through_main(duty_cfg, cdir, kicks,
     assert "duty: mode=tg hold=cli" in capsys.readouterr().out
 
 
-def test_duty_disabled_errors_without_touching_state(cfg, cdir):
-    breaker.pause(cfg, "all")
-    line, code = ctl.cmd_duty(cfg, "tg")
-    assert code == 1
-    assert "duty disabled" in line
-    assert duty.duty_path(cdir).exists() is False
-    assert breaker.read(cdir)["scope"] == "all"
+def test_duty_names_the_on_duty_shell_and_kicks_it(duty_cfg, cdir, kicks,
+                                                   stub_cli_wake):
+    line, code = ctl.cmd_duty(duty_cfg, "tg")
+    assert code == 0 and "woken=tg" in line
+    assert kicks == [(str(config.shell_socket_path(duty_cfg, "tg")), "tg")]
+    assert stub_cli_wake == []
 
 
 def test_duty_clears_the_breaker_and_applies_once(duty_cfg, cdir, kicks,

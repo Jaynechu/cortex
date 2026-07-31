@@ -58,7 +58,6 @@ _HOLD_BY_MODE = {
 
 CLEAR = {"mode": MODE_ALL, "hold": None, "ts": ""}
 
-ERR_DISABLED = "duty disabled"
 ERR_BREAKER_HELD = ("breaker held - transfer never clears it; "
                     "release it with /ct-duty <mode>")
 
@@ -171,15 +170,16 @@ def held_shells(hold: str | None) -> frozenset[str]:
 
 def apply(cfg: dict, mode: str, *, now: datetime | None = None) -> dict:
     """Move duty to `mode` and act on the change: the new hold lands on disk
-    FIRST, then a shell newly under it is put down, and only then is a released
-    shell woken — so no instant exists where both shells are active. The
-    incoming shell passes the fresh-vs-resume gate ([duty] thresholds) on its
-    way up.
+    FIRST, then a shell newly under it is put down, and only then is every
+    shell the hold leaves free woken — so no instant exists where both shells
+    are active. The incoming shell passes the fresh-vs-resume gate ([duty]
+    thresholds) on its way up.
 
-    Mode "all" kicks both shells whatever stood before (an explicit "run
-    everything" must not depend on the previous hold); "off" holds both and
-    kicks nothing. Callers own the [duty].enabled check and mode validation —
-    an unknown mode writes through as a no-hold state rather than raising."""
+    The kick does not depend on the previous state: naming a shell means "that
+    one is on duty, wake it NOW", so repeating a mode kicks it again (the cli
+    already-awake guard and the idempotent tg booking make that safe). "off"
+    holds both and kicks nothing. Callers own mode validation — an unknown mode
+    writes through as a no-hold state rather than raising."""
     now = now or datetime.now(config.get_tz(cfg))
     config_dir = config.marrow_config_dir(cfg)
     before = held_shells(read(config_dir)["hold"])
@@ -187,10 +187,7 @@ def apply(cfg: dict, mode: str, *, now: datetime | None = None) -> dict:
     after = held_shells(state["hold"])
 
     put_down = SHELL_CLI in (after - before) and _put_down_cli(cfg)
-    if str(mode).strip().lower() == MODE_ALL:
-        waking = frozenset(SHELLS)
-    else:
-        waking = before - after
+    waking = frozenset(SHELLS) - after
     fresh = []
     for shell in SHELLS:
         if shell not in waking:
@@ -317,8 +314,6 @@ def transfer(cfg: dict, shell: str) -> dict:
 
     A standing breaker.json refuses: a manual/fuse pause outranks a rotation,
     and transfer must never clear it (only an explicit ctl duty does)."""
-    if not (cfg.get("duty") or {}).get("enabled"):
-        return {"ok": False, "error": ERR_DISABLED}
     target = other_shell(shell)
     if target is None:
         return {"ok": False, "error": f"unknown shell: {shell}"}

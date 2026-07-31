@@ -240,8 +240,6 @@ def cmd_duty(cfg: dict, mode: str) -> tuple[str, int]:
     if target not in duty.MODES:
         return (f"duty: unknown mode {mode!r} — choose "
                 f"{'|'.join(duty.MODES)}", 1)
-    if not (cfg.get("duty") or {}).get("enabled"):
-        return ("duty disabled — set [duty].enabled = true in cortex.toml", 1)
     prefix = "breaker cleared; " if breaker.release(cfg, None) else ""
     r = duty.apply(cfg, target)
     woken = ", ".join(f"{s} fresh" if s in r["fresh"] else s

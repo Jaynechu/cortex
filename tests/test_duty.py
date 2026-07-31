@@ -133,7 +133,6 @@ def test_holds_sees_the_duty_hold(tmp_path):
 def test_duty_config_defaults(tmp_path):
     cfg = config.load(path=tmp_path / "no-such.toml")
     assert cfg["duty"] == {
-        "enabled": False,
         "fresh_token_threshold": 80000,
         "fresh_age_hours": 8,
     }
@@ -141,8 +140,7 @@ def test_duty_config_defaults(tmp_path):
 
 def test_duty_config_overrides(tmp_path):
     p = tmp_path / "cortex.toml"
-    p.write_text("[duty]\nenabled = true\nfresh_age_hours = 3\n", encoding="utf-8")
+    p.write_text("[duty]\nfresh_age_hours = 3\n", encoding="utf-8")
     cfg = config.load(path=p)
-    assert cfg["duty"]["enabled"] is True
     assert cfg["duty"]["fresh_age_hours"] == 3
     assert cfg["duty"]["fresh_token_threshold"] == 80000

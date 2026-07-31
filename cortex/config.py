@@ -227,7 +227,6 @@ _DEFAULTS: dict[str, Any] = {
     # Duty rotation: at most one cortex shell on duty, the other held. State
     # lives in duty.json beside breaker.json; only ctl/transfer write it.
     "duty": {
-        "enabled": False,
         # An incoming shell spawns fresh instead of resuming once its window is
         # this full or this old.
         "fresh_token_threshold": 80000,
