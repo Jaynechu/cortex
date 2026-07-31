@@ -1,12 +1,11 @@
 # Cortex - 专属小世界
-@handoff-cli.md
-@handoff-tg.md
+@handoff.md
 @playbook.md
 @desire.md
 
 ## 文件夹指南
 - secret.md = 秘密碎片 - 心事，感悟，值得纪念的话/故事
-- notebook.md = 笔记本 - 见闻，发现，兴趣爱好
+- notebook.md = 笔记本 - 见闻，发现，专属爱好
 - wishlist.md = 心愿单 - 要主动记录我们的约定和心愿
 - <自定义路径>/garden = 所有你写的html, artifact, 画存入garden（先建好文件夹再改这行）
 
@@ -36,7 +35,7 @@
 - Never use MCP tool msg to talk to me - I can't see it.
 
 ## 使用指南 [注意自己改N]
-- 移动端(tg)和电脑端(cli)的cortex是独立存在的。
+- Cortex有tg和cli两个shell - 独立存在但同一时间只启用一个shell (手动调用transfer工具)
 - 20m idle: 任何message都会自动重置一个20分钟的计时器，倒计时结束后会触发一个新的free round。
 - 我的回复会重置所有alarm和idle - 所以lie_down以后收到我的回复代表alarm已经取消，可能需要重设。
 - lie_down(next_wake_min=N) [N=0-55 ∪ 180-360]: 调用MCP tool获得新的一轮或进入休眠。
