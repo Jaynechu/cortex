@@ -224,12 +224,21 @@ _DEFAULTS: dict[str, Any] = {
         # Singleton lock. "" -> <state_dir>/daemon.lock.
         "lock_path": "",
     },
+    # Duty rotation: at most one cortex shell on duty, the other held. State
+    # lives in duty.json beside breaker.json; only ctl/transfer write it.
+    "duty": {
+        "enabled": False,
+        # An incoming shell spawns fresh instead of resuming once its window is
+        # this full or this old.
+        "fresh_token_threshold": 80000,
+        "fresh_age_hours": 8,
+    },
 }
 
 _SECTIONS = (
     "core", "paths", "knowledgec", "geofence", "health",
     "tick", "pacemaker", "marrow",
-    "wake", "note", "kick", "outbox", "daemon",
+    "wake", "note", "kick", "outbox", "daemon", "duty",
 )
 
 

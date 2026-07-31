@@ -141,11 +141,15 @@ def read(config_dir: Path | str) -> dict | None:
 
 
 def covers(config_dir: Path | str, shell: str) -> bool:
-    """Does the breaker hold `shell` down right now?"""
+    """Is `shell` held down right now — by the manual/fuse breaker scope OR by
+    the duty rotation hold? The two files are independent: duty never writes
+    breaker.json, so enforcement takes their union."""
+    target = str(shell).strip().lower()
     state = read(config_dir)
-    if state is None:
-        return False
-    return state["scope"] in (SCOPE_ALL, str(shell).strip().lower())
+    if state is not None and state["scope"] in (SCOPE_ALL, target):
+        return True
+    from cortex import duty
+    return duty.covers(config_dir, target)
 
 
 def _union(current: str | None, scope: str) -> str:

@@ -233,3 +233,11 @@ reconcile_interval_sec = 60    # reconcile cadence (also the scheduler's max sle
 safety_horizon_sec = 300       # business re-arm gap when nothing is pending
 retry_interval_sec = 60        # business re-arm gap after a held/failed fire (anti-spin)
 lock_path = ""                 # singleton lock; "" -> <cortex_home>/state/daemon.lock
+
+# Duty rotation — at most one cortex shell on duty, the other held. State lives
+# in duty.json beside breaker.json (mode = intent, hold = pause scope);
+# enforcement takes the union of breaker.json and that hold.
+[duty]
+enabled = false                # master switch for the duty layer
+fresh_token_threshold = 80000  # incoming shell spawns fresh (not resumed) above this window occupancy
+fresh_age_hours = 8            # …or when its last activity is older than this
