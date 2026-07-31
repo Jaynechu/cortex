@@ -922,17 +922,6 @@ def test_loc_duration_formatting(cfg):
     assert note._loc_duration(timedelta(minutes=135)) == "2h15m"
 
 
-def test_render_location_stale_no_signal(cfg, tmp_path, monkeypatch):
-    stale_last_seen = (NOW - timedelta(hours=26)).replace(tzinfo=None).isoformat()
-    _write_location(tmp_path, monkeypatch, {
-        "zone": "Deakin", "since": "2026-07-08T07:00:00", "seeded": False,
-        "prev": None, "last_seen": stale_last_seen,
-    })
-    loc = note._location(cfg)
-    text = note.render(cfg, NOW, {"location": loc})
-    assert "📍 Deakin (no signal 26h)" in text
-
-
 def test_render_locked_header_shape_tag_then_location_then_merged_line(cfg):
     """The exact locked header (coordinator spec): machine tag, then 📍, then
     one merged "🐆 Cortex last wake ... | 💻 Mac is Active ..." line — no

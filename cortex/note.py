@@ -554,26 +554,14 @@ def _loc_duration(delta: timedelta) -> str:
 
 
 def _render_location(cfg: dict, now: datetime, loc: dict) -> str | None:
-    """The 📍 line (plan ct-location-sensor T5, 7 locked shapes). Priority:
-    stale signal loss > cold-start seed > out (leave, no zone) > arrived (with
-    or without a prior hop). Any field the locked shapes don't cover -> no
-    line — never invent a time or zone."""
+    """The 📍 line (plan ct-location-sensor T5, 6 locked shapes). Priority:
+    cold-start seed > out (leave, no zone) > arrived (with or without a prior
+    hop). Any field the locked shapes don't cover -> no line — never invent a
+    time or zone."""
     zone = loc.get("zone")
     since = loc.get("since")
     seeded = bool(loc.get("seeded"))
     prev = loc.get("prev") if isinstance(loc.get("prev"), dict) else None
-    last_seen = loc.get("last_seen")
-
-    if last_seen:
-        try:
-            elapsed = now - _parse_local(last_seen, cfg)
-        except (TypeError, ValueError):
-            elapsed = None
-        if elapsed is not None and elapsed.total_seconds() > 24 * 3600:
-            name = zone or (prev.get("zone") if prev else None)
-            if not name:
-                return None
-            return f"📍 {name} (no signal {int(elapsed.total_seconds() // 3600)}h)"
 
     if zone and seeded and not since:
         return f"📍 {zone}"
