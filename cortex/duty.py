@@ -174,7 +174,8 @@ def held_shells(hold: str | None) -> frozenset[str]:
 # --- transition ----------------------------------------------------------
 
 def apply(cfg: dict, mode: str, *, now: datetime | None = None,
-          after_hold=None) -> dict:
+          after_hold=None, source: str | None = None,
+          from_shell: str | None = None) -> dict:
     """Move duty to `mode` and act on the change: the new hold lands on disk
     FIRST, then a shell newly under it is put down, and only then is every
     shell the hold leaves free woken — so no instant exists where both shells
@@ -195,7 +196,12 @@ def apply(cfg: dict, mode: str, *, now: datetime | None = None,
     one is on duty, wake it NOW", so repeating a mode kicks it again (the cli
     already-awake guard and the idempotent tg booking make that safe). "off"
     holds both and kicks nothing. Callers own mode validation — an unknown mode
-    writes through as a no-hold state rather than raising."""
+    writes through as a no-hold state rather than raising.
+
+    `source` (wake_source.KIND_*) labels the rotation: each woken shell gets the
+    matching [duty] line staged before its kick, and its own wakeup note renders
+    it on the way in. `from_shell` fills the transfer line's origin. Left unset
+    (an auto wake) nothing is staged and the note reads exactly as before."""
     now = now or datetime.now(config.get_tz(cfg))
     config_dir = config.marrow_config_dir(cfg)
     fresh = []
@@ -211,6 +217,7 @@ def apply(cfg: dict, mode: str, *, now: datetime | None = None,
         for shell in SHELLS:
             if shell not in waking:
                 continue
+            _stage_source(cfg, shell, state["hold"], source, from_shell)
             woke_fresh = (_wake_tg(cfg, now) if shell == SHELL_TG
                           else _wake_cli(cfg, now))
             if woke_fresh:
@@ -219,6 +226,19 @@ def apply(cfg: dict, mode: str, *, now: datetime | None = None,
             "put_down": put_down,
             "woken": [s for s in SHELLS if s in waking],
             "fresh": fresh}
+
+
+def _stage_source(cfg: dict, shell: str, hold: str | None,
+                  source: str | None, from_shell: str | None) -> None:
+    """Park the rotation's source line for `shell` BEFORE its kick — the tg host
+    and the marrow injection hook both render the note as their first act on
+    waking, so a line staged afterwards would miss its own round."""
+    if not source:
+        return
+    from cortex import wake_source
+
+    wake_source.stage(cfg, shell, wake_source.render(
+        cfg, source, shell=shell, hold=hold, from_shell=from_shell))
 
 
 def _put_down_cli(cfg: dict) -> bool:
@@ -294,7 +314,12 @@ def _wake_cli(cfg: dict, now: datetime) -> bool:
 
     fresh = _cli_needs_fresh(cfg, now)
     if fresh:
-        wake_state.set_retired_sid(cfg, wake_state.load(cfg).get("transcript"))
+        # Only a real pointer may be recorded. Passing None through would CLEAR
+        # a retired_sid a previous rotate had already put there, un-retiring a
+        # session every resume path is meant to stay off.
+        retiring = wake_state.load(cfg).get("transcript")
+        if retiring:
+            wake_state.set_retired_sid(cfg, retiring)
         wake_state.set_rotated(cfg)
     ctl._wake_cli(cfg)
     return fresh
@@ -338,9 +363,12 @@ def transfer(cfg: dict, shell: str) -> dict:
         return {"ok": False, "error": f"unknown shell: {shell}"}
     if breaker.read(config.marrow_config_dir(cfg)) is not None:
         return {"ok": False, "error": ERR_BREAKER_HELD}
-    out = apply(cfg, target)
-    return {"ok": True, "shell": str(shell).strip().lower(),
-            "target": target, **out}
+    caller = str(shell).strip().lower()
+    from cortex import wake_source
+
+    out = apply(cfg, target, source=wake_source.KIND_TRANSFER,
+                from_shell=caller)
+    return {"ok": True, "shell": caller, "target": target, **out}
 
 
 def main(argv: list[str] | None = None) -> int:

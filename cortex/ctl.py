@@ -244,7 +244,8 @@ def cmd_duty(cfg: dict, mode: str) -> tuple[str, int]:
         return (f"duty: unknown mode {mode!r} — choose "
                 f"{'|'.join(duty.MODES)}", 1)
     cleared: list[bool] = []
-    r = duty.apply(cfg, target,
+    from cortex import wake_source
+    r = duty.apply(cfg, target, source=wake_source.KIND_CTL,
                    after_hold=lambda: cleared.append(breaker.release(cfg, None)))
     prefix = "breaker cleared; " if any(cleared) else ""
     woken = ", ".join(f"{s} fresh" if s in r["fresh"] else s

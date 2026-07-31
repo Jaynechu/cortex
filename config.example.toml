@@ -240,3 +240,9 @@ lock_path = ""                 # singleton lock; "" -> <cortex_home>/state/daemo
 [duty]
 fresh_token_threshold = 80000  # incoming shell spawns fresh (not resumed) above this window occupancy
 fresh_age_hours = 8            # …or when its last activity is older than this
+# Source line leading the wakeup note of a shell woken BY a duty rotation.
+# {from_shell} = shell the transfer came from, {shell} = shell now on duty,
+# {hold} = the hold it materialised. "" omits the line; auto wakes carry none.
+transfer_source_text = "🔄 transferred from {from_shell} | {shell} on, {hold} hold"
+ctl_source_text = "Kicked by /ct-duty - {shell} on, {hold} hold"
+hold_none_label = "no"         # rendered for {hold} when the mode holds nothing

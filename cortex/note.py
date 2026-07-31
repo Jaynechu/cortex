@@ -621,6 +621,7 @@ def gather(
     claim_ct_notes: bool = True,
     settle: bool = False,
     shell: str | None = None,
+    consume_source: bool = False,
 ) -> dict:
     """Assemble the wakeup note data dict. conn must use sqlite3.Row factory.
     `fresh`/`wake_kind` are accepted for caller compatibility; the handoff
@@ -642,8 +643,12 @@ def gather(
     `shell` (default None = the unqualified/cli render): the shell this note is
     rendered for. It scopes the wake ledger read (ct_wake_log.shell), the
     last-active read (ct_activity for this shell's own claude sid) and the pause
-    tag (breaker scope), so one shell's page never shows another shell's state."""
-    from cortex import wake_state
+    tag (breaker scope), so one shell's page never shows another shell's state.
+
+    `consume_source` (default False = peek): the duty rotation's staged source
+    line is one-shot, so only the render that actually DELIVERS the note takes
+    it. Every other render peeks, and the line survives for the real one."""
+    from cortex import wake_source, wake_state
 
     last_wake = _safe(_last_wake, conn, now, shell)
     last_active = _safe(_last_active, conn, cfg, now, shell)
@@ -694,7 +699,10 @@ def gather(
         # un-injected payload surfaces again — never claims, never settles.
         ct_notes = _peek_ct_notes(cfg, conn)
 
+    src = wake_source.take(cfg, shell) if consume_source else wake_source.peek(cfg, shell)
+
     return {
+        "wake_source": src,
         "kick_reasons": kick_reasons,
         "receipts": receipts,
         "ct_notes": ct_notes,
@@ -712,13 +720,20 @@ def gather(
 def render(cfg: dict, now: datetime, data: dict) -> str:
     """Pure assembly: data dict -> wakeup note text. No DB / no I/O.
 
-    Layout (locked header format): machine tag, then 📍 location (if any),
-    then one merged "🐆 Cortex last wake: ... | 💻 Mac is ..." line, then
+    Layout (locked header format): machine tag, then the duty wake-source line
+    (if any), then 📍 location (if any), then one merged "🐆 Cortex last wake: ... | 💻 Mac is ..." line, then
     `---`-separated blocks for pending self-schedule, then a final turn-end
     reminder line (note.turn_end_text, every render; "" omits it). No "Now:
     HH:MM Ddd" line — the per-turn hook already injects current time. Handoff
     no longer lives here — it is injected at SessionStart on a fresh window."""
     header: list[str] = []
+
+    # Wake-source line (duty rotation only): why THIS shell just came up. Leads
+    # the header so the session reads its trigger before any status line; an
+    # auto wake has none and the header opens as it always did.
+    src = str(data.get("wake_source") or "").strip()
+    if src:
+        header.append(src)
 
     # 📍 location line (ct-location-sensor T5): the first header line, right
     # after the machine-tag line (prepended below) — absent/corrupt

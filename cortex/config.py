@@ -231,6 +231,16 @@ _DEFAULTS: dict[str, Any] = {
         # this full or this old.
         "fresh_token_threshold": 80000,
         "fresh_age_hours": 8,
+        # Source line prepended to the wakeup note of a shell woken BY a duty
+        # rotation, so the session reads why it came up. Placeholders:
+        # {from_shell} = the shell the transfer came from, {shell} = the shell
+        # now on duty, {hold} = the hold the rotation materialised. "" omits the
+        # line; an auto wake carries none of these.
+        "transfer_source_text":
+            "🔄 transferred from {from_shell} | {shell} on, {hold} hold",
+        "ctl_source_text": "Kicked by /ct-duty - {shell} on, {hold} hold",
+        # Rendered for {hold} when the mode holds nothing (mode all).
+        "hold_none_label": "no",
     },
 }
 

@@ -157,6 +157,10 @@ def test_duty_config_defaults(tmp_path):
     assert cfg["duty"] == {
         "fresh_token_threshold": 80000,
         "fresh_age_hours": 8,
+        "transfer_source_text":
+            "🔄 transferred from {from_shell} | {shell} on, {hold} hold",
+        "ctl_source_text": "Kicked by /ct-duty - {shell} on, {hold} hold",
+        "hold_none_label": "no",
     }
 
 
