@@ -34,9 +34,43 @@ from cortex import (breaker, config, db, duty, occupancy, shell_ledger,
 
 TG_SHELL = "tg"
 
+_WORLD_SHELLS = ("cli", "tg")
+_ICON_DUTY_HOLD = "❌"     # only /ct-duty releases it
+_ICON_BREAKER = "⏸️"  # /ct-pause resume releases it
+_ICON_FREE = "✅"
+
 
 def _now(cfg: dict) -> datetime:
     return datetime.now(config.get_tz(cfg))
+
+
+def render_world_line(duty_hold: str | None, breaker_scope: str | None) -> str:
+    """Per-shell effective state, pure over the two enforcement files' scopes —
+    no io, so pause/resume/status can share it and tests can hit every combo
+    without touching disk. Icon priority per shell: a duty hold (❌, only
+    /ct-duty releases it) beats a breaker scope (⏸️, /ct-pause resume releases
+    it) beats free (✅). A hint is appended when no shell renders ✅."""
+    parts = []
+    any_free = False
+    for shell in _WORLD_SHELLS:
+        if duty_hold in (duty.HOLD_ALL, shell):
+            icon = _ICON_DUTY_HOLD
+        elif breaker_scope in (breaker.SCOPE_ALL, shell):
+            icon = _ICON_BREAKER
+        else:
+            icon = _ICON_FREE
+            any_free = True
+        parts.append(f"{shell} {icon}")
+    line = "duty: " + " / ".join(parts)
+    if not any_free:
+        line += " → no shell on duty, /ct-duty cli|tg to start one"
+    return line
+
+
+def _world_line(cfg: dict) -> str:
+    duty_hold = duty.read(config.marrow_config_dir(cfg))["hold"]
+    st = breaker.state(cfg)
+    return render_world_line(duty_hold, st["scope"] if st else None)
 
 
 def cmd_wake(cfg: dict, shell: str = breaker.SCOPE_ALL) -> str:
@@ -175,7 +209,10 @@ def cmd_pause(cfg: dict, shell: str | None = None) -> str:
     second pause never releases the shell the first one holds. Persistent: only
     ctl wake / ctl resume / ct-duty releases it."""
     scope = (shell or breaker.SCOPE_ALL).strip().lower()
-    state = breaker.pause(cfg, scope)
+    targets = frozenset(_WORLD_SHELLS) if scope == breaker.SCOPE_ALL else {scope}
+    held = duty.held_shells(duty.read(config.marrow_config_dir(cfg))["hold"])
+    already_held = targets.issubset(held)
+    breaker.pause(cfg, scope)
     # Silent: a manual pause is a deliberate human action already known to the
     # caller — no tg receipt. Only an auto trip (watchdog fuse) announces on
     # tg and writes an alert row (see breaker.trip_message / watchdog._fuse).
@@ -191,8 +228,9 @@ def cmd_pause(cfg: dict, shell: str | None = None) -> str:
             extra = "; live cli window put down"
         except Exception as e:  # noqa: BLE001 — the breaker stands regardless
             extra = f"; live cli window still up ({e})"
-    return (f"pause: breaker ON scope={state['scope']} — cortex autonomous "
-            f"activity held until ct-duty{extra}")
+    label = "all" if scope == breaker.SCOPE_ALL else scope
+    note = " (duty already holds it)" if already_held else ""
+    return f"{_ICON_BREAKER} {label} paused{note}{extra} · {_world_line(cfg)}"
 
 
 def _book_cli_alarm(cfg: dict) -> bool:
@@ -217,16 +255,15 @@ def cmd_resume(cfg: dict, shell: str | None = None) -> str:
     st = breaker.state(cfg)
     if not released:
         if shell and st is not None:
-            return (f"resume: breaker holds scope={st['scope']} only — "
-                    f"{shell} was not held")
-        return "resume: breaker already clear — nothing held"
+            action = (f"resume: breaker holds scope={st['scope']} only — "
+                      f"{shell} was not held")
+        else:
+            action = "resume: breaker already clear — nothing held"
+        return f"{action} · {_world_line(cfg)}"
     tail = ("; cli alarm booked now"
             if shell in (None, "cli") and _book_cli_alarm(cfg) else "")
-    if st is not None:
-        return (f"resume: breaker OFF for {shell} — "
-                f"still ON scope={st['scope']}{tail}")
-    return ("resume: breaker OFF — overdue ledger alarms fire on the next "
-            f"reconcile{tail}")
+    label = "all" if shell is None else shell
+    return f"▶️ {label} resumed{tail} · {_world_line(cfg)}"
 
 
 def cmd_duty(cfg: dict, mode: str) -> tuple[str, int]:
@@ -264,7 +301,8 @@ def cmd_status(cfg: dict) -> str:
                 f"since={st['ts']}")
     duty_state = duty.read(config.marrow_config_dir(cfg))
     d = wake_state.load(cfg)
-    return (f"{line} | duty: mode={duty_state['mode']} "
+    world = render_world_line(duty_state["hold"], st["scope"] if st else None)
+    return (f"{world} | {line} | duty: mode={duty_state['mode']} "
             f"hold={duty_state['hold'] or '-'} "
             f"| awake={bool(d.get('awake'))} "
             f"next_wake_at={d.get('next_wake_at') or '-'} "

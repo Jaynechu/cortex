@@ -139,7 +139,7 @@ def test_pause_merges_instead_of_replacing(cfg, cdir):
     ctl.cmd_pause(cfg, "cli")
     line = ctl.cmd_pause(cfg, "tg")
     assert breaker.read(cdir)["scope"] == "all"
-    assert "scope=all" in line
+    assert "duty: cli ⏸️ / tg ⏸️" in line
 
 
 def test_pause_one_shell_leaves_scope_all_alone(cfg, cdir):
@@ -156,7 +156,7 @@ def test_resume_cli_books_a_due_now_alarm(cfg):
     assert wake_state.get_next_wake_at(cfg) is None
     line = ctl.cmd_resume(cfg, "cli")
     assert wake_state.get_next_wake_at(cfg)
-    assert line.endswith("; cli alarm booked now")
+    assert "; cli alarm booked now" in line
 
 
 def test_resume_cli_keeps_an_armed_alarm(cfg):
@@ -191,7 +191,9 @@ def test_resume_never_writes_an_outbox_receipt(cfg):
 
 
 def test_resume_when_nothing_is_held(cfg):
-    assert ctl.cmd_resume(cfg) == "resume: breaker already clear — nothing held"
+    line = ctl.cmd_resume(cfg)
+    assert line.startswith("resume: breaker already clear — nothing held · ")
+    assert "duty: cli ✅ / tg ✅" in line
 
 
 # --- duty ---------------------------------------------------------------------
@@ -315,3 +317,79 @@ def test_status_shows_the_current_duty_mode_and_hold(duty_cfg, kicks,
                                                      stub_cli_wake):
     ctl.cmd_duty(duty_cfg, "tg")
     assert "duty: mode=tg hold=cli" in ctl.cmd_status(duty_cfg)
+
+
+def test_status_leads_with_the_world_line(cfg):
+    assert ctl.cmd_status(cfg).startswith("duty: cli ✅ / tg ✅ | breaker: clear")
+
+
+# --- pause/resume note the duty layer underneath -------------------------------
+
+def test_pause_notes_when_duty_already_holds_the_shell(duty_cfg, kicks,
+                                                        stub_cli_wake):
+    ctl.cmd_duty(duty_cfg, "tg")  # holds cli
+    line = ctl.cmd_pause(duty_cfg, "cli")
+    assert "(duty already holds it)" in line
+    assert "duty: cli ❌" in line
+
+
+def test_pause_no_note_when_duty_does_not_hold_the_shell(cfg):
+    line = ctl.cmd_pause(cfg, "cli")
+    assert "(duty already holds it)" not in line
+
+
+def test_resume_when_duty_still_covers_the_shell_has_no_extra_text(
+        duty_cfg, kicks, stub_cli_wake):
+    ctl.cmd_duty(duty_cfg, "tg")  # holds cli
+    ctl.cmd_pause(duty_cfg, "cli")
+    line = ctl.cmd_resume(duty_cfg, "cli")
+    assert line.startswith("▶️ cli resumed")
+    assert "duty: cli ❌" in line
+
+
+# --- render_world_line ----------------------------------------------------------
+
+_HOLD_VALUES = (None, "cli", "tg", "all")
+
+
+@pytest.mark.parametrize("duty_hold", _HOLD_VALUES)
+@pytest.mark.parametrize("breaker_scope", _HOLD_VALUES)
+def test_render_world_line_every_combo(duty_hold, breaker_scope):
+    line = ctl.render_world_line(duty_hold, breaker_scope)
+    assert line.startswith("duty: cli ")
+    any_free = False
+    for shell in ("cli", "tg"):
+        if duty_hold in ("all", shell):
+            icon = "❌"
+        elif breaker_scope in ("all", shell):
+            icon = "⏸️"
+        else:
+            icon = "✅"
+            any_free = True
+        assert f"{shell} {icon}" in line
+    if any_free:
+        assert "no shell on duty" not in line
+    else:
+        assert line.endswith("→ no shell on duty, /ct-duty cli|tg to start one")
+
+
+def test_render_world_line_duty_beats_breaker():
+    assert ctl.render_world_line("cli", "cli") == "duty: cli ❌ / tg ✅"
+
+
+def test_render_world_line_breaker_alone():
+    assert ctl.render_world_line(None, "tg") == "duty: cli ✅ / tg ⏸️"
+
+
+def test_render_world_line_free_shell_suppresses_the_hint():
+    assert ctl.render_world_line("cli", None) == "duty: cli ❌ / tg ✅"
+
+
+def test_render_world_line_hint_when_nothing_is_free():
+    assert ctl.render_world_line("cli", "tg") == (
+        "duty: cli ❌ / tg ⏸️ → no shell on duty, /ct-duty cli|tg to start one")
+
+
+def test_render_world_line_all_holds_everything():
+    assert ctl.render_world_line("all", None) == (
+        "duty: cli ❌ / tg ❌ → no shell on duty, /ct-duty cli|tg to start one")

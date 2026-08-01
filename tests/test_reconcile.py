@@ -594,7 +594,7 @@ def test_ctl_resume_single_shell_matching_scope_clears(cfg):
     breaker.pause(cfg, "tg")
     line = ctl.cmd_resume(cfg, "tg")
     assert breaker.state(cfg) is None
-    assert "breaker OFF" in line and "still ON" not in line
+    assert "tg resumed" in line and "still ON" not in line
 
 
 def test_ctl_resume_single_shell_other_scope_is_a_noop(cfg):
