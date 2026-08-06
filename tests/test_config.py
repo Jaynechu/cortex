@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from cortex import config
 
 
@@ -188,3 +190,68 @@ def test_watchdog_noops_when_cli_shell_off(tmp_path, monkeypatch):
 
     monkeypatch.setattr(watchdog.wake_state, "watchdog_pidfile_path", _boom)
     assert watchdog.main([]) == 0
+
+
+# --- silence bar: one default, three call sites -------------------------------
+
+def _stub_silence_boundaries(monkeypatch, wake_state, transcript):
+    monkeypatch.setattr(wake_state, "current_epoch", lambda c: (1, "sid"))
+    monkeypatch.setattr(wake_state, "peek_kick_round", lambda c: False)
+    monkeypatch.setattr(wake_state, "load", lambda c: {"awake": True})
+    monkeypatch.setattr(wake_state, "silence_basis_min", lambda c, m: m)
+    monkeypatch.setattr(wake_state, "conditional_mutate", lambda c, t, m: True)
+    monkeypatch.setattr(transcript, "user_silent_min", lambda c: 0.0)
+
+
+@pytest.mark.parametrize("bar", [55, 20, 37])
+def test_silence_bar_resolves_from_one_default(tmp_path, monkeypatch, bar):
+    """[wake.watchdog].silent_max_min is the single source: moving that default
+    moves the note clamps, the daemon deadline and the watchdog gate together —
+    no call site may carry its own fallback literal."""
+    from cortex import daemon, transcript, wake_state, watchdog
+
+    monkeypatch.setitem(config._DEFAULTS["wake"]["watchdog"], "silent_max_min", bar)
+    cfg = config.load(tmp_path / "none.toml")
+    assert cfg["wake"]["watchdog"]["silent_max_min"] == bar
+    assert config.silent_max_min(cfg) == float(bar)
+
+    assert config.wake_clamps(cfg)["silent_max_min"] == bar
+
+    _stub_silence_boundaries(monkeypatch, wake_state, transcript)
+    assert daemon.silence_due_in(cfg, {"awake": True}) == pytest.approx(bar * 60.0)
+
+    assert watchdog.silence_action(cfg, bar - 1.0, allow_tuck=False) is None
+    assert watchdog.silence_action(cfg, float(bar), allow_tuck=False) == \
+        "free-round appended"
+
+
+def test_watchdog_defaults_take_a_partial_user_block(tmp_path):
+    """A user [wake.watchdog] setting only its own keys keeps the silence-bar
+    default; setting the bar overrides it."""
+    partial = tmp_path / "partial.toml"
+    partial.write_text("[wake.watchdog]\npoll_sec = 5\nfuse_tokens = 123\n")
+    cfg = config.load(partial)
+    assert cfg["wake"]["watchdog"]["poll_sec"] == 5
+    assert cfg["wake"]["watchdog"]["fuse_tokens"] == 123
+    assert config.silent_max_min(cfg) == \
+        float(config._DEFAULTS["wake"]["watchdog"]["silent_max_min"])
+
+    override = tmp_path / "override.toml"
+    override.write_text("[wake.watchdog]\nsilent_max_min = 7\n")
+    cfg = config.load(override)
+    assert config.silent_max_min(cfg) == 7.0
+    assert config.wake_clamps(cfg)["silent_max_min"] == 7
+
+
+def test_default_sleep_min_resolves_from_the_default(tmp_path, monkeypatch):
+    """occupancy.schedule_next_wake reads [wake].default_sleep_min through the
+    same single default — no duplicate literal."""
+    from datetime import datetime, timedelta
+
+    from cortex import occupancy
+
+    monkeypatch.setitem(config._DEFAULTS["wake"], "default_sleep_min", 33)
+    cfg = config.load(tmp_path / "none.toml")
+    now = datetime(2026, 1, 1, 12, 0)
+    assert occupancy.schedule_next_wake(now, cfg) == now + timedelta(minutes=33)
+    assert occupancy.schedule_next_wake(now, {}) == now + timedelta(minutes=33)

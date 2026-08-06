@@ -442,7 +442,6 @@ def silence_action(cfg: dict, silent_min: float, *, allow_tuck: bool = True) -> 
     An external kick carrier (kick.py mark_kick_round) short-circuits the
     silent_min gate and fires the injection immediately, then re-arms the same
     cycle. Returns an action label for logging, or None (keep waiting)."""
-    wcfg = cfg["wake"].get("watchdog", {})
     # Capture the epoch at the START of the silence decision (BUG B): if a
     # lie_down / user reset bumps gen between here and the commit, the commit is
     # dropped so no line is appended after the session already slept.
@@ -484,7 +483,7 @@ def silence_action(cfg: dict, silent_min: float, *, allow_tuck: bool = True) -> 
         #              idle cycle does not tick underneath it
     silent_min = wake_state.silence_basis_min(cfg, silent_min)
 
-    silent_max = float(wcfg.get("silent_max_min", 55))
+    silent_max = config.silent_max_min(cfg)
     if silent_min < silent_max:
         return None
     last_at = st.get("tuck_pending")

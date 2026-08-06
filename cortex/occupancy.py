@@ -228,7 +228,7 @@ def schedule_next_wake(now: datetime, config: dict,
     pass lie-down time as `now` on the wake path (C-wm: the clock runs from
     lie-down, not wake)."""
     if minutes is None:
-        minutes = config.get("wake", {}).get("default_sleep_min", 55)
+        minutes = _config.default_sleep_min(config)
     return now + timedelta(minutes=minutes)
 
 

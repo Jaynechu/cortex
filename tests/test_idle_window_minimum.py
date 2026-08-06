@@ -60,7 +60,7 @@ def awake(cfg, monkeypatch):
 
 
 def _silent_max(cfg) -> float:
-    return float(cfg["wake"].get("watchdog", {}).get("silent_max_min", 55))
+    return config.silent_max_min(cfg)
 
 
 def _minutes_ago(mins: float) -> str:
