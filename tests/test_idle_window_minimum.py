@@ -60,7 +60,7 @@ def awake(cfg, monkeypatch):
 
 
 def _silent_max(cfg) -> float:
-    return float(cfg["wake"].get("watchdog", {}).get("silent_max_min", 20))
+    return float(cfg["wake"].get("watchdog", {}).get("silent_max_min", 55))
 
 
 def _minutes_ago(mins: float) -> str:
@@ -136,9 +136,10 @@ def test_user_message_restarts_the_full_window(awake, typed):
     user_replied + last_user_msg_ts stamped): the next fire is a FULL window
     away, not immediate."""
     cfg = awake
+    over = _silent_max(cfg) + 20
     wake_state.update(cfg, user_replied_this_wake=True,
-                      last_user_msg_ts=_minutes_ago(40),
-                      tuck_pending=_minutes_ago(40))
+                      last_user_msg_ts=_minutes_ago(over),
+                      tuck_pending=_minutes_ago(over))
     wake_state.set_next_wake_at(cfg, _minutes_ago(5))
     # --- the marrow hook write, byte-for-byte (marrow edits this file directly,
     # its venv cannot import cortex) ---
@@ -151,7 +152,7 @@ def test_user_message_restarts_the_full_window(awake, typed):
         wake_state._save(cfg, d)
 
     assert wake_state.get_next_wake_at(cfg) is None      # alarm cancelled
-    assert watchdog.silence_action(cfg, silent_min=40.0) is None  # basis reset
+    assert watchdog.silence_action(cfg, silent_min=over) is None  # basis reset
     assert typed == []
     assert daemon.silence_due_in(cfg, wake_state.load(cfg)) == pytest.approx(
         _silent_max(cfg) * 60, abs=5)
@@ -163,18 +164,19 @@ def test_interrupted_delivery_is_still_consumed(awake, monkeypatch):
     """esc / no resident window -> the injection fails, but the round is already
     accounted: no retry, no re-fire inside the window."""
     cfg = awake
+    over = _silent_max(cfg) + 20
     wake_state.update(cfg, user_replied_this_wake=True,
-                      last_user_msg_ts=_minutes_ago(40))
+                      last_user_msg_ts=_minutes_ago(over))
     monkeypatch.setattr(window, "inject_prompt",
                         lambda c, text: (_ for _ in ()).throw(
                             window.WindowError("esc interrupted")))
 
-    assert watchdog.silence_action(cfg, silent_min=40.0) == "free-round appended"
+    assert watchdog.silence_action(cfg, silent_min=over) == "free-round appended"
     stamped = wake_state.load(cfg).get("tuck_pending")
     assert stamped is not None  # ledger advanced despite the failed delivery
 
     # Same poll conditions a second later -> held, and the stamp is untouched.
-    assert watchdog.silence_action(cfg, silent_min=41.0) is None
+    assert watchdog.silence_action(cfg, silent_min=over + 1) is None
     assert wake_state.load(cfg).get("tuck_pending") == stamped
     assert daemon.silence_due_in(cfg, wake_state.load(cfg)) == pytest.approx(
         _silent_max(cfg) * 60, abs=5)

@@ -922,6 +922,110 @@ def test_loc_duration_formatting(cfg):
     assert note._loc_duration(timedelta(minutes=135)) == "2h15m"
 
 
+def test_loc_duration_day_tier(cfg):
+    assert note._loc_duration(timedelta(hours=23, minutes=59)) == "23h59m"
+    assert note._loc_duration(timedelta(hours=24)) == "1d0h"
+    assert note._loc_duration(timedelta(hours=50, minutes=35)) == "2d2h"
+    assert note._loc_duration(timedelta(days=3, hours=2, minutes=40)) == "3d2h"
+
+
+def test_render_location_under_threshold_keeps_hop_trail(cfg, tmp_path, monkeypatch):
+    """20h in the zone is under location_hop_max_hours -> full hop trail."""
+    _write_location(tmp_path, monkeypatch, {
+        "zone": "Home", "since": "2026-07-07T18:30:00", "seeded": False,
+        "prev": {"event": "leave", "zone": "Deakin", "ts": "2026-07-07T18:00:00"},
+        "last_seen": "2026-07-08T14:00:00",
+    })
+    text = note.render(cfg, NOW, {"location": note._location(cfg)})
+    assert "📍 Tue 18:00 Left Deakin → Tue 18:30 Arrived Home (20h0m)" in text
+
+
+def test_render_location_over_threshold_collapses(cfg, tmp_path, monkeypatch):
+    """Past the threshold the arrival time AND the prior hop both go."""
+    _write_location(tmp_path, monkeypatch, {
+        "zone": "Home", "since": "2026-07-07T13:30:00", "seeded": False,
+        "prev": {"event": "leave", "zone": "Deakin", "ts": "2026-07-07T13:00:00"},
+        "last_seen": "2026-07-08T14:00:00",
+    })
+    text = note.render(cfg, NOW, {"location": note._location(cfg)})
+    assert "📍 Home (1d1h)" in text
+    assert "Deakin" not in text
+    assert "Arrived" not in text
+
+
+def test_render_location_collapses_multi_day(cfg, tmp_path, monkeypatch):
+    _write_location(tmp_path, monkeypatch, {
+        "zone": "Home", "since": "2026-07-05T12:30:00", "seeded": False,
+        "prev": {"event": "leave", "zone": "Deakin", "ts": "2026-07-05T12:00:00"},
+        "last_seen": "2026-07-08T14:00:00",
+    })
+    text = note.render(cfg, NOW, {"location": note._location(cfg)})
+    assert "📍 Home (3d2h)" in text
+
+
+def test_render_location_collapse_without_prev(cfg, tmp_path, monkeypatch):
+    _write_location(tmp_path, monkeypatch, {
+        "zone": "Home", "since": "2026-07-05T12:30:00", "seeded": False,
+        "prev": None, "last_seen": "2026-07-08T14:00:00",
+    })
+    text = note.render(cfg, NOW, {"location": note._location(cfg)})
+    assert "📍 Home (3d2h)" in text
+
+
+def test_render_location_out_branch_never_collapses(cfg, tmp_path, monkeypatch):
+    """Outside every known zone for days IS the signal — keep the full shape."""
+    _write_location(tmp_path, monkeypatch, {
+        "zone": None, "since": "2026-07-05T12:30:00", "seeded": False,
+        "prev": {"event": "enter", "zone": "Home", "ts": "2026-07-05T09:00:00"},
+        "last_seen": "2026-07-08T14:00:00",
+    })
+    text = note.render(cfg, NOW, {"location": note._location(cfg)})
+    assert "📍 Sun 12:30 Left Home (3d2h)" in text
+
+
+def test_render_location_hop_max_zero_disables_collapse(cfg, tmp_path, monkeypatch):
+    cfg["note"]["location_hop_max_hours"] = 0
+    _write_location(tmp_path, monkeypatch, {
+        "zone": "Home", "since": "2026-07-05T12:30:00", "seeded": False,
+        "prev": {"event": "leave", "zone": "Deakin", "ts": "2026-07-05T12:00:00"},
+        "last_seen": "2026-07-08T14:00:00",
+    })
+    text = note.render(cfg, NOW, {"location": note._location(cfg)})
+    assert "📍 Sun 12:00 Left Deakin → Sun 12:30 Arrived Home (3d2h)" in text
+
+
+def test_render_location_hop_max_custom_threshold(cfg, tmp_path, monkeypatch):
+    cfg["note"]["location_hop_max_hours"] = 2
+    _write_location(tmp_path, monkeypatch, {
+        "zone": "Deakin", "since": "2026-07-08T12:15:00", "seeded": False,
+        "prev": {"event": "leave", "zone": "Home", "ts": "2026-07-08T08:30:00"},
+        "last_seen": "2026-07-08T14:00:00",
+    })
+    text = note.render(cfg, NOW, {"location": note._location(cfg)})
+    assert "📍 Deakin (2h15m)" in text
+
+
+def test_render_location_hop_max_invalid_falls_back_to_24(cfg, tmp_path, monkeypatch):
+    cfg["note"]["location_hop_max_hours"] = "later"
+    _write_location(tmp_path, monkeypatch, {
+        "zone": "Home", "since": "2026-07-05T12:30:00", "seeded": False,
+        "prev": {"event": "leave", "zone": "Deakin", "ts": "2026-07-05T12:00:00"},
+        "last_seen": "2026-07-08T14:00:00",
+    })
+    text = note.render(cfg, NOW, {"location": note._location(cfg)})
+    assert "📍 Home (3d2h)" in text
+
+
+def test_render_location_collapse_never_invents_on_bad_since(cfg, tmp_path, monkeypatch):
+    _write_location(tmp_path, monkeypatch, {
+        "zone": "Home", "since": "not-a-timestamp", "seeded": False,
+        "prev": {"event": "leave", "zone": "Deakin", "ts": "2026-07-05T12:00:00"},
+        "last_seen": "2026-07-08T14:00:00",
+    })
+    text = note.render(cfg, NOW, {"location": note._location(cfg)})
+    assert "📍" not in text
+
+
 def test_render_locked_header_shape_tag_then_location_then_merged_line(cfg):
     """The exact locked header (coordinator spec): machine tag, then 📍, then
     one merged "🐆 Cortex last wake ... | 💻 Mac is Active ..." line — no

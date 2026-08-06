@@ -546,18 +546,33 @@ def _loc_hm(ts_iso: str, now: datetime, cfg: dict) -> str:
 
 
 def _loc_duration(delta: timedelta) -> str:
-    """<60m -> `45m`; else `2h15m`."""
+    """<60m -> `45m`; <24h -> `2h15m`; else `2d2h` (minutes dropped at that scale)."""
     minutes = max(0, int(delta.total_seconds() // 60))
     if minutes < 60:
         return f"{minutes}m"
-    return f"{minutes // 60}h{minutes % 60}m"
+    hours = minutes // 60
+    if hours < 24:
+        return f"{hours}h{minutes % 60}m"
+    return f"{hours // 24}d{hours % 24}h"
+
+
+def _loc_hop_max_hours(cfg: dict) -> float:
+    """Hours in the current zone after which the arrival line collapses to zone +
+    duration. 0 = never collapse; missing/invalid -> 24."""
+    try:
+        value = float(_note_cfg(cfg).get("location_hop_max_hours", 24))
+    except (TypeError, ValueError):
+        return 24.0
+    return value if value >= 0 else 24.0
 
 
 def _render_location(cfg: dict, now: datetime, loc: dict) -> str | None:
     """The 📍 line (plan ct-location-sensor T5, 6 locked shapes). Priority:
     cold-start seed > out (leave, no zone) > arrived (with or without a prior
-    hop). Any field the locked shapes don't cover -> no line — never invent a
-    time or zone."""
+    hop). Past [note].location_hop_max_hours in the current zone the arrival line
+    collapses to zone + duration (the prior hop and arrival time carry nothing by
+    then); the out shape never collapses. Any field the locked shapes don't cover
+    -> no line — never invent a time or zone."""
     zone = loc.get("zone")
     since = loc.get("since")
     seeded = bool(loc.get("seeded"))
@@ -579,10 +594,14 @@ def _render_location(cfg: dict, now: datetime, loc: dict) -> str | None:
     if not since:
         return None
     try:
+        elapsed = now - _parse_local(since, cfg)
         hm = _loc_hm(since, now, cfg)
-        dur = _loc_duration(now - _parse_local(since, cfg))
+        dur = _loc_duration(elapsed)
     except (TypeError, ValueError):
         return None
+    hop_max = _loc_hop_max_hours(cfg)
+    if hop_max and elapsed.total_seconds() >= hop_max * 3600:
+        return f"📍 {zone} ({dur})"
     cur_hop = f"{hm} Arrived {zone}"
     if prev and prev.get("zone") and prev.get("ts"):
         try:

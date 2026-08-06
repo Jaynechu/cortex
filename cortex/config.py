@@ -28,7 +28,7 @@ DEFAULT_CORTEX_HOME = Path.home() / ".config" / "marrow" / "cortex"
 DEFAULT_NY_DB_PAGES = Path.home() / "Desktop" / "NY" / "db-pages"
 DEFAULT_MARROW_REPO = Path.home() / "CC-Lab" / "marrow"
 DEFAULT_WAKE_TIMING_LOG = Path.home() / ".config" / "marrow" / "logs" / "wake_timing.log"
-DEFAULT_AWAY_IDLE_MIN = 20
+DEFAULT_AWAY_IDLE_MIN = 30
 
 # Single source of truth for the machine-line marker family (wake bell /
 # free-round / fuse / ctl / slash-command). Referenced by _DEFAULTS below AND
@@ -100,7 +100,7 @@ _DEFAULTS: dict[str, Any] = {
         # Cross-repo interval contract — keep these three equal:
         # [wake.watchdog].silent_max_min here, this key, and synapse tg
         # [cortex].shell_idle_min.
-        "default_sleep_min": 20,
+        "default_sleep_min": 55,
         # Throttle (minutes) on the wake_state lock give-up alert — one row per
         # window however many times the lock is lost.
         "lock_alert_throttle_min": 60,
@@ -180,6 +180,10 @@ _DEFAULTS: dict[str, Any] = {
         "title": "",
         # Pending self-schedule entries surface only when due within this window.
         "pending_window_min": 15,
+        # Hours in the current zone after which the 📍 arrival line drops the
+        # prior hop and the arrival time, leaving zone + duration. 0 = always
+        # keep the full hop trail. The "out" shape (no zone) never collapses.
+        "location_hop_max_hours": 24,
         # Appended to the "🐆 Cortex last wake: …" line while the circuit
         # breaker covers THIS shell (scope all/<shell>). {reason} = manual /
         # auto_fuse, {scope} = all / cli / tg. "" omits the tag.
@@ -274,7 +278,7 @@ def away_idle_min(cfg: dict) -> int:
     """Minutes of HID idle before the wake note reports Away.
 
     The shared marrow config's [cortex] section is the single source; missing,
-    unreadable, or invalid values fall back to 20 minutes.
+    unreadable, or invalid values fall back to 30 minutes.
     """
     p = marrow_config_dir(cfg) / "config.toml"
     try:
@@ -308,7 +312,7 @@ def wake_clamps(cfg: dict) -> dict[str, int]:
         "next_wake_low_max": int(w.get("next_wake_low_max", 55)),
         "next_wake_high_min": int(w.get("next_wake_high_min", 180)),
         "next_wake_max": int(w.get("next_wake_max", 360)),
-        "silent_max_min": int(wd.get("silent_max_min", 20)),
+        "silent_max_min": int(wd.get("silent_max_min", 55)),
     }
 
 

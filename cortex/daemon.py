@@ -69,7 +69,7 @@ def silence_due_in(cfg: dict, st: dict) -> float | None:
     if st.get("next_wake_at"):
         return None  # mutual exclusion: an armed alarm owns the deadline, idle
         #              does not tick underneath it
-    silent_max = float(cfg["wake"].get("watchdog", {}).get("silent_max_min", 20))
+    silent_max = float(cfg["wake"].get("watchdog", {}).get("silent_max_min", 55))
     silent_min = wake_state.silence_basis_min(cfg, transcript.user_silent_min(cfg))
     wait = silent_max - silent_min
     last = st.get("tuck_pending")

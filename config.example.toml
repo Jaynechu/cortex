@@ -114,7 +114,7 @@ next_wake_high_min = 180
 # Minutes until the next wake when no caller picked one (proxy lie_down, daemon/
 # ctl/reconcile re-arm after a failed round). Cross-repo interval contract: keep
 # equal to [wake.watchdog].silent_max_min and synapse tg [cortex].shell_idle_min.
-default_sleep_min = 20
+default_sleep_min = 55
 lock_alert_throttle_min = 60 # max one wake_state lock give-up alert per this many minutes
 # Free-round line typed into the window at every silence-cycle injection
 # (last line of the block, after the freshly rendered note). MUST contain the
@@ -136,7 +136,7 @@ ctl_sleep_marker = "⚙️ [CTL]"
 # Per-wake watchdog thresholds (spawned at injection, killed at lie_down).
 [wake.watchdog]
 poll_sec = 60
-silent_max_min = 20            # silence cycle (same bar for chat or no-user wake): at this silence, inject one free-round note + marker, then re-arm the same timer
+silent_max_min = 55            # silence cycle (same bar for chat or no-user wake): at this silence, inject one free-round note + marker, then re-arm the same timer
 fuse_tokens = 300000           # window tokens >= this -> esc + proxy lie_down (fuse); marrow's soft nudge (cortex_rotate.show_tokens) fires first
 # Process-level hard interrupt (SIGINT), a guaranteed esc-equivalent for when the
 # osascript esc may not land (no window focus). Fires after esc on the fuse
@@ -207,6 +207,7 @@ max_reasons = 8                # cap the pending-flag list (stuck bridge guard)
 wake_machine_tag = "[AUTOMATED WAKE SIGNAL — Note delivered by the scheduler]"
 title = ""                   # first line of the wakeup note, e.g. a nickname for the note; empty hides it
 pending_window_min = 15      # surface a self-schedule entry only when due within this window
+location_hop_max_hours = 24  # hours in the current zone after which the 📍 arrival line collapses to "zone (duration)", dropping the prior hop and the arrival time; 0 keeps the full hop trail. The "out" shape (outside every zone) never collapses
 pause_tag = "(paused: {reason})"  # appended to the "🐆 Cortex last wake: …" line while the circuit breaker covers THIS shell. {reason} = manual/auto_fuse, {scope} = all/cli/tg; "" omits the tag
 handoff_title = "碎碎念"   # title of the handoff-note section (customisable display name)
 handoff_wake_kinds = ["rotate"]  # wake kinds that get the handoff (fresh window only)

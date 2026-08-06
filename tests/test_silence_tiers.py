@@ -26,6 +26,8 @@ def cfg(tmp_path):
     c["paths"]["marrow_db"] = str(tmp_path / "marrow.db")
     c["paths"]["self_schedule_file"] = str(home / "self_schedule.json")
     c["paths"]["transcript_dir"] = str(tmp_path / "transcript")
+    # Pin the gate so these cases exercise the cycle logic, not the shipped default.
+    c["wake"].setdefault("watchdog", {})["silent_max_min"] = 20
     return c
 
 

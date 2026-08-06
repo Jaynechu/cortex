@@ -484,7 +484,7 @@ def silence_action(cfg: dict, silent_min: float, *, allow_tuck: bool = True) -> 
         #              idle cycle does not tick underneath it
     silent_min = wake_state.silence_basis_min(cfg, silent_min)
 
-    silent_max = float(wcfg.get("silent_max_min", 20))
+    silent_max = float(wcfg.get("silent_max_min", 55))
     if silent_min < silent_max:
         return None
     last_at = st.get("tuck_pending")

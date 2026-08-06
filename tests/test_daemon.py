@@ -187,7 +187,7 @@ def test_awake_never_wakes_and_kick_round_is_silence(cfg):
 def test_silence_due_in_counts_down_from_awake_since(cfg):
     wake_state.set_awake(cfg, 1, None)
     st = wake_state.load(cfg)
-    silent_max = float(cfg["wake"].get("watchdog", {}).get("silent_max_min", 20))
+    silent_max = float(cfg["wake"].get("watchdog", {}).get("silent_max_min", 55))
     assert daemon.silence_due_in(cfg, st) == pytest.approx(silent_max * 60, abs=5)
     assert daemon.silence_due_in(cfg, {}) is None
 
