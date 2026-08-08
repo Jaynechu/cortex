@@ -3,7 +3,7 @@ control via iTerm2 AppleScript (works while the screen is locked — no keyboard
 simulation). Primitives: ensure_window, respawn (fresh window with the emoji +
 bell-marker wake prompt baked in as its first prompt, see fresh_initial_prompt),
 type_wake_signal (the typed bell for an already-running resident window),
-deliver_covert_marker, send_esc, say, hard_interrupt (process-level SIGINT
+deliver_covert_marker, send_esc, hard_interrupt (process-level SIGINT
 fallback when esc alone may not land, e.g. no focus). A fresh window wakes
 silently — the baked-in prompt is the only trace, no notification, but carries
 the same bell as a typed wake so the marrow UserPromptSubmit hook detects it
@@ -76,7 +76,8 @@ def _activate_bid(bid: str | None) -> None:
 
 def _guard_focus(prev: str | None) -> None:
     """`write text` intermittently raises the iTerm window. If it grabbed focus
-    from another app, hand focus back. Only say() is allowed to front cortex."""
+    from another app, hand focus back — cortex is never allowed to deliberately
+    front itself."""
     if not prev or prev == _ITERM_BID:
         return
     if _frontmost_bid() == _ITERM_BID:
@@ -754,52 +755,3 @@ def hard_interrupt(cfg: dict) -> int | None:
     return pid
 
 
-def say(cfg: dict, note: str | None = None) -> None:
-    """开口 primitive: the attention signal. Fronts the resident cortex iTerm
-    window and plays a sound (the words themselves are the normal in-window
-    reply). This is the SOLE place cortex is allowed to take keyboard focus —
-    every other path guards focus. `note` is accepted for CLI/API symmetry but
-    the words live in the window; only the sound + front happen here."""
-    _play_sound(cfg.get("wake", {}).get("say_sound", ""))
-    _bring_to_front(wake_state.get_session_id(cfg))
-
-
-def _play_sound(name: str) -> None:
-    """Play a named macOS system sound (afplay on the .aiff under System/Library
-    Sounds); empty name -> silent. Best-effort, never raises."""
-    if not name:
-        return
-    path = f"/System/Library/Sounds/{name}.aiff"
-    try:
-        subprocess.Popen(["afplay", path],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except OSError:
-        pass
-
-
-def _bring_to_front(sid: str | None) -> None:
-    """Opt-in only: front the cortex window (the sole allowed activate of it)."""
-    if not sid:
-        return
-    script = f'''
-tell application "{_APP}"
-  activate
-  repeat with w in windows
-    repeat with t in tabs of w
-      repeat with s in sessions of t
-        if (id of s) is "{sid}" then
-          select w
-          tell t to select
-          tell s to select
-          return "ok"
-        end if
-      end repeat
-    end repeat
-  end repeat
-end tell
-return "no"
-'''
-    try:
-        _osa(script)
-    except WindowError:
-        pass

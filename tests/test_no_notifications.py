@@ -1,7 +1,6 @@
-"""Repo guard: macOS notifications are banned in cortex. The ONLY permitted
-attention-getter is bringing the iTerm window to the front (say() = sound +
-front). An osascript `display notification` has crept back before; enforcement
-lives here (CI), not in docs — a source scan fails if any cortex/ file contains
+"""Repo guard: macOS notifications are banned in cortex. An osascript
+`display notification` has crept back before; enforcement lives here (CI),
+not in docs — a source scan fails if any cortex/ file contains
 `display notification`."""
 from __future__ import annotations
 
@@ -22,4 +21,4 @@ def test_no_display_notification_in_source():
             offenders.append(str(path))
     assert not offenders, (
         f"macOS notifications are banned in cortex — {_BANNED!r} found in: "
-        f"{offenders}. Use say() (bring iTerm to front) instead.")
+        f"{offenders}. Bring the iTerm window to front instead.")

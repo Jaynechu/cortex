@@ -62,8 +62,7 @@ _DEFAULTS: dict[str, Any] = {
     # freshly spawned window — JUST an emoji so nothing readable shows in the
     # user's face; the full wake instructions are injected by marrow's
     # UserPromptSubmit hook when this exact emoji is submitted in a cortex
-    # window (the note path itself is read from config, not this prompt);
-    # say_sound = the sound say() plays when it fronts the window.
+    # window (the note path itself is read from config, not this prompt).
     "wake": {
         # Auto-adopt a cortex window the user opened `claude` in herself (in
         # cortex_home) but never registered: the daemon reconcile records it as
@@ -87,7 +86,6 @@ _DEFAULTS: dict[str, Any] = {
         # Receipt time-to-live (minutes): the consumer ignores a pending receipt
         # older than this, and the producer overwrites it on every new bell.
         "receipt_ttl_min": 15,
-        "say_sound": "Glass",
         # lie_down(next_wake_min=N) legal minutes: two bands, every hour —
         # [0, next_wake_low_max] and [next_wake_high_min, next_wake_max]
         # (0 = immediate re-wake). The gap between the bands is unselectable:
