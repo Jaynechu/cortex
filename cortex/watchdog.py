@@ -167,11 +167,15 @@ def _verify_esc_or_hard_interrupt(cfg: dict, grace_sec: float, trigger: str) -> 
 
 
 def _announce_trip(cfg: dict, message: str) -> None:
-    """A tripped breaker must reach the human: a marrow `alerts` row (surfaced
-    on the monitor page) plus a pending outbox note for the tg bridge to
-    deliver. Both are raw writes into marrow.db — the same shape cortex already
-    uses for its respawn alert; nothing is imported across repos. Best-effort:
-    a failed announcement must never keep the breaker from standing."""
+    """Record a tripped breaker as a marrow `alerts` row (surfaced on the
+    monitor page) — a raw write into marrow.db, the same shape cortex already
+    uses for its respawn alert; nothing is imported across repos.
+
+    This shell has no channel of its own, so the row is the whole cli-side
+    story. Getting the message to her chat is the tg bridge's job: it watches
+    breaker.json at its own checkpoints and announces a trip it has not seen
+    before (synapse_tg/shell.py). Best-effort: a failed announcement must never
+    keep the breaker from standing."""
     try:
         conn = db.connect(cfg)
     except Exception:  # noqa: BLE001 — db unreachable: the breaker still holds
@@ -185,15 +189,6 @@ def _announce_trip(cfg: dict, message: str) -> None:
         conn.commit()
     except Exception:  # noqa: BLE001 — table may be absent
         _log("breaker trip: alert row write failed")
-    try:
-        conn.execute(
-            "INSERT INTO outbox (from_sid, from_channel, target, body)"
-            " VALUES (?, ?, ?, ?)",
-            (None, "cortex", "tg", message),
-        )
-        conn.commit()
-    except Exception:  # noqa: BLE001 — outbox may be absent
-        _log("breaker trip: outbox note write failed")
     finally:
         with contextlib.suppress(Exception):
             conn.close()

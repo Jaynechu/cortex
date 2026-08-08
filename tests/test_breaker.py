@@ -309,15 +309,15 @@ def test_watchdog_fuse_records_a_fuse_event(cfg, cdir, monkeypatch):
     assert [e["shell"] for e in events] == ["cli"]
 
 
-def test_watchdog_fuse_trip_writes_alert_and_tg_note(cfg, cdir, monkeypatch):
+def test_watchdog_fuse_trip_writes_an_alert_row(cfg, cdir, monkeypatch):
+    """The alert row is this shell's whole announcement — cli has no channel of
+    its own. Getting the message to her chat is the tg bridge's job: it reads
+    breaker.json at its own checkpoints (synapse_tg/shell.py)."""
     from cortex import watchdog
     _stub_fuse_ladder(monkeypatch, cfg)
     conn = db.connect(cfg)
     conn.execute("CREATE TABLE alerts (id INTEGER PRIMARY KEY, severity TEXT,"
                  " type TEXT, message TEXT, source TEXT)")
-    conn.execute("CREATE TABLE outbox (id INTEGER PRIMARY KEY, from_sid TEXT,"
-                 " from_channel TEXT, target TEXT, body TEXT,"
-                 " status TEXT NOT NULL DEFAULT 'pending')")
     conn.commit()
     conn.close()
 
@@ -329,15 +329,37 @@ def test_watchdog_fuse_trip_writes_alert_and_tg_note(cfg, cdir, monkeypatch):
     conn = db.connect(cfg)
     try:
         alert = conn.execute(
-            "SELECT severity, type, message FROM alerts").fetchone()
-        note = conn.execute(
-            "SELECT target, body, status FROM outbox").fetchone()
+            "SELECT severity, type, message, source FROM alerts").fetchone()
     finally:
         conn.close()
     assert alert[0] == "critical" and alert[1] == "cortex_breaker_tripped"
     assert "2" in alert[2]
-    assert note[0] == "tg" and note[2] == "pending"
-    assert note[1] == alert[2]
+    assert alert[3] == "cortex.watchdog"
+
+
+def test_watchdog_trip_writes_nothing_to_the_outbox(cfg, cdir, monkeypatch):
+    """The outbox delivery line is retired: the table may still exist in the
+    schema, but no runtime path writes it."""
+    from cortex import watchdog
+    _stub_fuse_ladder(monkeypatch, cfg)
+    conn = db.connect(cfg)
+    conn.execute("CREATE TABLE alerts (id INTEGER PRIMARY KEY, severity TEXT,"
+                 " type TEXT, message TEXT, source TEXT)")
+    conn.execute("CREATE TABLE outbox (id INTEGER PRIMARY KEY, from_sid TEXT,"
+                 " from_channel TEXT, target TEXT, body TEXT,"
+                 " status TEXT NOT NULL DEFAULT 'pending')")
+    conn.commit()
+    conn.close()
+
+    breaker.record_fuse(cdir, "tg")
+    watchdog._fuse(cfg, grace=0.0)
+
+    conn = db.connect(cfg)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM outbox").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM alerts").fetchone()[0] == 1
+    finally:
+        conn.close()
 
 
 def test_watchdog_fuse_trip_survives_a_missing_db(cfg, cdir, monkeypatch):
@@ -345,7 +367,7 @@ def test_watchdog_fuse_trip_survives_a_missing_db(cfg, cdir, monkeypatch):
     from cortex import watchdog
     _stub_fuse_ladder(monkeypatch, cfg)
     breaker.record_fuse(cdir, "tg")
-    watchdog._fuse(cfg, grace=0.0)  # marrow.db has no alerts/outbox tables
+    watchdog._fuse(cfg, grace=0.0)  # marrow.db has no alerts table
     assert breaker.read(cdir)["reason"] == "auto_fuse"
 
 
