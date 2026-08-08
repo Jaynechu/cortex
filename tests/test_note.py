@@ -70,7 +70,7 @@ def test_render_full_note(cfg):
         "computer": {
             "state": "active", "app": "Google Chrome", "idle_seconds": 60,
         },
-        "pending": [{"hm": "00:18", "intent": "去看看老婆睡了没"}],
+        "pending": [{"hm": "00:18", "intent": "去看看猫睡了没"}],
     }
     text = note.render(cfg, NOW, data)
     assert "Wake:" not in text  # reason line retired
@@ -81,7 +81,7 @@ def test_render_full_note(cfg):
     assert text.split("\n\n---\n\n")[0].split("\n") == [
         "🐆 Cortex last wake: 12m ago | 💻 Mac is Active: Google Chrome",
     ]
-    assert "Pending self-schedule: due 00:18 去看看老婆睡了没" in text
+    assert "Pending self-schedule: due 00:18 去看看猫睡了没" in text
     # block separators
     assert "\n\n---\n\n" in text
     # cal/rem retired

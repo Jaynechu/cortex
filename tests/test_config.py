@@ -86,12 +86,12 @@ def test_user_name_reads_persona_section(tmp_path):
     marrow_cfg.write_text(
         """
 [persona]
-user_name = "念念"
+user_name = "小柚"
 """
     )
     cfg = config.load(tmp_path / "cortex.toml")
     cfg["paths"]["marrow_db"] = str(tmp_path / "marrow.db")
-    assert config.user_name(cfg) == "念念"
+    assert config.user_name(cfg) == "小柚"
 
 
 def test_user_name_falls_back_to_legacy_top_level(tmp_path):
