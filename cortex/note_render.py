@@ -31,9 +31,8 @@ def main() -> None:
     parser.add_argument("--transcript", default=None,
                         help="caller transcript path; stem[:8] -> Window SID")
     parser.add_argument("--no-ct", action="store_true",
-                        help="skip ct-note peek — the marrow hook delivers ct "
-                             "notes via outbox.deliver, so rendering them here "
-                             "would double them in the same payload")
+                        help="accepted and ignored; kept so the live marrow hook "
+                             "and tg bridge command lines keep parsing")
     parser.add_argument("--shell", default=None,
                         help="shell id this note is rendered for; scopes the "
                              "wake ledger read. Unset = the unqualified (cli) "
@@ -55,8 +54,6 @@ def main() -> None:
     try:
         data = note.gather(conn, cfg, now, window_sid=window_sid,
                            shell=args.shell, consume_source=args.mirror)
-        if args.no_ct:
-            data["ct_notes"] = []
         text = note.render(cfg, now, data)
         if args.mirror:
             from cortex import note_file, wake_state

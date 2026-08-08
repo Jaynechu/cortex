@@ -157,7 +157,7 @@ _DEFAULTS: dict[str, Any] = {
     },
     # External-wake (cortex.kick) reason lines rendered as plain lines into the
     # wakeup note (no section header), then cleared on delivery. A bridge/cli
-    # poke appends one; note.py renders + consumes it. {id} = outbox note id;
+    # poke appends one; note.py renders + consumes it. {id} = note id;
     # {text} = her reply body (truncated by the bridge); {minutes} = silence min.
     "kick": {
         "reason_reply": 'Msg #{id} replied: "{text}"',
@@ -191,10 +191,6 @@ _DEFAULTS: dict[str, Any] = {
         # breaker covers THIS shell (scope all/<shell>). {reason} = manual /
         # auto_fuse, {scope} = all / cli / tg. "" omits the tag.
         "pause_tag": "(paused: {reason})",
-        # Reply-receipt line (C11): one per sent note she has replied to since the
-        # last note. {id}/{channel}/{sent_hm}/{replied_hm}/{text} render from the
-        # marrow outbox row at note time. "" omits receipts entirely.
-        "receipt_line": 'Note #{id} ({channel} {sent_hm}): she replied {replied_hm} "{text}"',
         # One-line turn-end reminder appended at the very end of every rendered
         # note. "" omits it (default: the silence cycle + free-round injection
         # already carries this information, no reminder needed).
@@ -203,13 +199,6 @@ _DEFAULTS: dict[str, Any] = {
         # never overwritten). Display text — customise freely.
         "wishlist_header":
             "# Wishlist\n\n(owed treats / wants / self-rewards — append-only)\n",
-    },
-    # Cross-channel note delivery into the cortex window. Header for a ct-targeted
-    # outbox note rendered by the wakeup note (mirror of marrow [outbox].inject_header
-    # — must stay in sync so hook-delivered and note-delivered notes read the same).
-    # {channel}/{sid4}/{time} render from the outbox row. "" = body only.
-    "outbox": {
-        "inject_header": "📮 Message from {channel}·{sid4} {time}",
     },
     # cortex.daemon: the always-on cli timing loop (scheduler-hosted). Owns the
     # reconcile cadence and the business deadline (next_wake_at / silence round).
@@ -254,7 +243,7 @@ _DEFAULTS: dict[str, Any] = {
 _SECTIONS = (
     "core", "paths", "knowledgec", "geofence", "health",
     "tick", "pacemaker", "marrow",
-    "wake", "note", "kick", "outbox", "daemon", "duty",
+    "wake", "note", "kick", "daemon", "duty",
 )
 
 

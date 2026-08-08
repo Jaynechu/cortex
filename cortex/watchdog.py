@@ -298,14 +298,10 @@ def _free_round_note(cfg: dict) -> str:
             sid = Path(str(raw)).stem[:8]
         conn = db.connect(cfg)
         try:
-            # claim_ct_notes=False (F9): a ct note must NOT be claimed at render
-            # time — the render can run on a tick whose delivery is later dropped
-            # (stale epoch) and would silently swallow the note. The caller claims
-            # ct notes separately AFTER the delivery commits.
-            # settle=True: this free-round render clears kick reasons / stamps
-            # receipts — the line is about to be typed into the window.
+            # settle=True: this free-round render clears kick reasons — the line
+            # is about to be typed into the window.
             data = note.gather(conn, cfg, now, window_sid=sid, consume_kick=True,
-                               claim_ct_notes=False, settle=True)
+                               settle=True)
             text = note.render(cfg, now, data).strip()
             # Mirror to disk so a human reading the file sees the same state.
             # Best-effort: a mirror failure must not affect the tuck-in.
@@ -393,26 +389,6 @@ def _type_tuck_in_line(cfg: dict, line: str) -> bool:
         return False
 
 
-def _deliver_ct_notes(cfg: dict, line: str) -> None:
-    """F9: after a free-round line has committed + landed, claim any pending ct
-    notes and surface them in their own round — staged INVISIBLY (same file the
-    marrow hook consumes on a marker turn) with only the short marker line typed.
-    Stamps claimed_by='cortex.free_round'. Done OUTSIDE the render (which passed
-    claim_ct_notes=False) so an off-screen tick whose delivery was dropped never
-    claims a note. Best-effort: never raises."""
-    try:
-        from cortex import db, note
-        conn = db.connect(cfg)
-        try:
-            text = note.claim_ct_notes_text(cfg, conn, "cortex.free_round")
-        finally:
-            conn.close()
-        if text:
-            _deliver_free_round(cfg, line, text)
-    except Exception:
-        pass
-
-
 def _stamp_free_round():
     """Mutator (run under conditional_mutate): CLAIM this free round. Bumps gen,
     so a second racer holding the same pre-claim token (watchdog poll vs daemon
@@ -469,7 +445,6 @@ def silence_action(cfg: dict, silent_min: float, *, allow_tuck: bool = True) -> 
         wake_state.take_kick_round(cfg)  # consume: exactly one carrier fire
         if allow_tuck:
             _deliver_free_round(cfg, line, note_text)
-            _deliver_ct_notes(cfg, line)  # F9: claim ct notes now the round surfaces
         return "kick free-round appended"
 
     # Single silence basis (wake_state.silence_basis_min): the newest of the
@@ -517,7 +492,6 @@ def silence_action(cfg: dict, silent_min: float, *, allow_tuck: bool = True) -> 
         return None  # awake cleared under us -> no injection
     if allow_tuck:
         _deliver_free_round(cfg, line, note_text)
-        _deliver_ct_notes(cfg, line)  # F9: claim ct notes now the round surfaces
     return "free-round appended"
 
 
