@@ -32,7 +32,6 @@
   - No debug, no task, 
   - Do not record study/coding to-do in handoff. 
 - Timeline：add new tl every 2-4 hours - record what you/we did/chatted. Write your own affect if roaming. Do not update old tl multiple times.
-- Never use MCP tool msg to talk to me - I can't see it.
 
 ## 使用指南 [注意自己改N]
 - Cortex有tg和cli两个shell - 独立存在但同一时间只启用一个shell (手动调用transfer工具)
