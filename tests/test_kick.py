@@ -13,6 +13,8 @@ import pytest
 
 from cortex import kick, wake_state
 
+MORNING = "She's up — day mode"
+
 
 @pytest.fixture
 def cfg(tmp_path):
@@ -29,10 +31,7 @@ def cfg(tmp_path):
             "wake_audit_log": str(home / "state" / "wake_audit.log"),
         },
         "kick": {
-            "reason_reply": 'Msg #{id} replied: "{text}"',
-            "reason_timeout": "Msg #{id} no reply in {minutes}min",
-            "reason_morning": "She's up — day mode",
-            "reason_note": "New note #{id}",
+            "reason_morning": MORNING,
             "max_reasons": 8,
         },
     }
@@ -58,57 +57,55 @@ def _audit(cfg) -> str:
 
 def test_kick_asleep_ticks_and_writes_reason(cfg, _stub_spawn):
     wake_state.update(cfg, awake=False, next_wake_at="2026-07-17T09:00:00")
-    r = kick.kick(cfg, "reply", id=7, text="miss you")
+    r = kick.kick(cfg, "morning")
     assert r["ok"] and r["ticked"] and not r["awake"]
     assert r["delivered"] is True
     assert len(_stub_spawn) == 1  # exactly one daemon kick
     d = _ws(cfg)
-    assert d["kick_reasons"] == ['Msg #7 replied: "miss you"']  # config template
+    assert d["kick_reasons"] == [MORNING]   # config template
     assert "next_wake_at" not in d          # ledger cleared
 
 
 def test_kick_bumps_gen_when_asleep(cfg, _stub_spawn):
     wake_state.update(cfg, awake=False, gen=3, state_id="abcd")
-    kick.kick(cfg, "timeout", id=4, minutes=30)
+    kick.kick(cfg, "morning")
     assert _ws(cfg)["gen"] == 4              # cancellation epoch bumped
 
 
 def test_kick_awake_does_not_bump_gen(cfg, _stub_spawn):
     wake_state.update(cfg, awake=True, gen=5, state_id="ef01")
-    kick.kick(cfg, "reply", id=1)
+    kick.kick(cfg, "morning")
     assert _ws(cfg)["gen"] == 5              # awake: no epoch change
 
 
-def test_kind_and_fields_recorded_in_audit(cfg, _stub_spawn):
+def test_kind_recorded_in_audit(cfg, _stub_spawn):
     wake_state.update(cfg, awake=False)
-    kick.kick(cfg, "timeout", id=9, minutes=45)
+    kick.kick(cfg, "morning")
     audit = _audit(cfg)
-    assert "kick" in audit and "timeout" in audit
-    assert "id=9" in audit and "minutes=45" in audit
-    assert _ws(cfg)["kick_reasons"] == ["Msg #9 no reply in 45min"]
+    assert "kick" in audit and "morning" in audit
+    assert _ws(cfg)["kick_reasons"] == [MORNING]
+
+
+def test_unknown_kind_queues_no_reason(cfg, _stub_spawn):
+    # No config template for the kind -> the kick still runs, it just carries
+    # no reason line into the note.
+    wake_state.update(cfg, awake=False)
+    r = kick.kick(cfg, "nosuchkind")
+    assert r["ok"] and r["ticked"]
+    assert "kick_reasons" not in _ws(cfg)
 
 
 def test_reason_list_capped_at_max(cfg, _stub_spawn):
-    # Asleep reply kicks queue kick_reasons (delivered by the wake note); the list
-    # is capped at max_reasons.
+    # Asleep kicks queue kick_reasons (delivered by the wake note); the list is
+    # capped at max_reasons.
     cfg["kick"]["max_reasons"] = 3
-    for i in range(5):
+    for _ in range(5):
         wake_state.update(cfg, awake=False)
-        kick.kick(cfg, "reply", id=i, text="x")
-    reasons = _ws(cfg)["kick_reasons"]
-    assert len(reasons) == 3                          # capped
-    assert reasons[-1] == 'Msg #4 replied: "x"'       # newest kept
+        kick.kick(cfg, "morning")
+    assert len(_ws(cfg)["kick_reasons"]) == 3          # capped
 
 
-def test_asleep_interrupt_queues_reason(cfg, _stub_spawn):
-    wake_state.update(cfg, awake=False)
-    r = kick.kick(cfg, "reply", id=3, text="hi")
-    assert r["ticked"] is True                # asleep path unchanged (ticks)
-    d = _ws(cfg)
-    assert d["kick_reasons"] == ['Msg #3 replied: "hi"']
-
-
-# --- awake kick -> carrier free-round for ALL kinds (replaces retired F3/C2) --
+# --- awake kick -> carrier free-round (replaces retired F3/C2) ---------------
 
 def _assert_carrier(cfg, r, _stub_spawn, expect_reason):
     # Common assertions for an awake kick: queues the reason, marks kick_round,
@@ -122,23 +119,11 @@ def _assert_carrier(cfg, r, _stub_spawn, expect_reason):
     assert d["kick_round"] is True                      # carrier marked
 
 
-def test_awake_reply_opens_carrier(cfg, _stub_spawn):
-    wake_state.update(cfg, awake=True, gen=5, state_id="ef01")
-    r = kick.kick(cfg, "reply", id=7, text="miss you")
-    _assert_carrier(cfg, r, _stub_spawn, 'Msg #7 replied: "miss you"')
-    assert _ws(cfg)["gen"] == 5                          # awake: epoch untouched
-
-
-def test_awake_timeout_opens_carrier(cfg, _stub_spawn):
-    wake_state.update(cfg, awake=True)
-    r = kick.kick(cfg, "timeout", id=4, minutes=30)
-    _assert_carrier(cfg, r, _stub_spawn, "Msg #4 no reply in 30min")
-
-
 def test_awake_morning_opens_carrier(cfg, _stub_spawn):
-    wake_state.update(cfg, awake=True)
+    wake_state.update(cfg, awake=True, gen=5, state_id="ef01")
     r = kick.kick(cfg, "morning")
-    _assert_carrier(cfg, r, _stub_spawn, "She's up — day mode")
+    _assert_carrier(cfg, r, _stub_spawn, MORNING)
+    assert _ws(cfg)["gen"] == 5                          # awake: epoch untouched
 
 
 def test_second_kick_before_carrier_fires_queues_both_no_double_mark(cfg, _stub_spawn):
@@ -146,33 +131,14 @@ def test_second_kick_before_carrier_fires_queues_both_no_double_mark(cfg, _stub_
     # idempotent (no re-stamp, no redundant tick), but its own reason still
     # queues — so the eventual carrier round surfaces both.
     wake_state.update(cfg, awake=True)
-    r1 = kick.kick(cfg, "reply", id=1, text="a")
-    r2 = kick.kick(cfg, "timeout", id=2, minutes=10)
+    r1 = kick.kick(cfg, "morning")
+    r2 = kick.kick(cfg, "morning")
     assert r1["round_opened"] is True   # first kick marks + ticks
     assert r2["round_opened"] is False  # already pending -> no re-mark, no re-tick
     assert len(_stub_spawn) == 1        # only the marking kick spawns a tick
     d = _ws(cfg)
-    assert d["kick_reasons"] == ['Msg #1 replied: "a"', "Msg #2 no reply in 10min"]
+    assert d["kick_reasons"] == [MORNING, MORNING]
     assert d["kick_round"] is True
-
-
-# --- F9: 'note' kind = ct-note drop -> immediate delivery -------------------
-
-def test_note_kind_asleep_wakes(cfg, _stub_spawn):
-    # ct note while asleep -> the note kind wakes cortex (tick + reason queued).
-    wake_state.update(cfg, awake=False, next_wake_at="2026-07-17T09:00:00")
-    r = kick.kick(cfg, "note", id=9)
-    assert r["ok"] and r["ticked"] and not r["awake"]
-    assert len(_stub_spawn) == 1
-    assert _ws(cfg)["kick_reasons"] == ["New note #9"]
-
-
-def test_note_kind_awake_opens_carrier(cfg, _stub_spawn):
-    # ct note while awake -> carrier round (the visible round that renders the
-    # note), reason queued.
-    wake_state.update(cfg, awake=True)
-    r = kick.kick(cfg, "note", id=9)
-    _assert_carrier(cfg, r, _stub_spawn, "New note #9")
 
 
 # --- T11 P4: the daemon socket is the ONLY kick path -------------------------
@@ -187,7 +153,7 @@ def test_kick_daemon_uses_the_socket(cfg, monkeypatch):
         sent["path"], sent["shell"] = str(path), shell
 
     monkeypatch.setattr("synapse_core.scheduler.send_kick", _fake_send_kick)
-    assert kick._kick_daemon(cfg, "reply") is True
+    assert kick._kick_daemon(cfg, "morning") is True
     assert sent["path"] == "/tmp/ct-kick-test.sock"
     assert sent["shell"] == "cli"
 
@@ -199,14 +165,23 @@ def test_kick_daemon_down_is_surfaced_not_swallowed(cfg, monkeypatch, capsys):
         raise FileNotFoundError(path)
 
     monkeypatch.setattr("synapse_core.scheduler.send_kick", _refused)
-    assert kick._kick_daemon(cfg, "reply") is False
+    assert kick._kick_daemon(cfg, "morning") is False
     assert "kick_daemon_unreachable" in _audit(cfg)
     assert "unreachable" in capsys.readouterr().err
 
 
 def test_kick_reports_undelivered_when_daemon_down(cfg, monkeypatch):
-    """The kick result carries delivered=False so the caller (bridge) can see it."""
+    """The kick result carries delivered=False so the caller can see it."""
     monkeypatch.setattr(kick, "_notify_daemon", lambda cfg: False)
     wake_state.update(cfg, awake=False)
     r = kick.kick(cfg, "morning")
     assert r["ok"] is True and r["delivered"] is False
+
+
+def test_cli_rejects_a_retired_kind(cfg, monkeypatch, capsys):
+    """The dead kinds are gone from argparse: a caller still passing one fails
+    loudly instead of queueing a reason nothing renders."""
+    monkeypatch.setattr("cortex.config.load", lambda: cfg)
+    with pytest.raises(SystemExit):
+        kick.main(["--kind", "reply"])
+    assert "invalid choice" in capsys.readouterr().err

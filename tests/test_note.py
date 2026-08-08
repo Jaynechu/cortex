@@ -1020,7 +1020,7 @@ def test_note_render_carries_no_replay(tmp_path, monkeypatch, capsys):
     assert "tg shell self talk" not in out
     # the live tg bridge shape (note_render_cmd) still renders a note body
     out = _render_cli(tmp_path / "shelled", monkeypatch, capsys,
-                      ["--no-ct", "--shell", "tg"])
+                      ["--shell", "tg"])
     assert "AUTOMATED WAKE SIGNAL" in out
     assert "Now:" not in out
     assert "### Replay" not in out

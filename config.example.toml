@@ -183,15 +183,11 @@ usage_snapshot = true          # OAuth usage % snapshot (marrow subprocess) each
 dry_run = true                 # log-only; flip to false only once outbound (C5) lands
 
 # External-wake (cortex.kick) reason lines rendered as plain lines in the wakeup
-# note (no section header), then cleared on delivery. A bridge/cli poke appends
-# one; note.py renders + consumes it. {id} = note id; {text} = her reply
-# body (bridge-truncated); {minutes} = channel silence minutes.
+# note (no section header), then cleared on delivery. A cli poke appends one;
+# note.py renders + consumes it.
 [kick]
-reason_reply = 'Msg #{id} replied: "{text}"'
-reason_timeout = "Msg #{id} no reply in {minutes}min"
 reason_morning = "She's up — day mode"
-reason_note = "New note #{id}"  # F9: ct note dropped -> immediate carrier round
-max_reasons = 8                # cap the pending-flag list (stuck bridge guard)
+max_reasons = 8                # cap the pending-flag list (stuck poker guard)
 
 # Wakeup note knobs. Every line is deterministic now, so the old whole-note
 # max_chars cap is gone; per-source limits below keep each line bounded.

@@ -156,15 +156,11 @@ _DEFAULTS: dict[str, Any] = {
         "dry_run": True,
     },
     # External-wake (cortex.kick) reason lines rendered as plain lines into the
-    # wakeup note (no section header), then cleared on delivery. A bridge/cli
-    # poke appends one; note.py renders + consumes it. {id} = note id;
-    # {text} = her reply body (truncated by the bridge); {minutes} = silence min.
+    # wakeup note (no section header), then cleared on delivery. A cli poke
+    # appends one; note.py renders + consumes it.
     "kick": {
-        "reason_reply": 'Msg #{id} replied: "{text}"',
-        "reason_timeout": "Msg #{id} no reply in {minutes}min",
         "reason_morning": "She's up — day mode",
-        "reason_note": "New note #{id}",
-        # Cap the pending-flag list so a stuck bridge can't grow it unbounded.
+        # Cap the pending-flag list so a stuck poker can't grow it unbounded.
         "max_reasons": 8,
     },
     # Wakeup note knobs. Every field is deterministic now, so the old whole-note

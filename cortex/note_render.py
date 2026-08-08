@@ -30,9 +30,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Print a fresh wakeup note.")
     parser.add_argument("--transcript", default=None,
                         help="caller transcript path; stem[:8] -> Window SID")
-    parser.add_argument("--no-ct", action="store_true",
-                        help="accepted and ignored; kept so the live marrow hook "
-                             "and tg bridge command lines keep parsing")
     parser.add_argument("--shell", default=None,
                         help="shell id this note is rendered for; scopes the "
                              "wake ledger read. Unset = the unqualified (cli) "
